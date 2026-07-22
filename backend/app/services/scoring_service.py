@@ -76,7 +76,7 @@ class WinPatternScorer:
         try:
             features = self._extract_features(contact)
             X = np.array([features])
-            prob = self._model.predict_proba(X)[0][1]  # probability of win
+            prob = self._model.predict_proba(X)[0][1]  # type: ignore
             score = round(prob * 100, 1)
             return score, {"method": "ml_model", "raw_probability": prob}
         except Exception as e:
@@ -170,7 +170,7 @@ async def retrain_model(db_session) -> bool:
     Requires >= 50 closed deals to proceed.
     """
     try:
-        import lightgbm as lgb
+        import lightgbm as lgb  # type: ignore
         from sqlalchemy import select, text
 
         result = await db_session.execute(

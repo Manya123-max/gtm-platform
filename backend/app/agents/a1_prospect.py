@@ -41,7 +41,7 @@ class ProspectAgent:
             if contact.get("win_pattern_score", 0) >= threshold
         ]
 
-        save_result = await self._save_contacts(qualified)
+        save_result = await self._save_contacts(qualified, icp_config.get("user_input_id"))
         reason = self._reason(raw_contacts, scored, qualified, save_result, provider_meta)
 
         await self._log_funnel_event(
@@ -236,7 +236,7 @@ class ProspectAgent:
             scored.append(contact)
         return scored
 
-    async def _save_contacts(self, contacts: List[Dict[str, Any]]) -> Dict[str, Any]:
+    async def _save_contacts(self, contacts: List[Dict[str, Any]], user_input_id: int = None) -> Dict[str, Any]:
         inserted_ids: List[str] = []
         updated_ids: List[str] = []
 
@@ -266,6 +266,8 @@ class ProspectAgent:
                 contact.verified_at = datetime.utcnow()
                 contact.enriched_at = datetime.utcnow()
                 contact.source = "apollo"
+                if user_input_id is not None:
+                    contact.user_input_id = user_input_id
                 updated_ids.append(str(contact.id))
             else:
                 contact = Contact(
@@ -291,6 +293,7 @@ class ProspectAgent:
                     enriched_at=datetime.utcnow(),
                     source="apollo",
                     apollo_id=data.get("apollo_id"),
+                    user_input_id=user_input_id,
                 )
                 self.db.add(contact)
                 await self.db.flush()

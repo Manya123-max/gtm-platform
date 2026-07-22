@@ -5,6 +5,7 @@ import { BarChart, Bar, XAxis, YAxis, Tooltip, ResponsiveContainer, LineChart, L
 import { AlertTriangle, CheckCircle, X, Bot, Play, Loader2, FileText, Clock } from 'lucide-react'
 import { useState, useEffect } from 'react'
 import { useLocation } from 'react-router-dom'
+import { useSession } from '../context/SessionContext'
 
 function RiskBadge({ score }) {
   if (score >= 0.6) return <span className="badge badge-red">High Risk</span>
@@ -13,8 +14,15 @@ function RiskBadge({ score }) {
 }
 
 export function Deals() {
-  const { data: deals = [], isLoading } = useQuery({ queryKey: ['deals'], queryFn: fetchDeals })
-  const { data: summary = [] } = useQuery({ queryKey: ['pipeline-summary'], queryFn: fetchPipelineSummary })
+  const { activeSessionId } = useSession()
+  const { data: deals = [], isLoading } = useQuery({
+    queryKey: ['deals', activeSessionId],
+    queryFn: () => fetchDeals(activeSessionId != null ? { user_input_id: activeSessionId } : {})
+  })
+  const { data: summary = [] } = useQuery({
+    queryKey: ['pipeline-summary', activeSessionId],
+    queryFn: () => fetchPipelineSummary(activeSessionId)
+  })
   const { data: actions = [] } = useQuery({ queryKey: ['pending-actions'], queryFn: fetchPendingActions })
   const qc = useQueryClient()
 
@@ -623,7 +631,11 @@ export function Agents() {
 
 // ── Outreach Page ─────────────────────────────────────────────────────────
 export function Outreach() {
-  const { data: drafts = [] } = useQuery({ queryKey: ['drafts'], queryFn: fetchDrafts })
+  const { activeSessionId } = useSession()
+  const { data: drafts = [] } = useQuery({
+    queryKey: ['drafts', activeSessionId],
+    queryFn: () => fetchDrafts(activeSessionId),
+  })
 
   return (
     <div className="max-w-4xl mx-auto">
@@ -663,9 +675,14 @@ export function Outreach() {
 // ── Content Page ──────────────────────────────────────────────────────────
 export function Content() {
   const [format, setFormat] = useState('')
+  const { activeSessionId } = useSession()
   const { data: content = [] } = useQuery({
-    queryKey: ['content', format],
-    queryFn: () => fetchContent({ format: format || undefined, limit: 30 }),
+    queryKey: ['content', format, activeSessionId],
+    queryFn: () => fetchContent({
+      format: format || undefined,
+      limit: 30,
+      ...(activeSessionId != null ? { user_input_id: activeSessionId } : {}),
+    }),
   })
 
   const formats = ['linkedin_post','email_sequence','case_study','blog_article','sales_deck_outline']

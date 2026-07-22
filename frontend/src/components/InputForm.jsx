@@ -62,7 +62,7 @@ function InputForm() {
             });
 
             setTimeout(() => {
-                navigate('/agents');
+                navigate('/agents', { state: { runId: data.workflow_run_id } });
             }, 1500);
         } catch (err) {
             console.error('Submit failed:', err);

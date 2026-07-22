@@ -8,9 +8,11 @@ import hashlib
 from contextlib import asynccontextmanager
 from typing import Dict, Any
 
+
 from fastapi import FastAPI, Request, HTTPException, Depends, BackgroundTasks
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
+from pydantic import BaseModel
 import structlog
 
 from app.core.config import settings
@@ -54,6 +56,41 @@ app.add_middleware(
 
 # ── API Routes ────────────────────────────────────────────────────────────
 app.include_router(api_router, prefix="/api/v1")
+
+
+# ── Input Schema (new) ───────────────────────────────────────────────────
+
+class InputData(BaseModel):
+    company_name: str
+    company_size: str
+    services: str
+    location: str
+    job_title: str
+    keywords: str
+
+
+@app.post("/submit-input")
+async def submit_input(data: InputData):
+    """
+    Accepts structured company/lead input from the frontend and persists it.
+    """
+    from app.core.database import AsyncSessionLocal
+    from app.models.models import UserInput
+
+    async with AsyncSessionLocal() as db:
+        record = UserInput(
+            company_name=data.company_name,
+            company_size=data.company_size,
+            services=data.services,
+            location=data.location,
+            job_title=data.job_title,
+            keywords=data.keywords,
+        )
+        db.add(record)
+        await db.commit()
+        await db.refresh(record)
+
+    return {"message": "Input received", "id": record.id}
 
 
 # ── Webhook Routes ────────────────────────────────────────────────────────

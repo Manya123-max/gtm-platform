@@ -9,13 +9,13 @@ File	Why it changed
 `backend/app/services/llm_service.py`	Updated Sonnet model to `claude-sonnet-4-6`; httpx timeout raised to 60 s
 `backend/app/core/config.py`	Apollo `APOLLO_SEARCH_MAX_PAGES` raised 10 → 25 for Org tier
 `backend/.env.example`	Updated template with paid-subscription notes and step-by-step flags guide
-
+---
 Prerequisites
 Tool	Version
 Docker + Docker Compose	≥ 24
 Node.js (for frontend rebuild only)	≥ 20
 Python	3.11+
-
+---
 Quick Start — Docker Compose (recommended)
 1. Drop the updated files into place
 ```
@@ -131,7 +131,7 @@ Step 5 — Go live
 ```bash
 DRY_RUN_OUTREACH=false
 ```
-
+---
 Apollo Organization Tier — what you get
 Setting	Free	Organization
 `APOLLO_SEARCH_MAX_PAGES`	10	25 (now default)
@@ -140,13 +140,13 @@ Bulk enrichment	✗	✓
 Sequence automation	✗	✓
 No code changes needed — A1 already calls bulk enrichment when it's available.
 The increased page limit is set automatically via `config.py`.
-
+---
 Claude model reference
 Agent task	Model used
 Scoring, classification (A1, A2)	`claude-haiku-4-5-20251001`
 Email drafting (A3), Content (A6)	`claude-sonnet-4-6` (`use_sonnet=True`)
 Deal analysis (A5), Forecast narrative (A7)	`claude-sonnet-4-6`
-
+---
 Stopping services
 ```bash
 docker compose down             # stop containers, keep volumes

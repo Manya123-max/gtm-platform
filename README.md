@@ -1,6 +1,6 @@
 4CECloud Labs — GTM Multi-Agent Platform
 > **7-Agent Engine** · FastAPI + Celery · React + Vite · PostgreSQL + Redis
----
+
 What's in the update package
 File	Why it changed
 `frontend/src/index.css`	4CECloud Labs brand palette (deep navy + electric blue + cyan)

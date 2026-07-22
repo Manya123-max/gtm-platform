@@ -22,7 +22,7 @@ services:
       - pgdata:/var/lib/postgresql/data
     #  - ./backend/scripts/init_db.sql:/docker-entrypoint-initdb.d/init.sql
     ports:
-      - "5432:5432"
+      - "5433:5432"
     # Memory limit — prevents OOM on low-RAM machines
     mem_limit: 512m
     healthcheck:
@@ -148,7 +148,7 @@ services:
     container_name: gtm_frontend
     restart: unless-stopped
     ports:
-      - "3000:3000"
+      - "3003:3000"
 #    environment:
 #      VITE_API_URL: http://localhost:8000
     depends_on:

@@ -28,6 +28,7 @@ RULE_WEIGHTS = {
         "director of sales": 15, "vp sales": 18, "sales director": 14,
         "revenue operations": 14, "revops": 14, "ceo": 12, "founder": 10,
         "sales manager": 8, "account executive": 6,
+        "engineer": 15, "developer": 15, "architect": 15, "programmer": 15,
     },
     "company_size": {
         "1-10": 5, "11-50": 10, "51-200": 18, "201-500": 20,

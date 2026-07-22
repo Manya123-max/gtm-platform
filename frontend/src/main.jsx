@@ -9,6 +9,7 @@ import Dashboard from './pages/Dashboard'
 import Contacts from './pages/Contacts'
 import ContactDetail from './pages/ContactDetail'
 import { Deals, Outreach, Content, Revenue, Agents } from './pages/index'
+import InputForm from './components/InputForm'
 
 const qc = new QueryClient({
   defaultOptions: { queries: { staleTime: 30_000, retry: 1 } }
@@ -30,6 +31,7 @@ ReactDOM.createRoot(document.getElementById('root')).render(
               <Route path="outreach"     element={<Outreach />} />
               <Route path="content"      element={<Content />} />
               <Route path="revenue"      element={<Revenue />} />
+              <Route path="input"        element={<InputForm />} />
             </Route>
           </Routes>
         </BrowserRouter>

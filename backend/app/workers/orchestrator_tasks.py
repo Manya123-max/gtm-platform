@@ -100,15 +100,31 @@ def run_agent_node(
                     if isinstance(cfg_value, dict):
                         cfg: Dict[str, Any] = dict(cfg_value)
                     else:
-                        cfg = {
-                            # Empty titles keep manual test runs broad.
-                            "titles": [],
-                            "employee_ranges": [
-                                "11,200",
-                                "201,1000",
-                            ],
-                            "limit": 10,
-                        }
+                        from app.models.models import UserInput
+                        stmt = select(UserInput).order_by(UserInput.id.desc()).limit(1)
+                        res = await db.execute(stmt)
+                        user_input = res.scalars().first()
+                        if user_input:
+                            titles = [t.strip() for t in user_input.job_title.split(",") if t.strip()]
+                            geographies = [g.strip() for g in user_input.location.split(",") if g.strip()]
+                            size = user_input.company_size.replace("-", ",").strip()
+                            employee_ranges = [size] if size else ["11,200"]
+                            cfg = {
+                                "titles": titles,
+                                "geographies": geographies,
+                                "employee_ranges": employee_ranges,
+                                "limit": 10,
+                            }
+                        else:
+                            cfg = {
+                                # Empty titles keep manual test runs broad.
+                                "titles": [],
+                                "employee_ranges": [
+                                    "11,200",
+                                    "201,1000",
+                                ],
+                                "limit": 10,
+                            }
 
                     raw_result = await ProspectAgent(db).run(cfg)
 

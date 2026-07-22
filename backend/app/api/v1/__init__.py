@@ -637,3 +637,79 @@ async def update_agent_schedule(body: AgentScheduleRequest, db: AsyncSession = D
         "cron": row.cron,
         "persisted": True,
     }
+
+
+class InputData(BaseModel):
+    company_name: str
+    company_size: str
+    services: str
+    location: str
+    job_title: str
+    keywords: str
+
+
+@router.post("/submit-input")
+async def submit_input(data: InputData, db: AsyncSession = Depends(get_db)):
+    """
+    Accepts structured company/lead input from the frontend and persists it,
+    then automatically starts the GTM agent pipeline using this intake information.
+    """
+    from app.models.models import UserInput
+    from app.orchestrator.agent_graph import get_enabled_pipeline
+    from app.orchestrator.orchestrator_service import OrchestratorService
+    from app.workers.orchestrator_tasks import build_pipeline_chain
+
+    record = UserInput(
+        company_name=data.company_name,
+        company_size=data.company_size,
+        services=data.services,
+        location=data.location,
+        job_title=data.job_title,
+        keywords=data.keywords,
+    )
+    db.add(record)
+    await db.commit()
+
+    agent_ids = get_enabled_pipeline()
+    if "A4" in agent_ids:
+        agent_ids.remove("A4")
+
+    if agent_ids:
+        titles = [t.strip() for t in data.job_title.split(",") if t.strip()]
+        geographies = [g.strip() for g in data.location.split(",") if g.strip()]
+        size = data.company_size.replace("-", ",").strip()
+        employee_ranges = [size] if size else ["11,200"]
+
+        payload = {
+            "icp_config": {
+                "titles": titles,
+                "geographies": geographies,
+                "employee_ranges": employee_ranges,
+                "limit": 10,
+            }
+        }
+
+        orchestrator = OrchestratorService(db)
+        workflow = await orchestrator.create_workflow_run(
+            workflow_name="manual_full_gtm",
+            input_payload={
+                "agent_ids": agent_ids,
+                "payload": payload,
+            },
+        )
+
+        for agent_id in agent_ids:
+            await orchestrator.create_agent_execution(
+                workflow_run_id=workflow.id,
+                agent_id=agent_id,
+                input_payload=payload,
+            )
+
+        pipeline = build_pipeline_chain(
+            workflow_run_id=workflow.id,
+            agent_ids=agent_ids,
+            payload=payload,
+        )
+        pipeline.apply_async()
+
+    return {"status": "success", "message": "Input saved and GTM pipeline triggered successfully"}

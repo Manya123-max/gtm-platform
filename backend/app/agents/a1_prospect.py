@@ -35,9 +35,10 @@ class ProspectAgent:
         logger.info("Apollo prospect fetch complete", count=len(raw_contacts), **provider_meta)
 
         scored = await self._score_contacts(raw_contacts)
+        threshold = icp_config.get("threshold", settings.ICP_SCORE_THRESHOLD)
         qualified = [
             contact for contact in scored
-            if contact.get("win_pattern_score", 0) >= settings.ICP_SCORE_THRESHOLD
+            if contact.get("win_pattern_score", 0) >= threshold
         ]
 
         save_result = await self._save_contacts(qualified)
@@ -101,6 +102,12 @@ class ProspectAgent:
             body["organization_num_employees_ranges"] = icp_config["employee_ranges"]
         if icp_config.get("seniorities"):
             body["person_seniorities"] = icp_config["seniorities"]
+        if icp_config.get("company_name"):
+            # Target the company specifically using Apollo's official filter
+            body["q_organization_name"] = icp_config["company_name"]
+        elif icp_config.get("keywords"):
+            # If no specific company, search by keywords
+            body["q_keywords"] = icp_config["keywords"]
 
         try:
             async with httpx.AsyncClient(timeout=30) as client:
@@ -112,6 +119,22 @@ class ProspectAgent:
                 search_resp.raise_for_status()
                 search_data = search_resp.json()
                 people = search_data.get("people") or search_data.get("contacts") or []
+
+                # Fallback: if company search was done but yielded 0 results, fall back to broad keyword search
+                if not people and icp_config.get("company_name"):
+                    logger.info("Specific company yielded 0 results; falling back to broader keyword search", company=icp_config["company_name"])
+                    body.pop("q_organization_name", None)
+                    if icp_config.get("keywords"):
+                        body["q_keywords"] = icp_config["keywords"]
+                    
+                    search_resp = await client.post(
+                        "https://api.apollo.io/api/v1/mixed_people/api_search",
+                        headers=headers,
+                        json=body,
+                    )
+                    search_resp.raise_for_status()
+                    search_data = search_resp.json()
+                    people = search_data.get("people") or search_data.get("contacts") or []
                 pagination = search_data.get("pagination") or {}
                 total_entries = pagination.get("total_entries") or search_data.get("total_entries", 0)
 

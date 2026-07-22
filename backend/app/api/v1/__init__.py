@@ -161,10 +161,11 @@ async def get_dashboard_overview(db: AsyncSession = Depends(get_db)):
 
 @router.get("/contacts", response_model=List[ContactOut])
 async def list_contacts(
-    skip: int = 0, limit: int = 50,
+    skip: int = 0, limit: int = 100,
     min_score: Optional[float] = None,
     has_signal: Optional[bool] = None,
     do_not_contact: Optional[bool] = False,
+    sort_by: str = "newest",
     db: AsyncSession = Depends(get_db),
 ):
     q = select(Contact).where(Contact.do_not_contact == do_not_contact)
@@ -172,7 +173,12 @@ async def list_contacts(
         q = q.where(Contact.icp_score >= min_score)
     if has_signal:
         q = q.where(Contact.signal_score.isnot(None))
-    q = q.order_by(desc(Contact.icp_score)).offset(skip).limit(limit)
+    if sort_by == "score":
+        q = q.order_by(desc(Contact.icp_score), desc(Contact.created_at))
+    else:
+        # Default: newest first
+        q = q.order_by(desc(Contact.created_at), desc(Contact.icp_score))
+    q = q.offset(skip).limit(limit)
     result = await db.execute(q)
     return result.scalars().all()
 
@@ -680,11 +686,21 @@ async def submit_input(data: InputData, db: AsyncSession = Depends(get_db)):
         size = data.company_size.replace("-", ",").strip()
         employee_ranges = [size] if size else ["11,200"]
 
+        # Build keyword list from keywords + services for Apollo filtering
+        keyword_list = []
+        if data.keywords:
+            keyword_list.extend([k.strip() for k in data.keywords.split(",") if k.strip()])
+        if data.services:
+            keyword_list.extend([s.strip() for s in data.services.split(",") if s.strip()])
+
         payload = {
             "icp_config": {
                 "titles": titles,
                 "geographies": geographies,
                 "employee_ranges": employee_ranges,
+                "keywords": keyword_list[0] if keyword_list else None,
+                "company_name": data.company_name,
+                "threshold": 0,  # Set threshold to 0 for user form submissions
                 "limit": 10,
             }
         }
@@ -712,4 +728,9 @@ async def submit_input(data: InputData, db: AsyncSession = Depends(get_db)):
         )
         pipeline.apply_async()
 
-    return {"status": "success", "message": "Input saved and GTM pipeline triggered successfully"}
+    workflow_id_str = str(workflow.id) if workflow else None
+    return {
+        "status": "success",
+        "message": "Input saved and GTM pipeline triggered successfully",
+        "workflow_run_id": workflow_id_str
+    }

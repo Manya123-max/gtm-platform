@@ -4,6 +4,7 @@ from typing import Any, Dict, List, Optional
 import structlog
 from celery import chain
 
+from sqlalchemy import select
 from app.core.celery_app import celery_app
 from app.core.database import AsyncSessionLocal
 from app.orchestrator.orchestrator_service import OrchestratorService
@@ -109,10 +110,19 @@ def run_agent_node(
                             geographies = [g.strip() for g in user_input.location.split(",") if g.strip()]
                             size = user_input.company_size.replace("-", ",").strip()
                             employee_ranges = [size] if size else ["11,200"]
+                            # Build keyword list from keywords + services
+                            keyword_list: list = []
+                            if user_input.keywords:
+                                keyword_list.extend([k.strip() for k in user_input.keywords.split(",") if k.strip()])
+                            if user_input.services:
+                                keyword_list.extend([s.strip() for s in user_input.services.split(",") if s.strip()])
                             cfg = {
                                 "titles": titles,
                                 "geographies": geographies,
                                 "employee_ranges": employee_ranges,
+                                "keywords": keyword_list[0] if keyword_list else None,
+                                "company_name": user_input.company_name,
+                                "threshold": 0,  # Set threshold to 0 for user form submissions
                                 "limit": 10,
                             }
                         else:

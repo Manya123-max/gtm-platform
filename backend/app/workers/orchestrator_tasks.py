@@ -1,12 +1,8 @@
 import asyncio
 from typing import Any, Dict, List, Optional
-
+from app.core.config import settings
 import structlog
 from celery import chain
-<<<<<<< HEAD
-=======
-
->>>>>>> e9477610b6d25a139cdbfc5dc313a8611fbcfefd
 from sqlalchemy import select
 from app.core.celery_app import celery_app
 from app.core.database import AsyncSessionLocal
@@ -111,8 +107,21 @@ def run_agent_node(
                         if user_input:
                             titles = [t.strip() for t in user_input.job_title.split(",") if t.strip()]
                             geographies = [g.strip() for g in user_input.location.split(",") if g.strip()]
-                            size = user_input.company_size.replace("-", ",").strip()
-                            employee_ranges = [size] if size else ["11,200"]
+                            def to_apollo_ranges(size_str: str) -> list:
+                                try:
+                                    parts = size_str.replace("-", ",").split(",")
+                                    low = int(parts[0].strip())
+                                    high = int(parts[-1].strip()) if len(parts) > 1 else low
+                                    apollo_ranges = [
+                                        ("1,10", 1, 10), ("11,50", 11, 50), ("51,200", 51, 200),
+                                        ("201,500", 201, 500), ("501,1000", 501, 1000),
+                                        ("1001,5000", 1001, 5000), ("5001,10000", 5001, 10000),
+                                    ]
+                                    return [label for label, lo, hi in apollo_ranges if lo <= high and hi >= low]
+                                except Exception:
+                                    return ["51,200"]
+
+                            employee_ranges = to_apollo_ranges(user_input.company_size) or ["51,200"]
                             # Build keyword list from keywords + services
                             keyword_list: list = []
                             if user_input.keywords:
@@ -123,10 +132,10 @@ def run_agent_node(
                                 "titles": titles,
                                 "geographies": geographies,
                                 "employee_ranges": employee_ranges,
-                                "keywords": keyword_list[0] if keyword_list else None,
-                                "company_name": user_input.company_name,
-                                "threshold": 0,  # Set threshold to 0 for user form submissions
-                                "limit": 10,
+                                "keywords": " ".join(keyword_list) if keyword_list else None,
+                                #"company_name": user_input.company_name,
+                                "threshold": settings.ICP_SCORE_THRESHOLD,  # Set threshold to 0 for user form submissions
+                                "limit": 25,
                             }
                         else:
                             cfg = {
@@ -136,7 +145,7 @@ def run_agent_node(
                                     "11,200",
                                     "201,1000",
                                 ],
-                                "limit": 10,
+                                "limit": 25,
                             }
 
                     raw_result = await ProspectAgent(db).run(cfg)

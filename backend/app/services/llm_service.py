@@ -19,13 +19,8 @@ logger = structlog.get_logger()
 
 ANTHROPIC_URL = "https://api.anthropic.com/v1/messages"
 ANTHROPIC_VERSION = "2023-06-01"
-<<<<<<< HEAD
-HAIKU_MODEL  = "claude-haiku-4-5-20251001"   # fast, cheap — classification/scoring
-SONNET_MODEL = "claude-sonnet-4-6"            # smart — content generation, email drafting
-=======
 HAIKU_MODEL = "claude-3-5-haiku-20241022"
 SONNET_MODEL = "claude-3-5-sonnet-20241022"
->>>>>>> e9477610b6d25a139cdbfc5dc313a8611fbcfefd
 
 
 def _anthropic_headers() -> Dict[str, str]:

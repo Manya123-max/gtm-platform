@@ -4,6 +4,7 @@ import { fetchContacts } from '../api'
 import { useState } from 'react'
 import { useNavigate } from 'react-router-dom'
 import { Search, ArrowUpDown, Sparkles } from 'lucide-react'
+import { useSession } from '../context/SessionContext'
 
 function ScorePill({ score }) {
   const color = score >= 80 ? 'badge-green' : score >= 60 ? 'badge-blue' : score >= 40 ? 'badge-amber' : 'badge-gray'
@@ -36,10 +37,16 @@ export default function Contacts() {
   const [minScore, setMinScore] = useState('')
   const [sortBy, setSortBy] = useState('newest')
   const navigate = useNavigate()
+  const { activeSessionId } = useSession()
 
   const { data: contacts = [], isLoading } = useQuery({
-    queryKey: ['contacts', minScore, sortBy],
-    queryFn: () => fetchContacts({ min_score: minScore || undefined, limit: 100, sort_by: sortBy }),
+    queryKey: ['contacts', minScore, sortBy, activeSessionId],
+    queryFn: () => fetchContacts({
+      min_score: minScore || undefined,
+      limit: 100,
+      sort_by: sortBy,
+      ...(activeSessionId != null ? { user_input_id: activeSessionId } : {}),
+    }),
   })
 
   const filtered = contacts.filter(c =>

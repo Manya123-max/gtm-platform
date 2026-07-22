@@ -99,39 +99,74 @@ class OrchestratorWorkflowRunRequest(BaseModel):
 
 # ── Dashboard ──────────────────────────────────────────────────────────────
 
+@router.get("/active-session")
+async def get_active_session(db: AsyncSession = Depends(get_db)):
+    """Returns the most recent user_input id — the current active session."""
+    from app.models.models import UserInput
+    result = await db.execute(select(UserInput.id).order_by(UserInput.id.desc()).limit(1))
+    row = result.scalar_one_or_none()
+    return {"user_input_id": row}
+
+
 @router.get("/dashboard/overview")
-async def get_dashboard_overview(db: AsyncSession = Depends(get_db)):
+async def get_dashboard_overview(
+    user_input_id: Optional[int] = None,
+    db: AsyncSession = Depends(get_db)
+):
     thirty_days_ago = datetime.utcnow() - timedelta(days=30)
 
-    total_contacts = await db.scalar(select(func.count(Contact.id))) or 0
+    # Base contact filter
+    contact_filter = [Contact.do_not_contact == False]
+    if user_input_id is not None:
+        contact_filter.append(Contact.user_input_id == user_input_id)
+
+    total_contacts = await db.scalar(
+        select(func.count(Contact.id)).where(and_(*contact_filter))
+    ) or 0
     qualified = await db.scalar(
         select(func.count(Contact.id)).where(
-            and_(Contact.icp_score >= settings.ICP_SCORE_THRESHOLD,
-                 Contact.do_not_contact == False)
+            and_(*contact_filter, Contact.icp_score >= settings.ICP_SCORE_THRESHOLD)
         )
     ) or 0
+
+    # Signal / outreach scoped to session contacts
+    contact_ids_q = select(Contact.id).where(and_(*contact_filter))
     active_signals = await db.scalar(
         select(func.count(SignalEvent.id)).where(
             and_(SignalEvent.processed == False,
-                 SignalEvent.detected_at >= thirty_days_ago)
+                 SignalEvent.detected_at >= thirty_days_ago,
+                 SignalEvent.contact_id.in_(contact_ids_q))
         )
     ) or 0
     emails_sent = await db.scalar(
-        select(func.count(OutreachLog.id)).where(OutreachLog.sent_at >= thirty_days_ago)
+        select(func.count(OutreachLog.id)).where(
+            and_(OutreachLog.sent_at >= thirty_days_ago,
+                 OutreachLog.contact_id.in_(contact_ids_q))
+        )
     ) or 0
     replies = await db.scalar(
         select(func.count(OutreachLog.id)).where(
-            and_(OutreachLog.replied == True, OutreachLog.sent_at >= thirty_days_ago)
+            and_(OutreachLog.replied == True,
+                 OutreachLog.sent_at >= thirty_days_ago,
+                 OutreachLog.contact_id.in_(contact_ids_q))
         )
     ) or 0
     meetings = await db.scalar(
         select(func.count(OutreachLog.id)).where(
-            and_(OutreachLog.meeting_booked == True, OutreachLog.sent_at >= thirty_days_ago)
+            and_(OutreachLog.meeting_booked == True,
+                 OutreachLog.sent_at >= thirty_days_ago,
+                 OutreachLog.contact_id.in_(contact_ids_q))
         )
     ) or 0
+
+    # Deals scoped to session contacts
+    deal_filter = [Deal.outcome.is_(None)]
+    if user_input_id is not None:
+        deal_filter.append(Deal.contact_id.in_(contact_ids_q))
     pipeline_value = await db.scalar(
-        select(func.sum(Deal.amount)).where(Deal.outcome.is_(None))
+        select(func.sum(Deal.amount)).where(and_(*deal_filter))
     ) or 0
+
     pending_actions = await db.scalar(
         select(func.count(PendingAction.id)).where(
             PendingAction.status == ActionStatus.PENDING)
@@ -166,9 +201,12 @@ async def list_contacts(
     has_signal: Optional[bool] = None,
     do_not_contact: Optional[bool] = False,
     sort_by: str = "newest",
+    user_input_id: Optional[int] = None,
     db: AsyncSession = Depends(get_db),
 ):
     q = select(Contact).where(Contact.do_not_contact == do_not_contact)
+    if user_input_id is not None:
+        q = q.where(Contact.user_input_id == user_input_id)
     if min_score is not None:
         q = q.where(Contact.icp_score >= min_score)
     if has_signal:
@@ -176,7 +214,6 @@ async def list_contacts(
     if sort_by == "score":
         q = q.order_by(desc(Contact.icp_score), desc(Contact.created_at))
     else:
-        # Default: newest first
         q = q.order_by(desc(Contact.created_at), desc(Contact.icp_score))
     q = q.offset(skip).limit(limit)
     result = await db.execute(q)
@@ -218,9 +255,13 @@ async def get_contact_signals(contact_id: UUID, db: AsyncSession = Depends(get_d
 @router.get("/deals", response_model=List[DealOut])
 async def list_deals(
     stage: Optional[str] = None, min_risk: Optional[float] = None,
+    user_input_id: Optional[int] = None,
     db: AsyncSession = Depends(get_db),
 ):
     q = select(Deal).where(Deal.outcome.is_(None))
+    if user_input_id is not None:
+        contact_ids_q = select(Contact.id).where(Contact.user_input_id == user_input_id)
+        q = q.where(Deal.contact_id.in_(contact_ids_q))
     if stage:
         q = q.where(Deal.stage == stage)
     if min_risk is not None:
@@ -231,13 +272,21 @@ async def list_deals(
 
 
 @router.get("/deals/pipeline-summary")
-async def get_pipeline_summary(db: AsyncSession = Depends(get_db)):
+async def get_pipeline_summary(
+    user_input_id: Optional[int] = None,
+    db: AsyncSession = Depends(get_db)
+):
+    base = select(Deal).where(Deal.outcome.is_(None))
+    if user_input_id is not None:
+        contact_ids_q = select(Contact.id).where(Contact.user_input_id == user_input_id)
+        base = base.where(Deal.contact_id.in_(contact_ids_q))
     result = await db.execute(
         select(Deal.stage, func.count(Deal.id).label("count"),
                func.sum(Deal.amount).label("value"),
                func.avg(Deal.days_in_current_stage).label("avg_days"),
                func.avg(Deal.risk_score).label("avg_risk"))
         .where(Deal.outcome.is_(None))
+        .where(*([] if user_input_id is None else [Deal.contact_id.in_(select(Contact.id).where(Contact.user_input_id == user_input_id))]))
         .group_by(Deal.stage)
     )
     return [{"stage": r.stage, "count": r.count, "value": float(r.value or 0),
@@ -310,12 +359,20 @@ async def get_funnel_metrics(
 @router.get("/content")
 async def list_content(
     format: Optional[str] = None, icp_segment: Optional[str] = None,
+    user_input_id: Optional[int] = None,
     limit: int = 20, db: AsyncSession = Depends(get_db)):
+    from app.models.models import UserInput
     q = select(GeneratedContent)
     if format:
         q = q.where(GeneratedContent.content_format == format)
     if icp_segment:
         q = q.where(GeneratedContent.icp_segment == icp_segment)
+    elif user_input_id is not None:
+        # Filter by icp_segment matching company_name of that input
+        ui_result = await db.execute(select(UserInput).where(UserInput.id == user_input_id))
+        ui = ui_result.scalar_one_or_none()
+        if ui:
+            q = q.where(GeneratedContent.icp_segment.ilike(f"%{ui.company_name}%"))
     q = q.order_by(desc(GeneratedContent.created_at)).limit(limit)
     result = await db.execute(q)
     return result.scalars().all()
@@ -557,13 +614,17 @@ async def get_signal_registry(db: AsyncSession = Depends(get_db)):
 # ── Outreach Drafts ────────────────────────────────────────────────────────
 
 @router.get("/outreach/drafts")
-async def get_outreach_drafts(db: AsyncSession = Depends(get_db)):
-    result = await db.execute(
-        select(OutreachLog).where(
-            and_(OutreachLog.outreach_provider_message_id.is_(None),
-                 OutreachLog.sent_at >= datetime.utcnow() - timedelta(days=7))
-        ).order_by(desc(OutreachLog.sent_at)).limit(50)
+async def get_outreach_drafts(
+    user_input_id: Optional[int] = None,
+    db: AsyncSession = Depends(get_db)
+):
+    q = select(OutreachLog).where(
+        and_(OutreachLog.outreach_provider_message_id.is_(None),
+             OutreachLog.sent_at >= datetime.utcnow() - timedelta(days=7))
     )
+    if user_input_id is not None:
+        q = q.join(Contact).where(Contact.user_input_id == user_input_id)
+    result = await db.execute(q.order_by(desc(OutreachLog.sent_at)).limit(50))
     return result.scalars().all()
 
 # ── Agent Schedule Endpoints ─────────────────────────────────────────────
@@ -654,6 +715,28 @@ class InputData(BaseModel):
     keywords: str
 
 
+@router.get("/input-history")
+async def get_input_history(db: AsyncSession = Depends(get_db)):
+    """Return all past intake form submissions (newest first)."""
+    from app.models.models import UserInput
+    from sqlalchemy import select
+    stmt = select(UserInput).order_by(UserInput.id.desc()).limit(50)
+    result = await db.execute(stmt)
+    rows = result.scalars().all()
+    return [
+        {
+            "id": r.id,
+            "company_name": r.company_name,
+            "company_size": r.company_size,
+            "services": r.services,
+            "location": r.location,
+            "job_title": r.job_title,
+            "keywords": r.keywords,
+        }
+        for r in rows
+    ]
+
+
 @router.post("/submit-input")
 async def submit_input(data: InputData, db: AsyncSession = Depends(get_db)):
     """
@@ -683,17 +766,41 @@ async def submit_input(data: InputData, db: AsyncSession = Depends(get_db)):
     if agent_ids:
         titles = [t.strip() for t in data.job_title.split(",") if t.strip()]
         geographies = [g.strip() for g in data.location.split(",") if g.strip()]
-        size = data.company_size.replace("-", ",").strip()
-        employee_ranges = [size] if size else ["11,200"]
 
-        # Build keyword list from keywords + services for Apollo filtering
+        # Map raw input to Apollo's valid employee range format
+        def to_apollo_ranges(size_str: str) -> list:
+            try:
+                parts = size_str.replace("-", ",").split(",")
+                low = int(parts[0].strip())
+                high = int(parts[-1].strip()) if len(parts) > 1 else low
+                apollo_ranges = [
+                    ("1,10", 1, 10), ("11,50", 11, 50), ("51,200", 51, 200),
+                    ("201,500", 201, 500), ("501,1000", 501, 1000),
+                    ("1001,5000", 1001, 5000), ("5001,10000", 5001, 10000),
+                 ]
+                return [label for label, lo, hi in apollo_ranges if lo <= high and hi >= low]
+            except Exception:
+                return ["51,200"]
+
+        employee_ranges = to_apollo_ranges(data.company_size) or ["51,200"]
+
         keyword_list = []
         if data.keywords:
-            keyword_list.extend([k.strip() for k in data.keywords.split(",") if k.strip()])
+           keyword_list.extend([k.strip() for k in data.keywords.split(",") if k.strip()])
         if data.services:
-            keyword_list.extend([s.strip() for s in data.services.split(",") if s.strip()])
+           keyword_list.extend([s.strip() for s in data.services.split(",") if s.strip()])
 
         payload = {
+<<<<<<< HEAD
+           "icp_config": {
+               "titles": titles,
+               "geographies": geographies,
+               "employee_ranges": employee_ranges,
+               "keywords": " ".join(keyword_list) if keyword_list else None,
+               # company_name intentionally omitted — that's YOUR company, not the target
+               "threshold": settings.ICP_SCORE_THRESHOLD,
+               "limit": 25,
+=======
             "icp_config": {
                 "titles": titles,
                 "geographies": geographies,
@@ -702,6 +809,8 @@ async def submit_input(data: InputData, db: AsyncSession = Depends(get_db)):
                 "company_name": data.company_name,
                 "threshold": 0,  # Set threshold to 0 for user form submissions
                 "limit": 10,
+                "user_input_id": record.id,  # ← stamp session on all contacts
+>>>>>>> e787f795c7a7dc7689518caa825a2c0cf8a68798
             }
         }
 
@@ -732,5 +841,6 @@ async def submit_input(data: InputData, db: AsyncSession = Depends(get_db)):
     return {
         "status": "success",
         "message": "Input saved and GTM pipeline triggered successfully",
-        "workflow_run_id": workflow_id_str
+        "workflow_run_id": workflow_id_str,
+        "user_input_id": record.id,
     }

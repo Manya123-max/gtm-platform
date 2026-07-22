@@ -49,7 +49,7 @@ passlib[bcrypt]==1.7.4
 # Add back if you need Slack: slack-bolt==1.22.0 slack-sdk==3.34.0
 
 # ── Utilities ──────────────────────────────────────────────────────────────
-python-dotenv==1.0.1
+python-dotenv==1.2.2
 structlog==24.4.0
 orjson==3.10.12
 python-dateutil==2.9.0

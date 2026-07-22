@@ -31,13 +31,13 @@ api.interceptors.response.use(
 
 const unwrap = request => request.then(response => response.data)
 
-export const fetchOverview = () => unwrap(api.get('/dashboard/overview'))
+export const fetchOverview = (user_input_id) => unwrap(api.get('/dashboard/overview', { params: user_input_id ? { user_input_id } : {} }))
 export const fetchContacts = (params = {}) => unwrap(api.get('/contacts', { params }))
 export const fetchContact = id => unwrap(api.get(`/contacts/${id}`))
 export const fetchThread = id => unwrap(api.get(`/contacts/${id}/thread`))
 export const fetchSignals = id => unwrap(api.get(`/contacts/${id}/signals`))
 export const fetchDeals = (params = {}) => unwrap(api.get('/deals', { params }))
-export const fetchPipelineSummary = () => unwrap(api.get('/deals/pipeline-summary'))
+export const fetchPipelineSummary = (user_input_id) => unwrap(api.get('/deals/pipeline-summary', { params: user_input_id ? { user_input_id } : {} }))
 export const fetchPendingActions = () => unwrap(api.get('/pending-actions'))
 export const approveAction = (id, approvedBy) => unwrap(api.post(`/pending-actions/${id}/approve`, { approved_by: approvedBy }))
 export const dismissAction = id => unwrap(api.post(`/pending-actions/${id}/dismiss`))
@@ -45,7 +45,9 @@ export const fetchForecast = () => unwrap(api.get('/revenue/forecast'))
 export const fetchFunnelMetrics = (days = 30) => unwrap(api.get('/revenue/funnel-metrics', { params: { days } }))
 export const fetchContent = (params = {}) => unwrap(api.get('/content', { params }))
 export const fetchSignalRegistry = () => unwrap(api.get('/signals/registry'))
-export const fetchDrafts = () => unwrap(api.get('/outreach/drafts'))
+export const fetchDrafts = (user_input_id) => unwrap(api.get('/outreach/drafts', { params: user_input_id ? { user_input_id } : {} }))
+export const fetchInputHistory = () => unwrap(api.get('/input-history'))
+export const fetchActiveSession = () => unwrap(api.get('/active-session'))
 
 // Legacy endpoint retained for A4 development test mode.
 export const runAgent = (agent, config = null) => unwrap(api.post('/agents/run', { agent, config }))

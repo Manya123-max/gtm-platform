@@ -1,4 +1,4 @@
-﻿"""
+"""
 All database models for the GTM Platform.
 Central schema â€” every agent reads from and writes to these tables.
 """
@@ -118,6 +118,7 @@ class Contact(Base):
     source: Mapped[Optional[str]] = mapped_column(String(50))
     hubspot_id: Mapped[Optional[str]] = mapped_column(String(100))
     apollo_id: Mapped[Optional[str]] = mapped_column(String(100))
+    user_input_id: Mapped[Optional[int]] = mapped_column(Integer, ForeignKey("user_inputs.id"), nullable=True, index=True)
 
     # Relationships
     signals: Mapped[List["SignalEvent"]] = relationship("SignalEvent", back_populates="contact")
@@ -127,6 +128,7 @@ class Contact(Base):
 
     __table_args__ = (
         Index("ix_contacts_icp_score_dnc", "icp_score", "do_not_contact"),
+        Index("ix_contacts_user_input_id", "user_input_id"),
     )
 
 

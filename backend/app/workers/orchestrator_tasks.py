@@ -124,6 +124,7 @@ def run_agent_node(
                                 "company_name": user_input.company_name,
                                 "threshold": 0,  # Set threshold to 0 for user form submissions
                                 "limit": 10,
+                                "user_input_id": user_input.id,
                             }
                         else:
                             cfg = {

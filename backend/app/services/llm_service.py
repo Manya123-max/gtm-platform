@@ -19,32 +19,42 @@ logger = structlog.get_logger()
 
 ANTHROPIC_URL = "https://api.anthropic.com/v1/messages"
 ANTHROPIC_VERSION = "2023-06-01"
-HAIKU_MODEL = "claude-haiku-4-5-20251001"
-SONNET_MODEL = "claude-sonnet-4-5-20251001"
+HAIKU_MODEL  = "claude-haiku-4-5-20251001"   # fast, cheap — classification/scoring
+SONNET_MODEL = "claude-sonnet-4-6"            # smart — content generation, email drafting
 
 
 def _anthropic_headers() -> Dict[str, str]:
     return {
-        "x-api-key": settings.ANTHROPIC_API_KEY,
+        "x-api-key":         settings.ANTHROPIC_API_KEY,
         "anthropic-version": ANTHROPIC_VERSION,
-        "content-type": "application/json",
+        "content-type":      "application/json",
     }
 
 
-async def _call_anthropic(system: str, user: str, model: str, max_tokens: int) -> str:
+async def _call_anthropic(
+    system: str,
+    user: str,
+    model: str,
+    max_tokens: int,
+) -> str:
     payload = {
-        "model": model,
+        "model":      model,
         "max_tokens": max_tokens,
-        "system": system,
-        "messages": [{"role": "user", "content": user}],
+        "system":     system,
+        "messages":   [{"role": "user", "content": user}],
     }
-    async with httpx.AsyncClient(timeout=30) as client:
-        resp = await client.post(ANTHROPIC_URL, headers=_anthropic_headers(), json=payload)
+    async with httpx.AsyncClient(timeout=60) as client:
+        resp = await client.post(
+            ANTHROPIC_URL,
+            headers=_anthropic_headers(),
+            json=payload,
+        )
         resp.raise_for_status()
         return resp.json()["content"][0]["text"].strip()
 
 
 def _clean_json(content: str, model: str) -> Dict[str, Any]:
+    """Strip markdown fences and parse JSON."""
     if content.startswith("```"):
         content = re.sub(r"^```(?:json)?\n?", "", content)
         content = re.sub(r"\n?```$", "", content)
@@ -58,7 +68,10 @@ def _clean_json(content: str, model: str) -> Dict[str, Any]:
 class LLMService:
     def __init__(self) -> None:
         if not settings.ANTHROPIC_API_KEY:
-            raise RuntimeError("No LLM configured. Set ANTHROPIC_API_KEY in .env")
+            raise RuntimeError(
+                "ANTHROPIC_API_KEY is not set. "
+                "Add it to backend/.env and restart the backend."
+            )
 
     @retry(stop=stop_after_attempt(3), wait=wait_exponential(min=1, max=10), reraise=True)
     async def complete(
@@ -69,15 +82,23 @@ class LLMService:
         response_format: Optional[Dict[str, Any]] = None,
         max_tokens: int = 1000,
     ) -> Dict[str, Any]:
+        """Return a parsed JSON dict.
+
+        Pass use_sonnet=True for tasks that need deeper reasoning
+        (content generation, deal analysis, forecast narrative).
+        Default is Haiku for cost efficiency.
+        """
         json_instruction = (
             "\n\nReturn ONLY valid JSON matching this schema, no markdown fences: "
             + json.dumps(response_format)
             if response_format
             else "\n\nReturn ONLY valid JSON. No markdown fences, no preamble."
         )
-        model = SONNET_MODEL if use_sonnet else HAIKU_MODEL
-        content = await _call_anthropic(system + json_instruction, user, model, max_tokens)
-        logger.info("LLM complete via Claude", model=model)
+        model   = SONNET_MODEL if use_sonnet else HAIKU_MODEL
+        content = await _call_anthropic(
+            system + json_instruction, user, model, max_tokens
+        )
+        logger.info("LLM complete", model=model, tokens=max_tokens)
         return _clean_json(content, model)
 
     @retry(stop=stop_after_attempt(3), wait=wait_exponential(min=1, max=10), reraise=True)
@@ -89,14 +110,20 @@ class LLMService:
         use_sonnet: bool = False,
         max_tokens: int = 2000,
     ) -> str:
+        """Return a plain-text completion.
+
+        - use_sonnet=True  → Sonnet 4.6 (email drafting, content generation)
+        - use_haiku=True   → Haiku (fast single-line answers)
+        - neither          → Haiku (safe default for cost)
+        """
         if user_prompt:
             system = system_or_prompt
-            user = user_prompt
+            user   = user_prompt
         else:
-            system = "You are a helpful assistant."
-            user = system_or_prompt
+            system = "You are a helpful GTM AI assistant."
+            user   = system_or_prompt
 
-        model = SONNET_MODEL if use_sonnet else HAIKU_MODEL
+        model   = SONNET_MODEL if use_sonnet else HAIKU_MODEL
         content = await _call_anthropic(system, user, model, max_tokens)
-        logger.info("LLM raw via Claude", model=model)
+        logger.info("LLM raw", model=model, tokens=max_tokens)
         return content

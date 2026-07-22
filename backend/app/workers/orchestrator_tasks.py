@@ -3,7 +3,7 @@ from typing import Any, Dict, List, Optional
 
 import structlog
 from celery import chain
-
+from sqlalchemy import select
 from app.core.celery_app import celery_app
 from app.core.database import AsyncSessionLocal
 from app.orchestrator.orchestrator_service import OrchestratorService

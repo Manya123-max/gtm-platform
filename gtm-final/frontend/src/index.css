@@ -1,0 +1,155 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+@layer base {
+  :root {
+    --c-bg:       #060B1A;
+    --c-surface:  #0C1530;
+    --c-surface2: #132248;
+    --c-border:   #1A3060;
+    --c-border2:  #2A4580;
+    --c-text:     #EEF2FF;
+    --c-text2:    #93A5CC;
+    --c-text3:    #5B6E9A;
+    --c-blue:     #0A67FF;
+    --c-cyan:     #00C8FF;
+    --c-green:    #10D9A0;
+    --c-amber:    #F59E0B;
+    --c-red:      #FF4D6A;
+    --c-purple:   #A78BFA;
+  }
+
+  body {
+    background: var(--c-bg);
+    color: var(--c-text);
+    font-family: 'Inter', 'SF Pro Display', system-ui, sans-serif;
+    font-size: 14px;
+    -webkit-font-smoothing: antialiased;
+  }
+
+  * { box-sizing: border-box; }
+
+  ::-webkit-scrollbar { width: 4px; height: 4px; }
+  ::-webkit-scrollbar-track { background: transparent; }
+  ::-webkit-scrollbar-thumb { background: var(--c-border2); border-radius: 4px; }
+  ::selection { background: rgba(10,103,255,0.25); }
+}
+
+@layer components {
+  .card {
+    @apply rounded-xl p-5;
+    background: var(--c-surface);
+    border: 1px solid var(--c-border);
+  }
+  .card-sm {
+    @apply rounded-lg p-4;
+    background: var(--c-surface);
+    border: 1px solid var(--c-border);
+  }
+
+  .btn-primary {
+    @apply text-white text-sm font-medium px-4 py-2 rounded-lg transition-all
+           disabled:opacity-40 disabled:cursor-not-allowed;
+    background: linear-gradient(135deg, #0A67FF 0%, #0052CC 100%);
+    box-shadow: 0 0 16px rgba(10,103,255,0.30);
+  }
+  .btn-primary:hover:not(:disabled) {
+    background: linear-gradient(135deg, #2680FF 0%, #0066EE 100%);
+  }
+  .btn-secondary {
+    @apply text-sm font-medium px-4 py-2 rounded-lg transition-colors;
+    background: var(--c-surface2);
+    color: var(--c-text2);
+    border: 1px solid var(--c-border2);
+  }
+  .btn-danger {
+    @apply text-sm font-medium px-4 py-2 rounded-lg transition-colors;
+    background: rgba(255,77,106,0.12);
+    color: #FF4D6A;
+    border: 1px solid rgba(255,77,106,0.30);
+  }
+
+  /* Badges — each written out fully to avoid Tailwind v3 @apply circular ref */
+  .badge {
+    @apply inline-flex items-center gap-1 px-2 py-0.5 rounded-md text-xs font-medium;
+  }
+  .badge-blue {
+    @apply inline-flex items-center gap-1 px-2 py-0.5 rounded-md text-xs font-medium;
+    background: rgba(10,103,255,0.15);
+    color: #5DA8FF;
+    border: 1px solid rgba(10,103,255,0.30);
+  }
+  .badge-cyan {
+    @apply inline-flex items-center gap-1 px-2 py-0.5 rounded-md text-xs font-medium;
+    background: rgba(0,200,255,0.12);
+    color: #00C8FF;
+    border: 1px solid rgba(0,200,255,0.25);
+  }
+  .badge-green {
+    @apply inline-flex items-center gap-1 px-2 py-0.5 rounded-md text-xs font-medium;
+    background: rgba(16,217,160,0.12);
+    color: #10D9A0;
+    border: 1px solid rgba(16,217,160,0.25);
+  }
+  .badge-amber {
+    @apply inline-flex items-center gap-1 px-2 py-0.5 rounded-md text-xs font-medium;
+    background: rgba(245,158,11,0.12);
+    color: #F59E0B;
+    border: 1px solid rgba(245,158,11,0.25);
+  }
+  .badge-red {
+    @apply inline-flex items-center gap-1 px-2 py-0.5 rounded-md text-xs font-medium;
+    background: rgba(255,77,106,0.12);
+    color: #FF6B85;
+    border: 1px solid rgba(255,77,106,0.25);
+  }
+  .badge-purple {
+    @apply inline-flex items-center gap-1 px-2 py-0.5 rounded-md text-xs font-medium;
+    background: rgba(167,139,250,0.12);
+    color: #A78BFA;
+    border: 1px solid rgba(167,139,250,0.25);
+  }
+  .badge-gray {
+    @apply inline-flex items-center gap-1 px-2 py-0.5 rounded-md text-xs font-medium;
+    background: var(--c-surface2);
+    color: var(--c-text3);
+    border: 1px solid var(--c-border);
+  }
+
+  .table-row {
+    border-bottom: 1px solid var(--c-border);
+    transition: background 0.15s;
+  }
+  .table-row:hover { background: var(--c-surface2); }
+
+  .th {
+    @apply text-left text-xs font-medium uppercase tracking-wider px-4 py-3;
+    color: var(--c-text3);
+    border-bottom: 1px solid var(--c-border);
+  }
+  .td { @apply px-4 py-3 text-sm; color: var(--c-text2); }
+
+  .input {
+    @apply text-sm rounded-lg px-3 py-2 w-full transition-colors outline-none;
+    background: var(--c-surface2);
+    color: var(--c-text);
+    border: 1px solid var(--c-border2);
+  }
+  .input::placeholder { color: var(--c-text3); }
+  .input:focus {
+    border-color: var(--c-blue);
+    box-shadow: 0 0 0 2px rgba(10,103,255,0.15);
+  }
+
+  .stat-card  { @apply card flex flex-col gap-1; }
+  .stat-label { @apply text-xs uppercase tracking-wider; color: var(--c-text3); }
+  .stat-value { @apply text-2xl font-semibold; color: var(--c-text); }
+  .stat-sub   { @apply text-xs; color: var(--c-text3); }
+
+  .section-title { @apply text-base font-semibold mb-1; color: var(--c-text); }
+  .section-sub   { @apply text-sm mb-4; color: var(--c-text3); }
+
+  .score-bar  { @apply h-1.5 rounded-full overflow-hidden; background: var(--c-surface2); }
+  .score-fill { @apply h-full rounded-full transition-all duration-500; }
+}

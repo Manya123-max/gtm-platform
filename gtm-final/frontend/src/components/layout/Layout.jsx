@@ -1,0 +1,221 @@
+import { Outlet, NavLink, useLocation } from 'react-router-dom'
+import {
+  LayoutDashboard, Users, Briefcase, Send, FileText,
+  TrendingUp, Bot, ChevronRight, Bell, Zap
+} from 'lucide-react'
+import clsx from 'clsx'
+
+const NAV = [
+  { to: '/dashboard', icon: LayoutDashboard, label: 'Dashboard' },
+  { to: '/contacts',  icon: Users,           label: 'Contacts'  },
+  { to: '/deals',     icon: Briefcase,       label: 'Deals'     },
+  { to: '/outreach',  icon: Send,            label: 'Outreach'  },
+  { to: '/content',   icon: FileText,        label: 'Content'   },
+  { to: '/revenue',   icon: TrendingUp,      label: 'Revenue'   },
+  { to: '/agents',    icon: Bot,             label: 'Agents'    },
+]
+
+const AGENT_STATUS = [
+  { id: 'A1', label: 'Prospect', color: '#0A67FF' },
+  { id: 'A2', label: 'Signal',   color: '#0A67FF' },
+  { id: 'A3', label: 'Outreach', color: '#00C8FF' },
+  { id: 'A4', label: 'Inbound',  color: '#10D9A0' },
+  { id: 'A5', label: 'Deal',     color: '#A78BFA' },
+  { id: 'A6', label: 'Content',  color: '#A78BFA' },
+  { id: 'A7', label: 'Revenue',  color: '#F59E0B' },
+]
+
+function ForceLogo() {
+  return (
+    <svg width="30" height="30" viewBox="0 0 30 30" fill="none" xmlns="http://www.w3.org/2000/svg">
+      <rect width="30" height="30" rx="8" fill="url(#grad4ce)" />
+      <path
+        d="M9 19c0-2.2 1.8-4 4-4h.2A3.5 3.5 0 0 1 20 16.5c0 .17-.01.33-.03.5H20a1.5 1.5 0 0 1 0 3H9.5A.5.5 0 0 1 9 19.5V19z"
+        fill="white" fillOpacity="0.18"
+      />
+      <path d="M16.5 7.5L12 16h5L14 22.5l7.5-10.5H17L16.5 7.5z" fill="white" fillOpacity="0.95" />
+      <defs>
+        <linearGradient id="grad4ce" x1="0" y1="0" x2="30" y2="30" gradientUnits="userSpaceOnUse">
+          <stop offset="0%" stopColor="#0A67FF" />
+          <stop offset="100%" stopColor="#00C8FF" />
+        </linearGradient>
+      </defs>
+    </svg>
+  )
+}
+
+export default function Layout() {
+  // useLocation must be called at top level — not inside JSX
+  const location = useLocation()
+  const currentPage = location.pathname.replace('/', '') || 'dashboard'
+
+  return (
+    <div
+      className="flex h-screen overflow-hidden"
+      style={{ background: 'var(--c-bg)' }}
+    >
+      {/* ── Sidebar ──────────────────────────────────────────────── */}
+      <aside
+        className="w-56 flex-shrink-0 flex flex-col"
+        style={{
+          background: 'var(--c-surface)',
+          borderRight: '1px solid var(--c-border)',
+        }}
+      >
+        {/* Logo */}
+        <div
+          className="px-5 pt-5 pb-4"
+          style={{ borderBottom: '1px solid var(--c-border)' }}
+        >
+          <div className="flex items-center gap-2.5">
+            <ForceLogo />
+            <div>
+              <div
+                className="text-sm font-bold leading-none tracking-tight"
+                style={{
+                  background: 'linear-gradient(90deg, #0A67FF, #00C8FF)',
+                  WebkitBackgroundClip: 'text',
+                  WebkitTextFillColor: 'transparent',
+                }}
+              >
+                4CECloud Labs
+              </div>
+              <div
+                className="text-[10px] mt-0.5"
+                style={{ color: 'var(--c-text3)' }}
+              >
+                GTM · 7-Agent Engine
+              </div>
+            </div>
+          </div>
+        </div>
+
+        {/* Nav */}
+        <nav className="flex-1 px-2 py-3 space-y-0.5 overflow-y-auto">
+          {NAV.map(({ to, icon: Icon, label }) => (
+            <NavLink
+              key={to}
+              to={to}
+              className="flex items-center gap-3 px-3 py-2 rounded-lg text-sm transition-all"
+              style={({ isActive }) =>
+                isActive
+                  ? {
+                      background: 'rgba(10,103,255,0.18)',
+                      color: '#5DA8FF',
+                      fontWeight: 500,
+                      boxShadow: 'inset 2px 0 0 #0A67FF',
+                    }
+                  : { color: 'var(--c-text3)' }
+              }
+              onMouseEnter={e => {
+                if (!e.currentTarget.style.boxShadow) {
+                  e.currentTarget.style.background = 'var(--c-surface2)'
+                }
+              }}
+              onMouseLeave={e => {
+                if (!e.currentTarget.style.boxShadow) {
+                  e.currentTarget.style.background = ''
+                }
+              }}
+            >
+              <Icon size={15} />
+              {label}
+            </NavLink>
+          ))}
+        </nav>
+
+        {/* Agent status */}
+        <div
+          className="px-3 py-3"
+          style={{ borderTop: '1px solid var(--c-border)' }}
+        >
+          <div
+            className="text-[10px] uppercase tracking-wider mb-2 px-1 font-medium"
+            style={{ color: 'var(--c-text3)' }}
+          >
+            Agent Status
+          </div>
+          <div className="space-y-1.5">
+            {AGENT_STATUS.map(a => (
+              <div key={a.id} className="flex items-center gap-2 px-1">
+                <span
+                  className="w-1.5 h-1.5 rounded-full flex-shrink-0"
+                  style={{ background: a.color }}
+                />
+                <span
+                  className="text-xs font-semibold w-5"
+                  style={{ color: 'var(--c-text2)' }}
+                >
+                  {a.id}
+                </span>
+                <span
+                  className="text-xs"
+                  style={{ color: 'var(--c-text3)' }}
+                >
+                  {a.label}
+                </span>
+              </div>
+            ))}
+          </div>
+        </div>
+      </aside>
+
+      {/* ── Main ─────────────────────────────────────────────────── */}
+      <div className="flex-1 flex flex-col min-w-0">
+
+        {/* Topbar */}
+        <header
+          className="h-12 flex items-center justify-between px-6 flex-shrink-0"
+          style={{
+            background: 'var(--c-surface)',
+            borderBottom: '1px solid var(--c-border)',
+          }}
+        >
+          <div
+            className="flex items-center gap-1.5 text-xs"
+            style={{ color: 'var(--c-text3)' }}
+          >
+            <span style={{ color: 'var(--c-text2)' }}>4CECloud GTM</span>
+            <ChevronRight size={12} />
+            <span
+              className="capitalize"
+              style={{ color: 'var(--c-text)' }}
+            >
+              {currentPage}
+            </span>
+          </div>
+
+          <div className="flex items-center gap-3">
+            <div
+              className="flex items-center gap-1.5 text-xs"
+              style={{ color: '#10D9A0' }}
+            >
+              <Zap size={11} />
+              <span>All systems operational</span>
+            </div>
+            <button
+              className="w-7 h-7 rounded-lg flex items-center justify-center transition-colors"
+              style={{
+                background: 'var(--c-surface2)',
+                color: 'var(--c-text3)',
+                border: '1px solid var(--c-border)',
+              }}
+              onMouseEnter={e => e.currentTarget.style.color = 'var(--c-text)'}
+              onMouseLeave={e => e.currentTarget.style.color = 'var(--c-text3)'}
+            >
+              <Bell size={13} />
+            </button>
+          </div>
+        </header>
+
+        {/* Page content */}
+        <main
+          className="flex-1 overflow-y-auto p-6"
+          style={{ background: 'var(--c-bg)' }}
+        >
+          <Outlet />
+        </main>
+      </div>
+    </div>
+  )
+}

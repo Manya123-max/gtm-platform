@@ -1,10 +1,12 @@
 import React, { useState } from 'react';
 import { useNavigate } from 'react-router-dom';
+import { useSession } from '../context/SessionContext';
 
 const API_URL = 'http://localhost:8000';
 
 function InputForm() {
     const navigate = useNavigate();
+    const { setActiveSessionId } = useSession();
     const [formData, setFormData] = useState({
         companyName: '',
         companySize: '',
@@ -49,6 +51,9 @@ function InputForm() {
 
             const data = await response.json();
             console.log('Saved:', data);
+            if (data.user_input_id) {
+                setActiveSessionId(data.user_input_id);
+            }
             setStatus({ type: 'success', message: 'Company details submitted successfully! Redirecting to Agent Control...' });
             
             // Reset form fields
@@ -75,7 +80,7 @@ function InputForm() {
     return (
         <div className="max-w-xl mx-auto">
             <div className="mb-6">
-                <h1 className="text-xl font-semibold text-gray-100">Intake Form</h1>
+                <h1 className="text-xl font-semibold text-gray-100">Input</h1>
                 <p className="text-sm text-gray-500 mt-0.5">Submit your company and target audience details to feed the GTM pipeline</p>
             </div>
 

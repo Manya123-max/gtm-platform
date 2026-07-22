@@ -10,6 +10,8 @@ import Contacts from './pages/Contacts'
 import ContactDetail from './pages/ContactDetail'
 import { Deals, Outreach, Content, Revenue, Agents } from './pages/index'
 import InputForm from './components/InputForm'
+import History from './pages/History'
+import { SessionProvider } from './context/SessionContext'
 
 const qc = new QueryClient({
   defaultOptions: { queries: { staleTime: 30_000, retry: 1 } }
@@ -19,6 +21,7 @@ ReactDOM.createRoot(document.getElementById('root')).render(
   <React.StrictMode>
     <ErrorBoundary>
       <QueryClientProvider client={qc}>
+        <SessionProvider>
         <BrowserRouter>
           <Routes>
             <Route path="/" element={<Layout />}>
@@ -32,9 +35,11 @@ ReactDOM.createRoot(document.getElementById('root')).render(
               <Route path="content"      element={<Content />} />
               <Route path="revenue"      element={<Revenue />} />
               <Route path="input"        element={<InputForm />} />
+              <Route path="history"      element={<History />} />
             </Route>
           </Routes>
         </BrowserRouter>
+        </SessionProvider>
       </QueryClientProvider>
     </ErrorBoundary>
   </React.StrictMode>

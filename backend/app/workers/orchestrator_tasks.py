@@ -132,10 +132,18 @@ def run_agent_node(
                                 "titles": titles,
                                 "geographies": geographies,
                                 "employee_ranges": employee_ranges,
+<<<<<<< HEAD
                                 "keywords": " ".join(keyword_list) if keyword_list else None,
                                 #"company_name": user_input.company_name,
                                 "threshold": settings.ICP_SCORE_THRESHOLD,  # Set threshold to 0 for user form submissions
                                 "limit": 25,
+=======
+                                "keywords": keyword_list[0] if keyword_list else None,
+                                "company_name": user_input.company_name,
+                                "threshold": 0,  # Set threshold to 0 for user form submissions
+                                "limit": 10,
+                                "user_input_id": user_input.id,
+>>>>>>> e787f795c7a7dc7689518caa825a2c0cf8a68798
                             }
                         else:
                             cfg = {

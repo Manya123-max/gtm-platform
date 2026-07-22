@@ -490,3 +490,17 @@ class AgentSchedule(Base):
         default=datetime.utcnow,
         onupdate=datetime.utcnow,
     )
+class UserInput(Base):
+    """
+    Raw form submissions from the frontend intake form.
+    Captured via POST /submit-input before any agent processing.
+    """
+    __tablename__ = "user_inputs"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    company_name: Mapped[str] = mapped_column(String(300), nullable=False)
+    company_size: Mapped[str] = mapped_column(String(50), nullable=False)
+    services: Mapped[str] = mapped_column(String(300), nullable=False)
+    location: Mapped[str] = mapped_column(String(200), nullable=False)
+    job_title: Mapped[str] = mapped_column(String(200), nullable=False)
+    keywords: Mapped[str] = mapped_column(Text, nullable=False)

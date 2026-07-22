@@ -1,7 +1,7 @@
 # ── Web framework ──────────────────────────────────────────────────────────
 fastapi==0.115.5
 uvicorn[standard]==0.32.1
-python-multipart==0.0.31
+python-multipart==0.0.17
 
 # ── Database ───────────────────────────────────────────────────────────────
 sqlalchemy[asyncio]==2.0.36
@@ -41,7 +41,7 @@ tenacity==9.0.0
 croniter==3.0.3
 
 # ── Auth ───────────────────────────────────────────────────────────────────
-python-jose[cryptography]==3.4.0
+python-jose[cryptography]==3.3.0
 passlib[bcrypt]==1.7.4
 
 # ── Notifications ──────────────────────────────────────────────────────────
@@ -49,8 +49,9 @@ passlib[bcrypt]==1.7.4
 # Add back if you need Slack: slack-bolt==1.22.0 slack-sdk==3.34.0
 
 # ── Utilities ──────────────────────────────────────────────────────────────
-python-dotenv==1.2.2
+python-dotenv==1.0.1
 structlog==24.4.0
-orjson==3.11.6
+orjson==3.10.12
 python-dateutil==2.9.0
 pytz==2024.2
+psycopg2-binary

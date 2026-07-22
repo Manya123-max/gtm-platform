@@ -683,25 +683,39 @@ async def submit_input(data: InputData, db: AsyncSession = Depends(get_db)):
     if agent_ids:
         titles = [t.strip() for t in data.job_title.split(",") if t.strip()]
         geographies = [g.strip() for g in data.location.split(",") if g.strip()]
-        size = data.company_size.replace("-", ",").strip()
-        employee_ranges = [size] if size else ["11,200"]
 
-        # Build keyword list from keywords + services for Apollo filtering
+        # Map raw input to Apollo's valid employee range format
+        def to_apollo_ranges(size_str: str) -> list:
+            try:
+                parts = size_str.replace("-", ",").split(",")
+                low = int(parts[0].strip())
+                high = int(parts[-1].strip()) if len(parts) > 1 else low
+                apollo_ranges = [
+                    ("1,10", 1, 10), ("11,50", 11, 50), ("51,200", 51, 200),
+                    ("201,500", 201, 500), ("501,1000", 501, 1000),
+                    ("1001,5000", 1001, 5000), ("5001,10000", 5001, 10000),
+                 ]
+                return [label for label, lo, hi in apollo_ranges if lo <= high and hi >= low]
+            except Exception:
+                return ["51,200"]
+
+        employee_ranges = to_apollo_ranges(data.company_size) or ["51,200"]
+
         keyword_list = []
         if data.keywords:
-            keyword_list.extend([k.strip() for k in data.keywords.split(",") if k.strip()])
+           keyword_list.extend([k.strip() for k in data.keywords.split(",") if k.strip()])
         if data.services:
-            keyword_list.extend([s.strip() for s in data.services.split(",") if s.strip()])
+           keyword_list.extend([s.strip() for s in data.services.split(",") if s.strip()])
 
         payload = {
-            "icp_config": {
-                "titles": titles,
-                "geographies": geographies,
-                "employee_ranges": employee_ranges,
-                "keywords": keyword_list[0] if keyword_list else None,
-                "company_name": data.company_name,
-                "threshold": 0,  # Set threshold to 0 for user form submissions
-                "limit": 10,
+           "icp_config": {
+               "titles": titles,
+               "geographies": geographies,
+               "employee_ranges": employee_ranges,
+               "keywords": " ".join(keyword_list) if keyword_list else None,
+               # company_name intentionally omitted — that's YOUR company, not the target
+               "threshold": settings.ICP_SCORE_THRESHOLD,
+               "limit": 25,
             }
         }
 

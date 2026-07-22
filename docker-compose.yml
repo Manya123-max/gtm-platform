@@ -1,0 +1,167 @@
+# ── LOW DISK / LOW MEMORY optimised compose ──────────────────────────────
+# Removes: Flower, Metabase (saves ~2GB disk + 1GB RAM)
+# Backend image: ~600MB (was ~4GB — sentence-transformers/PyTorch removed)
+# Total stack RAM: ~1.5GB (was ~4GB)
+#
+# To start everything:          docker-compose up -d
+# To start minimal (API only):  docker-compose up -d db redis backend
+# To run seed data:             docker-compose exec backend python scripts/seed.py
+
+services:
+
+  # ── PostgreSQL ────────────────────────────────────────────────────────
+  db:
+    image: pgvector/pgvector:pg16
+    container_name: gtm_db
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-gtm}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-gtmpass}
+      POSTGRES_DB: ${POSTGRES_DB:-gtm}
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    #  - ./backend/scripts/init_db.sql:/docker-entrypoint-initdb.d/init.sql
+    ports:
+      - "5432:5432"
+    # Memory limit — prevents OOM on low-RAM machines
+    mem_limit: 512m
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-gtm} -d ${POSTGRES_DB:-gtm} "]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  celery_beat:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    container_name: gtm_celery_beat
+    restart: unless-stopped
+    env_file: ./backend/.env
+    environment:
+      DATABASE_URL: postgresql+asyncpg://${POSTGRES_USER:-gtm}:${POSTGRES_PASSWORD:-gtmpass}@db:5432/${POSTGRES_DB:-gtm}
+      REDIS_URL: redis://redis:6379/0
+      CELERY_BROKER_URL: redis://redis:6379/1
+      CELERY_RESULT_BACKEND: redis://redis:6379/2
+    depends_on:
+      db:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      celery_worker:
+        condition: service_started
+    volumes:
+      - ./backend:/app
+    command: celery -A app.core.celery_app beat --loglevel=info --scheduler celery.beat.PersistentScheduler
+    mem_limit: 256m
+
+  # ── Redis ─────────────────────────────────────────────────────────────
+  redis:
+    image: redis:7-alpine
+    container_name: gtm_redis
+    restart: unless-stopped
+    # 256MB cap — enough for task queue + dedup keys at this scale
+    command: redis-server --maxmemory 256mb --maxmemory-policy allkeys-lru
+    ports:
+      - "6379:6379"
+    mem_limit: 300m
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 3s
+      retries: 5
+
+  # ── FastAPI Backend ───────────────────────────────────────────────────
+  backend:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    container_name: gtm_backend
+    restart: unless-stopped
+    env_file: ./backend/.env
+    environment:
+      DATABASE_URL: postgresql+asyncpg://${POSTGRES_USER:-gtm}:${POSTGRES_PASSWORD:-gtmpass}@db:5432/${POSTGRES_DB:-gtm}
+      REDIS_URL: redis://redis:6379/0
+      CELERY_BROKER_URL: redis://redis:6379/1
+      CELERY_RESULT_BACKEND: redis://redis:6379/2
+    ports:
+      - "8000:8000"
+    depends_on:
+      db:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    volumes:
+      - ./backend:/app
+    mem_limit: 512m
+    command: uvicorn app.main:app --host 0.0.0.0 --port 8000 --reload
+
+  # ── Celery Worker ─────────────────────────────────────────────────────
+  celery_worker:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    container_name: gtm_celery_worker
+    restart: unless-stopped
+    env_file: ./backend/.env
+    environment:
+      DATABASE_URL: postgresql+asyncpg://${POSTGRES_USER:-gtm}:${POSTGRES_PASSWORD:-gtmpass}@db:5432/${POSTGRES_DB:-gtm}
+      REDIS_URL: redis://redis:6379/0
+      CELERY_BROKER_URL: redis://redis:6379/1
+      CELERY_RESULT_BACKEND: redis://redis:6379/2
+    depends_on:
+      db:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    volumes:
+      - ./backend:/app
+    # concurrency=2 saves RAM vs default 4
+    command: celery -A app.core.celery_app worker --pool=solo --loglevel=info -Q default,agents,webhooks
+    mem_limit: 512m
+
+  # ── Celery Beat ───────────────────────────────────────────────────────
+  # celery_beat:
+  #   build:
+  #     context: ./backend
+  #     dockerfile: Dockerfile
+  #   container_name: gtm_celery_beat
+  #   restart: unless-stopped
+  #   env_file: .env
+  #   environment:
+  #     DATABASE_URL: postgresql+asyncpg://${POSTGRES_USER:-gtm}:${POSTGRES_PASSWORD:-gtmpass}@db:5432/${POSTGRES_DB:-gtm}
+  #     REDIS_URL: redis://redis:6379/0
+  #     CELERY_BROKER_URL: redis://redis:6379/1
+  #     CELERY_RESULT_BACKEND: redis://redis:6379/2
+  #   depends_on:
+  #     - celery_worker
+  #   volumes:
+  #     - ./backend:/app
+  #   command: celery -A app.core.celery_app beat --loglevel=info --scheduler celery.beat.PersistentScheduler
+  #   mem_limit: 256m  
+
+  # ── React Frontend ────────────────────────────────────────────────────
+  frontend:
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile
+    container_name: gtm_frontend
+    restart: unless-stopped
+    ports:
+      - "3000:3000"
+#    environment:
+#      VITE_API_URL: http://localhost:8000
+    depends_on:
+      - backend
+    mem_limit: 256m
+
+  # Flower REMOVED — saves disk + RAM
+  # Metabase REMOVED — saves ~1GB disk + 512MB RAM
+  # Re-add Metabase later when you have more disk:
+  #   metabase:
+  #     image: metabase/metabase:latest
+  #     ports: ["3001:3000"]
+  #     mem_limit: 1g
+
+volumes:
+  pgdata:

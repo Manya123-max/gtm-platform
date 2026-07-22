@@ -1,0 +1,56 @@
+# ── Web framework ──────────────────────────────────────────────────────────
+fastapi==0.115.5
+uvicorn[standard]==0.32.1
+python-multipart==0.0.17
+
+# ── Database ───────────────────────────────────────────────────────────────
+sqlalchemy[asyncio]==2.0.36
+asyncpg==0.30.0
+alembic==1.14.0
+pgvector==0.3.6
+
+# ── Redis / Celery ─────────────────────────────────────────────────────────
+redis==5.2.1
+celery[redis]==5.4.0
+# flower removed — saves ~200MB, access task status via API instead
+
+# ── Validation ─────────────────────────────────────────────────────────────
+pydantic==2.10.3
+pydantic-settings==2.6.1
+email-validator==2.2.0
+
+
+# ── ML — lightweight versions ─────────────────────────────────────────────
+# NOTE: lightgbm removed — rule-based scoring used until 50+ deals exist
+# lightgbm only needed after you have real CRM data. Add back then.
+numpy>=2.1.0
+scikit-learn>=1.6.0
+# pandas, statsmodels removed — pure SQL queries used for analytics instead
+
+# ── Embeddings — HASH-BASED, zero dependencies ────────────────────────────
+# sentence-transformers REMOVED — it pulls PyTorch (~2GB). 
+# Replaced with lightweight hash-based similarity for brand voice retrieval.
+# Accuracy is lower but disk cost is 2GB → 0MB.
+# Re-add sentence-transformers when you have 10+ GB free disk.
+
+# ── HTTP ───────────────────────────────────────────────────────────────────
+httpx==0.27.2
+tenacity==9.0.0
+
+# ── Scheduling ─────────────────────────────────────────────────────────────
+croniter==3.0.3
+
+# ── Auth ───────────────────────────────────────────────────────────────────
+python-jose[cryptography]==3.3.0
+passlib[bcrypt]==1.7.4
+
+# ── Notifications ──────────────────────────────────────────────────────────
+# slack-bolt removed — only used when SLACK_BOT_TOKEN is set, use ntfy instead
+# Add back if you need Slack: slack-bolt==1.22.0 slack-sdk==3.34.0
+
+# ── Utilities ──────────────────────────────────────────────────────────────
+python-dotenv==1.0.1
+structlog==24.4.0
+orjson==3.10.12
+python-dateutil==2.9.0
+pytz==2024.2

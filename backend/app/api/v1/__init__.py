@@ -10,6 +10,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select, and_, func, desc
 from pydantic import BaseModel
 
+from app.core.config import settings
 from app.core.database import get_db
 from app.core.config import settings
 from app.models.models import (
@@ -791,26 +792,15 @@ async def submit_input(data: InputData, db: AsyncSession = Depends(get_db)):
            keyword_list.extend([s.strip() for s in data.services.split(",") if s.strip()])
 
         payload = {
-<<<<<<< HEAD
-           "icp_config": {
-               "titles": titles,
-               "geographies": geographies,
-               "employee_ranges": employee_ranges,
-               "keywords": " ".join(keyword_list) if keyword_list else None,
-               # company_name intentionally omitted — that's YOUR company, not the target
-               "threshold": settings.ICP_SCORE_THRESHOLD,
-               "limit": 25,
-=======
             "icp_config": {
                 "titles": titles,
                 "geographies": geographies,
                 "employee_ranges": employee_ranges,
-                "keywords": keyword_list[0] if keyword_list else None,
-                "company_name": data.company_name,
-                "threshold": 0,  # Set threshold to 0 for user form submissions
-                "limit": 10,
-                "user_input_id": record.id,  # ← stamp session on all contacts
->>>>>>> e787f795c7a7dc7689518caa825a2c0cf8a68798
+                "keywords": " ".join(keyword_list) if keyword_list else None,
+                # company_name intentionally omitted — that's YOUR company, not the target
+                "threshold": settings.ICP_SCORE_THRESHOLD,
+                "limit": 25,
+                "user_input_id": record.id,  # stamp session on all contacts
             }
         }
 

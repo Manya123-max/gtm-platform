@@ -61,12 +61,13 @@ app.include_router(api_router, prefix="/api/v1")
 # ── Input Schema (new) ───────────────────────────────────────────────────
 
 class InputData(BaseModel):
-    company_name: str
-    company_size: str
-    services: str
-    location: str
-    job_title: str
-    keywords: str
+    our_company_name:    str
+    our_services:        str
+    target_location:     str
+    target_industries:   str = ""
+    target_company_size: str
+    target_keywords:     str = ""
+    target_job_titles:   str
 
 
 @app.post("/submit-input")
@@ -79,12 +80,13 @@ async def submit_input(data: InputData):
 
     async with AsyncSessionLocal() as db:
         record = UserInput(
-            company_name=data.company_name,
-            company_size=data.company_size,
-            services=data.services,
-            location=data.location,
-            job_title=data.job_title,
-            keywords=data.keywords,
+            our_company_name=    data.our_company_name,
+            our_services=        data.our_services,
+            target_location=     data.target_location,
+            target_industries=   data.target_industries or None,
+            target_company_size= data.target_company_size,
+            target_keywords=     data.target_keywords or None,
+            target_job_titles=   data.target_job_titles,
         )
         db.add(record)
         await db.commit()

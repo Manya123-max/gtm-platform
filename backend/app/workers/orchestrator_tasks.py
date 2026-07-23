@@ -102,39 +102,51 @@ def run_agent_node(
                         cfg: Dict[str, Any] = dict(cfg_value)
                     else:
                         from app.models.models import UserInput
+                        from app.agents.industry_tag_map import resolve_industries
+                        from app.api.v1 import _expand_size_range
                         stmt = select(UserInput).order_by(UserInput.id.desc()).limit(1)
                         res = await db.execute(stmt)
                         user_input = res.scalars().first()
                         if user_input:
-                            titles = [t.strip() for t in user_input.job_title.split(",") if t.strip()]
-                            geographies = [g.strip() for g in user_input.location.split(",") if g.strip()]
-                            size = user_input.company_size.replace("-", ",").strip()
-                            employee_ranges = [size] if size else ["11,200"]
-                            # Build keyword list from keywords + services
-                            keyword_list: list = []
-                            if user_input.keywords:
-                                keyword_list.extend([k.strip() for k in user_input.keywords.split(",") if k.strip()])
-                            if user_input.services:
-                                keyword_list.extend([s.strip() for s in user_input.services.split(",") if s.strip()])
+                            titles = [
+                                t.strip()
+                                for t in (user_input.target_job_titles or "").split(",")
+                                if t.strip()
+                            ]
+                            geographies = [
+                                g.strip()
+                                for g in (user_input.target_location or "").split(",")
+                                if g.strip()
+                            ]
+                            employee_ranges = _expand_size_range(
+                                user_input.target_company_size or "11-200"
+                            )
+                            industry_tag_ids, industry_kw_fallback = resolve_industries(
+                                user_input.target_industries or ""
+                            )
+                            kw_list = [
+                                k.strip()
+                                for k in (user_input.target_keywords or "").split(",")
+                                if k.strip()
+                            ]
+                            kw_list += industry_kw_fallback
                             cfg = {
-                                "titles": titles,
-                                "geographies": geographies,
-                                "employee_ranges": employee_ranges,
-                                "keywords": keyword_list[0] if keyword_list else None,
-                                "company_name": user_input.company_name,
-                                "threshold": 0,  # Set threshold to 0 for user form submissions
-                                "limit": 10,
-                                "user_input_id": user_input.id,
+                                "titles":                 titles,
+                                "organization_locations": geographies,
+                                "employee_ranges":        employee_ranges,
+                                "industry_tag_ids":       industry_tag_ids if industry_tag_ids else None,
+                                "org_keyword_tags":       kw_list if kw_list else None,
+                                "vendor_services":        user_input.our_services,
+                                "threshold":              0,
+                                "enrich_limit":           25,
+                                "user_input_id":          user_input.id,
                             }
                         else:
                             cfg = {
                                 # Empty titles keep manual test runs broad.
                                 "titles": [],
-                                "employee_ranges": [
-                                    "11,200",
-                                    "201,1000",
-                                ],
-                                "limit": 10,
+                                "employee_ranges": ["11,200", "201,1000"],
+                                "enrich_limit": 25,
                             }
 
                     raw_result = await ProspectAgent(db).run(cfg)

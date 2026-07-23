@@ -108,6 +108,21 @@ async def get_active_session(db: AsyncSession = Depends(get_db)):
     return {"user_input_id": row}
 
 
+@router.get("/sessions/{session_id}")
+async def get_session_details(session_id: int, db: AsyncSession = Depends(get_db)):
+    """Returns details for a specific user input session."""
+    from app.models.models import UserInput
+    result = await db.execute(select(UserInput).where(UserInput.id == session_id))
+    row = result.scalar_one_or_none()
+    if not row:
+        return {"error": "Session not found"}, 404
+    return {
+        "id": row.id,
+        "our_company_name": row.our_company_name,
+        "our_services": row.our_services,
+    }
+
+
 @router.get("/dashboard/overview")
 async def get_dashboard_overview(
     user_input_id: Optional[int] = None,
@@ -706,13 +721,39 @@ async def update_agent_schedule(body: AgentScheduleRequest, db: AsyncSession = D
     }
 
 
+# Apollo's standard employee-count buckets used for range expansion
+_APOLLO_BUCKETS = [
+    (1, 10), (11, 50), (51, 200), (201, 500), (501, 1000),
+    (1001, 5000), (5001, 10000), (10001, 20000), (20001, 50000), (50001, 100000),
+]
+
+
+def _expand_size_range(size_str: str) -> list:
+    """
+    Convert a user-entered size range like '50-5000' into all overlapping
+    Apollo employee-count bucket strings.
+
+    Examples:
+        '50-5000'  → ['51,200', '201,500', '501,1000', '1001,5000']
+        '10-10000' → ['1,10', '11,50', '51,200', '201,500', '501,1000',
+                       '1001,5000', '5001,10000']
+    """
+    try:
+        parts = size_str.replace(" ", "").split("-")
+        lo, hi = int(parts[0]), int(parts[-1])
+        return [f"{a},{b}" for a, b in _APOLLO_BUCKETS if a <= hi and b >= lo]
+    except Exception:
+        return ["11,200"]   # safe default
+
+
 class InputData(BaseModel):
-    company_name: str
-    company_size: str
-    services: str
-    location: str
-    job_title: str
-    keywords: str
+    our_company_name:    str          # vendor's company name
+    our_services:        str          # what we sell — personalization context only
+    target_location:     str          # where prospect companies are based
+    target_industries:   str = ""    # optional: "SaaS, Fintech"
+    target_company_size: str          # range: "50-5000"
+    target_keywords:     str = ""    # optional: "cloud, kubernetes"
+    target_job_titles:   str          # "CTO, VP Engineering"
 
 
 @router.get("/input-history")
@@ -725,13 +766,14 @@ async def get_input_history(db: AsyncSession = Depends(get_db)):
     rows = result.scalars().all()
     return [
         {
-            "id": r.id,
-            "company_name": r.company_name,
-            "company_size": r.company_size,
-            "services": r.services,
-            "location": r.location,
-            "job_title": r.job_title,
-            "keywords": r.keywords,
+            "id":                  r.id,
+            "our_company_name":    r.our_company_name,
+            "our_services":        r.our_services,
+            "target_location":     r.target_location,
+            "target_industries":   r.target_industries or "",
+            "target_company_size": r.target_company_size,
+            "target_keywords":     r.target_keywords or "",
+            "target_job_titles":   r.target_job_titles,
         }
         for r in rows
     ]
@@ -748,13 +790,16 @@ async def submit_input(data: InputData, db: AsyncSession = Depends(get_db)):
     from app.orchestrator.orchestrator_service import OrchestratorService
     from app.workers.orchestrator_tasks import build_pipeline_chain
 
+    from app.agents.industry_tag_map import resolve_industries
+
     record = UserInput(
-        company_name=data.company_name,
-        company_size=data.company_size,
-        services=data.services,
-        location=data.location,
-        job_title=data.job_title,
-        keywords=data.keywords,
+        our_company_name=    data.our_company_name,
+        our_services=        data.our_services,
+        target_location=     data.target_location,
+        target_industries=   data.target_industries or None,
+        target_company_size= data.target_company_size,
+        target_keywords=     data.target_keywords or None,
+        target_job_titles=   data.target_job_titles,
     )
     db.add(record)
     await db.commit()
@@ -764,30 +809,37 @@ async def submit_input(data: InputData, db: AsyncSession = Depends(get_db)):
         agent_ids.remove("A4")
 
     if agent_ids:
-        titles = [t.strip() for t in data.job_title.split(",") if t.strip()]
-        geographies = [g.strip() for g in data.location.split(",") if g.strip()]
-        size = data.company_size.replace("-", ",").strip()
-        employee_ranges = [size] if size else ["11,200"]
+        # Job titles
+        titles = [t.strip() for t in data.target_job_titles.split(",") if t.strip()]
 
-        # Build keyword list from keywords + services for Apollo filtering
-        keyword_list = []
-        if data.keywords:
-            keyword_list.extend([k.strip() for k in data.keywords.split(",") if k.strip()])
-        if data.services:
-            keyword_list.extend([s.strip() for s in data.services.split(",") if s.strip()])
+        # Organisation locations (company HQ, not person location)
+        geographies = [g.strip() for g in data.target_location.split(",") if g.strip()]
+
+        # Expand size range into all overlapping Apollo buckets
+        employee_ranges = _expand_size_range(data.target_company_size)
+
+        # Industry resolution: matched → tag IDs, unmatched → keyword fallback
+        industry_tag_ids, industry_kw_fallback = resolve_industries(data.target_industries)
+
+        # Build org keyword tags: user keywords + unmatched industry terms
+        kw_list = [k.strip() for k in data.target_keywords.split(",") if k.strip()]
+        kw_list += industry_kw_fallback
+        org_keyword_tags = kw_list if kw_list else None
 
         payload = {
             "icp_config": {
-                "titles": titles,
-                "geographies": geographies,
-                "employee_ranges": employee_ranges,
-                "keywords": keyword_list[0] if keyword_list else None,
-                "company_name": data.company_name,
-                "threshold": 0,  # Set threshold to 0 for user form submissions
-                "limit": 10,
-                "user_input_id": record.id,  # ← stamp session on all contacts
+                "titles":               titles,
+                "organization_locations": geographies,
+                "employee_ranges":      employee_ranges,
+                "industry_tag_ids":     industry_tag_ids if industry_tag_ids else None,
+                "org_keyword_tags":     org_keyword_tags,
+                "vendor_services":      data.our_services,  # personalization only
+                "threshold":            0,
+                "enrich_limit":         25,
+                "user_input_id":        record.id,
             }
         }
+        # NOTE: company_name is intentionally absent from icp_config
 
         orchestrator = OrchestratorService(db)
         workflow = await orchestrator.create_workflow_run(

@@ -9,6 +9,7 @@ const SessionContext = createContext({
 
 export function SessionProvider({ children }) {
   const [activeSessionId, setActiveSessionIdState] = useState(null)
+  const [ourCompanyName, setOurCompanyName] = useState('')
   const [isLoading, setIsLoading] = useState(true)
 
   // On mount, fetch the most recent session from the backend
@@ -21,12 +22,25 @@ export function SessionProvider({ children }) {
       .finally(() => setIsLoading(false))
   }, [])
 
+  // Fetch session details whenever the active session ID changes
+  useEffect(() => {
+    if (activeSessionId) {
+      api.get(`/sessions/${activeSessionId}`)
+        .then(res => {
+          setOurCompanyName(res.data.our_company_name || '')
+        })
+        .catch(() => setOurCompanyName(''))
+    } else {
+      setOurCompanyName('')
+    }
+  }, [activeSessionId])
+
   const setActiveSessionId = useCallback((id) => {
     setActiveSessionIdState(id)
   }, [])
 
   return (
-    <SessionContext.Provider value={{ activeSessionId, setActiveSessionId, isLoading }}>
+    <SessionContext.Provider value={{ activeSessionId, setActiveSessionId, ourCompanyName, isLoading }}>
       {children}
     </SessionContext.Provider>
   )

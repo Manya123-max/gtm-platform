@@ -133,8 +133,10 @@ def run_agent_node(
                                 "geographies": geographies,
                                 "employee_ranges": employee_ranges,
                                 "keywords": " ".join(keyword_list) if keyword_list else None,
-                                # company_name intentionally omitted — that's YOUR company, not the target
-                                "threshold": settings.ICP_SCORE_THRESHOLD,
+                                # company_name intentionally NOT sent to Apollo —
+                                # it is YOUR company, not a target company.
+                                # Sending it would restrict Apollo to searching YOUR employees.
+                                "threshold": 0,   # bypass scoring for form-driven runs
                                 "limit": 25,
                                 "user_input_id": user_input.id,
                             }

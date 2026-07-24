@@ -9,7 +9,7 @@ from __future__ import annotations
 
 import secrets
 from datetime import datetime
-from typing import Any, Dict, List, Tuple
+from typing import Any, Dict, List, Optional, Tuple
 
 import httpx
 import structlog
@@ -102,11 +102,10 @@ class ProspectAgent:
             body["organization_num_employees_ranges"] = icp_config["employee_ranges"]
         if icp_config.get("seniorities"):
             body["person_seniorities"] = icp_config["seniorities"]
-        if icp_config.get("company_name"):
-            # Target the company specifically using Apollo's official filter
-            body["q_organization_name"] = icp_config["company_name"]
-        elif icp_config.get("keywords"):
-            # If no specific company, search by keywords
+        # Always send keywords — narrows to relevant domain/industry.
+        # NOTE: company_name is intentionally NOT sent to Apollo.
+        # It is the USER's own company, not a target company.
+        if icp_config.get("keywords"):
             body["q_keywords"] = icp_config["keywords"]
 
         try:
@@ -119,24 +118,11 @@ class ProspectAgent:
                 search_resp.raise_for_status()
                 search_data = search_resp.json()
                 people = search_data.get("people") or search_data.get("contacts") or []
-
-                # Fallback: if company search was done but yielded 0 results, fall back to broad keyword search
-                if not people and icp_config.get("company_name"):
-                    logger.info("Specific company yielded 0 results; falling back to broader keyword search", company=icp_config["company_name"])
-                    body.pop("q_organization_name", None)
-                    if icp_config.get("keywords"):
-                        body["q_keywords"] = icp_config["keywords"]
-                    
-                    search_resp = await client.post(
-                        "https://api.apollo.io/api/v1/mixed_people/api_search",
-                        headers=headers,
-                        json=body,
-                    )
-                    search_resp.raise_for_status()
-                    search_data = search_resp.json()
-                    people = search_data.get("people") or search_data.get("contacts") or []
                 pagination = search_data.get("pagination") or {}
-                total_entries = pagination.get("total_entries") or search_data.get("total_entries", 0)
+                total_entries = (
+                    pagination.get("total_entries")
+                    or search_data.get("total_entries", 0)
+                )
 
                 if not people:
                     return [], {
@@ -149,7 +135,7 @@ class ProspectAgent:
 
                 enriched_people: List[Dict[str, Any]] = []
                 for i in range(0, len(people), 10):
-                    details = [{"id": p["id"]} for p in people[i:i + 10] if p.get("id")]
+                    details = [{"id": p["id"]} for p in people[i : i + 10] if p.get("id")]
                     if not details:
                         continue
                     match_resp = await client.post(
@@ -180,7 +166,11 @@ class ProspectAgent:
                     "method": "people_search_bulk_match",
                     "page": page,
                     "total_entries": total_entries,
-                    "reason": "apollo_contacts_found" if contacts else "apollo_bulk_match_no_emails",
+                    "reason": (
+                        "apollo_contacts_found"
+                        if contacts
+                        else "apollo_bulk_match_no_emails"
+                    ),
                 }
         except httpx.HTTPStatusError as exc:
             logger.error("Apollo fetch failed", status_code=exc.response.status_code)
@@ -202,7 +192,11 @@ class ProspectAgent:
     @staticmethod
     def _parse_apollo_contact(person: Dict[str, Any]) -> Dict[str, Any]:
         organization = person.get("organization") or {}
-        domain = organization.get("primary_domain") or organization.get("website_url") or ""
+        domain = (
+            organization.get("primary_domain")
+            or organization.get("website_url")
+            or ""
+        )
         domain = domain.replace("https://", "").replace("http://", "").strip("/")
 
         return {
@@ -225,7 +219,9 @@ class ProspectAgent:
             "email_verified": True,
         }
 
-    async def _score_contacts(self, contacts: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    async def _score_contacts(
+        self, contacts: List[Dict[str, Any]]
+    ) -> List[Dict[str, Any]]:
         scored: List[Dict[str, Any]] = []
         for contact in contacts:
             if not contact.get("email"):
@@ -236,7 +232,11 @@ class ProspectAgent:
             scored.append(contact)
         return scored
 
-    async def _save_contacts(self, contacts: List[Dict[str, Any]], user_input_id: int = None) -> Dict[str, Any]:
+    async def _save_contacts(
+        self,
+        contacts: List[Dict[str, Any]],
+        user_input_id: Optional[int] = None,   # ← fixed: Optional[int] not int
+    ) -> Dict[str, Any]:
         inserted_ids: List[str] = []
         updated_ids: List[str] = []
 
@@ -245,7 +245,9 @@ class ProspectAgent:
             if not email:
                 continue
 
-            result = await self.db.execute(select(Contact).where(Contact.email == email))
+            result = await self.db.execute(
+                select(Contact).where(Contact.email == email)
+            )
             contact = result.scalar_one_or_none()
             if contact:
                 contact.icp_score = data.get("win_pattern_score")
@@ -325,6 +327,10 @@ class ProspectAgent:
             return "qualified_contacts_found_but_not_persisted"
         return "apollo_contacts_persisted"
 
-    async def _log_funnel_event(self, event_type: str, metadata: Dict[str, Any]) -> None:
-        self.db.add(FunnelEvent(event_type=event_type, agent_id="A1", event_metadata=metadata))
+    async def _log_funnel_event(
+        self, event_type: str, metadata: Dict[str, Any]
+    ) -> None:
+        self.db.add(
+            FunnelEvent(event_type=event_type, agent_id="A1", event_metadata=metadata)
+        )
         await self.db.commit()

@@ -14,7 +14,7 @@ function RiskBadge({ score }) {
 }
 
 export function Deals() {
-  const { activeSessionId } = useSession()
+  const { activeSessionId, ourCompanyName } = useSession()
   const { data: deals = [], isLoading } = useQuery({
     queryKey: ['deals', activeSessionId],
     queryFn: () => fetchDeals(activeSessionId != null ? { user_input_id: activeSessionId } : {})
@@ -41,7 +41,9 @@ export function Deals() {
   return (
     <div className="max-w-6xl mx-auto">
       <div className="mb-6">
-        <h1 className="text-xl font-semibold text-gray-100">Deals</h1>
+        <h1 className="text-xl font-semibold text-gray-100">
+          Deals {ourCompanyName ? `for ${ourCompanyName}` : ''}
+        </h1>
         <p className="text-sm text-gray-500 mt-0.5">Pipeline health and A5 risk detection</p>
       </div>
 
@@ -139,6 +141,7 @@ export function Deals() {
 
 // ── Revenue Page ──────────────────────────────────────────────────────────
 export function Revenue() {
+  const { activeSessionId, ourCompanyName } = useSession()
   const { data: forecast } = useQuery({ queryKey: ['forecast'], queryFn: fetchForecast })
   const { data: metrics = {} } = useQuery({
     queryKey: ['funnel-metrics', 30],
@@ -160,7 +163,9 @@ export function Revenue() {
   return (
     <div className="max-w-6xl mx-auto">
       <div className="mb-6">
-        <h1 className="text-xl font-semibold text-gray-100">Revenue Intelligence</h1>
+        <h1 className="text-xl font-semibold text-gray-100">
+          Revenue Intelligence {ourCompanyName ? `for ${ourCompanyName}` : ''}
+        </h1>
         <p className="text-sm text-gray-500 mt-0.5">A7 forecast model — 30/60/90-day pipeline</p>
       </div>
 
@@ -272,6 +277,7 @@ const AGENTS = [
 const SCHEDULABLE = new Set(['A1', 'A2', 'A6'])
 
 export function Agents() {
+  const { activeSessionId, ourCompanyName } = useSession()
   const queryClient = useQueryClient()
   const location = useLocation()
   const incomingRunId = location.state?.runId
@@ -509,7 +515,9 @@ export function Agents() {
 
       <div className="mb-6 flex items-start justify-between gap-4">
         <div>
-          <h1 className="text-xl font-semibold text-gray-100">Agent Control</h1>
+          <h1 className="text-xl font-semibold text-gray-100">
+            Agent Control {ourCompanyName ? `for ${ourCompanyName}` : ''}
+          </h1>
           <p className="text-sm text-gray-500 mt-0.5">Manual agent execution with persistent workflow status</p>
         </div>
         <button
@@ -631,7 +639,7 @@ export function Agents() {
 
 // ── Outreach Page ─────────────────────────────────────────────────────────
 export function Outreach() {
-  const { activeSessionId } = useSession()
+  const { activeSessionId, ourCompanyName } = useSession()
   const { data: drafts = [] } = useQuery({
     queryKey: ['drafts', activeSessionId],
     queryFn: () => fetchDrafts(activeSessionId),
@@ -640,7 +648,9 @@ export function Outreach() {
   return (
     <div className="max-w-4xl mx-auto">
       <div className="mb-6">
-        <h1 className="text-xl font-semibold text-gray-100">Outreach</h1>
+        <h1 className="text-xl font-semibold text-gray-100">
+          Outreach {ourCompanyName ? `for ${ourCompanyName}` : ''}
+        </h1>
         <p className="text-sm text-gray-500 mt-0.5">A3 generated drafts and sent log</p>
       </div>
       <div className="card p-0 overflow-hidden">
@@ -675,7 +685,7 @@ export function Outreach() {
 // ── Content Page ──────────────────────────────────────────────────────────
 export function Content() {
   const [format, setFormat] = useState('')
-  const { activeSessionId } = useSession()
+  const { activeSessionId, ourCompanyName } = useSession()
   const { data: content = [] } = useQuery({
     queryKey: ['content', format, activeSessionId],
     queryFn: () => fetchContent({
@@ -691,7 +701,9 @@ export function Content() {
     <div className="max-w-4xl mx-auto">
       <div className="flex items-center justify-between mb-6">
         <div>
-          <h1 className="text-xl font-semibold text-gray-100">Content</h1>
+          <h1 className="text-xl font-semibold text-gray-100">
+            Content {ourCompanyName ? `for ${ourCompanyName}` : ''}
+          </h1>
           <p className="text-sm text-gray-500 mt-0.5">A6 demand-driven content library</p>
         </div>
         <select className="input w-44" value={format} onChange={e => setFormat(e.target.value)}>

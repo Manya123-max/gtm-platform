@@ -131,7 +131,7 @@ function PendingActionsWidget({ actions }) {
 }
 
 export default function Dashboard() {
-  const { activeSessionId } = useSession()
+  const { activeSessionId, ourCompanyName } = useSession()
   const { data: overview, isLoading } = useQuery({
     queryKey: ['overview', activeSessionId],
     queryFn: () => fetchOverview(activeSessionId),
@@ -162,7 +162,9 @@ export default function Dashboard() {
     <div className="max-w-6xl mx-auto">
       {/* Header */}
       <div className="mb-6">
-        <h1 className="text-xl font-semibold text-gray-100">Dashboard</h1>
+        <h1 className="text-xl font-semibold text-gray-100">
+          Dashboard {ourCompanyName ? `for ${ourCompanyName}` : ''}
+        </h1>
         <p className="text-sm text-gray-500 mt-0.5">GTM engine overview — last 30 days</p>
       </div>
 

@@ -496,13 +496,22 @@ class UserInput(Base):
     """
     Raw form submissions from the frontend intake form.
     Captured via POST /submit-input before any agent processing.
+
+    Fields:
+        our_services        — what the vendor sells (personalization context, NOT sent to Apollo)
+        target_location     — where prospect companies are headquartered
+        target_industries   — optional: comma-separated industry names for Apollo filtering
+        target_company_size — employee range e.g. "50-5000" (expanded to Apollo buckets at runtime)
+        target_keywords     — optional: comma-separated keyword signals for Apollo search
+        target_job_titles   — comma-separated job titles to find at prospect companies
     """
     __tablename__ = "user_inputs"
 
-    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
-    company_name: Mapped[str] = mapped_column(String(300), nullable=False)
-    company_size: Mapped[str] = mapped_column(String(50), nullable=False)
-    services: Mapped[str] = mapped_column(String(300), nullable=False)
-    location: Mapped[str] = mapped_column(String(200), nullable=False)
-    job_title: Mapped[str] = mapped_column(String(200), nullable=False)
-    keywords: Mapped[str] = mapped_column(Text, nullable=False)
+    id: Mapped[int]                    = mapped_column(Integer, primary_key=True, autoincrement=True)
+    our_company_name: Mapped[str]      = mapped_column(String(300), nullable=False, server_default="")
+    our_services: Mapped[str]          = mapped_column(String(300), nullable=False)
+    target_location: Mapped[str]       = mapped_column(String(200), nullable=False)
+    target_industries: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    target_company_size: Mapped[str]   = mapped_column(String(50), nullable=False)
+    target_keywords: Mapped[Optional[str]]   = mapped_column(Text, nullable=True)
+    target_job_titles: Mapped[str]     = mapped_column(String(200), nullable=False)

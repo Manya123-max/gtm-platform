@@ -429,7 +429,11 @@ class ProspectAgent:
     @staticmethod
     def _parse_apollo_contact(person: Dict[str, Any]) -> Dict[str, Any]:
         organization = person.get("organization") or {}
-        domain = organization.get("primary_domain") or organization.get("website_url") or ""
+        domain = (
+            organization.get("primary_domain")
+            or organization.get("website_url")
+            or ""
+        )
         domain = domain.replace("https://", "").replace("http://", "").strip("/")
 
         return {

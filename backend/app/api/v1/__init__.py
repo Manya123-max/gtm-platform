@@ -10,6 +10,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select, and_, func, desc
 from pydantic import BaseModel
 
+from app.core.config import settings
 from app.core.database import get_db
 from app.core.config import settings
 from app.models.models import (
@@ -809,34 +810,42 @@ async def submit_input(data: InputData, db: AsyncSession = Depends(get_db)):
         agent_ids.remove("A4")
 
     if agent_ids:
-        # Job titles
-        titles = [t.strip() for t in data.target_job_titles.split(",") if t.strip()]
+        titles = [t.strip() for t in data.job_title.split(",") if t.strip()]
+        geographies = [g.strip() for g in data.location.split(",") if g.strip()]
 
-        # Organisation locations (company HQ, not person location)
-        geographies = [g.strip() for g in data.target_location.split(",") if g.strip()]
+        # Map raw input to Apollo's valid employee range format
+        def to_apollo_ranges(size_str: str) -> list:
+            try:
+                parts = size_str.replace("-", ",").split(",")
+                low = int(parts[0].strip())
+                high = int(parts[-1].strip()) if len(parts) > 1 else low
+                apollo_ranges = [
+                    ("1,10", 1, 10), ("11,50", 11, 50), ("51,200", 51, 200),
+                    ("201,500", 201, 500), ("501,1000", 501, 1000),
+                    ("1001,5000", 1001, 5000), ("5001,10000", 5001, 10000),
+                 ]
+                return [label for label, lo, hi in apollo_ranges if lo <= high and hi >= low]
+            except Exception:
+                return ["51,200"]
 
-        # Expand size range into all overlapping Apollo buckets
-        employee_ranges = _expand_size_range(data.target_company_size)
+        employee_ranges = to_apollo_ranges(data.company_size) or ["51,200"]
 
-        # Industry resolution: matched → tag IDs, unmatched → keyword fallback
-        industry_tag_ids, industry_kw_fallback = resolve_industries(data.target_industries)
-
-        # Build org keyword tags: user keywords + unmatched industry terms
-        kw_list = [k.strip() for k in data.target_keywords.split(",") if k.strip()]
-        kw_list += industry_kw_fallback
-        org_keyword_tags = kw_list if kw_list else None
+        keyword_list = []
+        if data.keywords:
+           keyword_list.extend([k.strip() for k in data.keywords.split(",") if k.strip()])
+        if data.services:
+           keyword_list.extend([s.strip() for s in data.services.split(",") if s.strip()])
 
         payload = {
             "icp_config": {
-                "titles":               titles,
-                "organization_locations": geographies,
-                "employee_ranges":      employee_ranges,
-                "industry_tag_ids":     industry_tag_ids if industry_tag_ids else None,
-                "org_keyword_tags":     org_keyword_tags,
-                "vendor_services":      data.our_services,  # personalization only
-                "threshold":            0,
-                "enrich_limit":         25,
-                "user_input_id":        record.id,
+                "titles": titles,
+                "geographies": geographies,
+                "employee_ranges": employee_ranges,
+                "keywords": " ".join(keyword_list) if keyword_list else None,
+                # company_name intentionally omitted — that's YOUR company, not the target
+                "threshold": settings.ICP_SCORE_THRESHOLD,
+                "limit": 25,
+                "user_input_id": record.id,  # stamp session on all contacts
             }
         }
         # NOTE: company_name is intentionally absent from icp_config

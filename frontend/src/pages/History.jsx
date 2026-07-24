@@ -104,7 +104,7 @@ export default function History() {
                 e.currentTarget.style.boxShadow = 'none'
               }}
             >
-              {/* Top row: company + index badge */}
+              {/* Top row: company name + index badge */}
               <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: '10px' }}>
                 <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
                   <div style={{
@@ -116,15 +116,15 @@ export default function History() {
                     <Building2 size={14} color="white" />
                   </div>
                   <span style={{ fontSize: '15px', fontWeight: 600, color: 'var(--c-text)' }}>
-                    {item.company_name}
+                    {item.our_company_name}
                   </span>
-                  {item.company_size && (
+                  {item.target_company_size && (
                     <span style={{
                       fontSize: '10px', color: 'var(--c-text3)', background: 'var(--c-surface2)',
                       border: '1px solid var(--c-border)', borderRadius: '6px',
                       padding: '1px 6px',
                     }}>
-                      {item.company_size} employees
+                      Size: {item.target_company_size}
                     </span>
                   )}
                 </div>
@@ -164,10 +164,11 @@ export default function History() {
 
               {/* Fields */}
               <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '0 24px' }}>
-                <FieldChip icon={MapPin}    label="Location"  value={item.location}   />
-                <FieldChip icon={Briefcase} label="Roles"     value={item.job_title}  />
-                <FieldChip icon={ChevronRight} label="Services" value={item.services} />
-                <FieldChip icon={Tag}       label="Keywords"  value={item.keywords}   />
+                <FieldChip icon={Briefcase} label="Services"   value={item.our_services}   />
+                <FieldChip icon={MapPin}    label="Location"   value={item.target_location}   />
+                <FieldChip icon={ChevronRight} label="Roles"    value={item.target_job_titles}  />
+                <FieldChip icon={Building2} label="Industries" value={item.target_industries} />
+                <FieldChip icon={Tag}       label="Keywords"   value={item.target_keywords}   />
               </div>
             </div>
           ))}

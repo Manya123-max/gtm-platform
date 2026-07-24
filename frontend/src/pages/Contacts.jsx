@@ -37,7 +37,7 @@ export default function Contacts() {
   const [minScore, setMinScore] = useState('')
   const [sortBy, setSortBy] = useState('newest')
   const navigate = useNavigate()
-  const { activeSessionId } = useSession()
+  const { activeSessionId, ourCompanyName } = useSession()
 
   const { data: contacts = [], isLoading } = useQuery({
     queryKey: ['contacts', minScore, sortBy, activeSessionId],
@@ -63,7 +63,9 @@ export default function Contacts() {
     <div className="max-w-6xl mx-auto">
       <div className="flex items-center justify-between mb-6">
         <div>
-          <h1 className="text-xl font-semibold text-gray-100">Contacts</h1>
+          <h1 className="text-xl font-semibold text-gray-100">
+            Contacts {ourCompanyName ? `for ${ourCompanyName}` : ''}
+          </h1>
           <p className="text-sm text-gray-500 mt-0.5">
             Prospect Intelligence Graph — {filtered.length} contacts
             {newCount > 0 && (

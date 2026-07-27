@@ -1,19 +1,20 @@
 import { Outlet, NavLink, useLocation } from 'react-router-dom'
 import {
   LayoutDashboard, Users, Briefcase, Send, FileText,
-  TrendingUp, Bot, ChevronRight, Bell, Zap, Clipboard
+  TrendingUp, Bot, ChevronRight, Bell, Zap, Clipboard, History
 } from 'lucide-react'
 import clsx from 'clsx'
 
 const NAV = [
   { to: '/dashboard', icon: LayoutDashboard, label: 'Dashboard' },
-  { to: '/input',     icon: Clipboard,       label: 'Intake Form' },
+  { to: '/input',     icon: Clipboard,       label: 'Input'     },
+  { to: '/agents',    icon: Bot,             label: 'Agents'    },
   { to: '/contacts',  icon: Users,           label: 'Contacts'  },
   { to: '/deals',     icon: Briefcase,       label: 'Deals'     },
   { to: '/outreach',  icon: Send,            label: 'Outreach'  },
   { to: '/content',   icon: FileText,        label: 'Content'   },
   { to: '/revenue',   icon: TrendingUp,      label: 'Revenue'   },
-  { to: '/agents',    icon: Bot,             label: 'Agents'    },
+  { to: '/history',   icon: History,         label: 'History'   },
 ]
 
 const AGENT_STATUS = [

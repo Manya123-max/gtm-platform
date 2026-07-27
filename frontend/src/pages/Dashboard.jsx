@@ -9,6 +9,7 @@ import {
   AlertTriangle, Bot, Play, Zap
 } from 'lucide-react'
 import { useState } from 'react'
+import { useSession } from '../context/SessionContext'
 
 const fmt = (n) => n >= 1000 ? `$${(n/1000).toFixed(0)}k` : `$${n?.toFixed(0) ?? 0}`
 const pct = (n) => `${n?.toFixed(1) ?? 0}%`
@@ -130,7 +131,11 @@ function PendingActionsWidget({ actions }) {
 }
 
 export default function Dashboard() {
-  const { data: overview, isLoading } = useQuery({ queryKey: ['overview'], queryFn: fetchOverview })
+  const { activeSessionId, ourCompanyName } = useSession()
+  const { data: overview, isLoading } = useQuery({
+    queryKey: ['overview', activeSessionId],
+    queryFn: () => fetchOverview(activeSessionId),
+  })
   const { data: forecast } = useQuery({ queryKey: ['forecast'], queryFn: fetchForecast })
   const { data: actions } = useQuery({ queryKey: ['pending-actions'], queryFn: fetchPendingActions })
 
@@ -157,7 +162,9 @@ export default function Dashboard() {
     <div className="max-w-6xl mx-auto">
       {/* Header */}
       <div className="mb-6">
-        <h1 className="text-xl font-semibold text-gray-100">Dashboard</h1>
+        <h1 className="text-xl font-semibold text-gray-100">
+          Dashboard {ourCompanyName ? `for ${ourCompanyName}` : ''}
+        </h1>
         <p className="text-sm text-gray-500 mt-0.5">GTM engine overview — last 30 days</p>
       </div>
 

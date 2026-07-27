@@ -4,20 +4,21 @@
 
 @layer base {
   :root {
-    --c-bg:       #060B1A;
-    --c-surface:  #0C1530;
-    --c-surface2: #132248;
-    --c-border:   #1A3060;
-    --c-border2:  #2A4580;
-    --c-text:     #EEF2FF;
-    --c-text2:    #93A5CC;
-    --c-text3:    #5B6E9A;
-    --c-blue:     #0A67FF;
-    --c-cyan:     #00C8FF;
-    --c-green:    #10D9A0;
-    --c-amber:    #F59E0B;
-    --c-red:      #FF4D6A;
-    --c-purple:   #A78BFA;
+    /* ── White + Blue Light Theme ── */
+    --c-bg:       #EEF4FF;          /* soft blue-white page background */
+    --c-surface:  #FFFFFF;          /* pure white cards / sidebar */
+    --c-surface2: #F0F5FF;          /* very light blue for hover states */
+    --c-border:   #BFCFEA;          /* light blue-grey border */
+    --c-border2:  #A0BBDF;          /* slightly deeper border */
+    --c-text:     #0F1D3A;          /* deep navy – primary text */
+    --c-text2:    #3A5280;          /* mid navy – secondary text */
+    --c-text3:    #7A96C4;          /* muted blue – tertiary / labels */
+    --c-blue:     #0A67FF;          /* brand blue */
+    --c-cyan:     #00A8E8;          /* accent cyan */
+    --c-green:    #059669;          /* success green */
+    --c-amber:    #D97706;          /* warning amber */
+    --c-red:      #DC2626;          /* danger red */
+    --c-purple:   #7C3AED;          /* purple */
   }
 
   body {
@@ -33,7 +34,7 @@
   ::-webkit-scrollbar { width: 4px; height: 4px; }
   ::-webkit-scrollbar-track { background: transparent; }
   ::-webkit-scrollbar-thumb { background: var(--c-border2); border-radius: 4px; }
-  ::selection { background: rgba(10,103,255,0.25); }
+  ::selection { background: rgba(10,103,255,0.18); }
 }
 
 @layer components {
@@ -41,21 +42,24 @@
     @apply rounded-xl p-5;
     background: var(--c-surface);
     border: 1px solid var(--c-border);
+    box-shadow: 0 1px 4px rgba(10,50,120,0.07);
   }
   .card-sm {
     @apply rounded-lg p-4;
     background: var(--c-surface);
     border: 1px solid var(--c-border);
+    box-shadow: 0 1px 3px rgba(10,50,120,0.06);
   }
 
   .btn-primary {
     @apply text-white text-sm font-medium px-4 py-2 rounded-lg transition-all
            disabled:opacity-40 disabled:cursor-not-allowed;
     background: linear-gradient(135deg, #0A67FF 0%, #0052CC 100%);
-    box-shadow: 0 0 16px rgba(10,103,255,0.30);
+    box-shadow: 0 2px 10px rgba(10,103,255,0.28);
   }
   .btn-primary:hover:not(:disabled) {
     background: linear-gradient(135deg, #2680FF 0%, #0066EE 100%);
+    box-shadow: 0 4px 16px rgba(10,103,255,0.36);
   }
   .btn-secondary {
     @apply text-sm font-medium px-4 py-2 rounded-lg transition-colors;
@@ -63,52 +67,57 @@
     color: var(--c-text2);
     border: 1px solid var(--c-border2);
   }
+  .btn-secondary:hover {
+    background: #E0EAFF;
+    border-color: var(--c-blue);
+    color: var(--c-blue);
+  }
   .btn-danger {
     @apply text-sm font-medium px-4 py-2 rounded-lg transition-colors;
-    background: rgba(255,77,106,0.12);
-    color: #FF4D6A;
-    border: 1px solid rgba(255,77,106,0.30);
+    background: rgba(220,38,38,0.08);
+    color: #DC2626;
+    border: 1px solid rgba(220,38,38,0.25);
   }
 
-  /* Badges — each written out fully to avoid Tailwind v3 @apply circular ref */
+  /* Badges */
   .badge {
     @apply inline-flex items-center gap-1 px-2 py-0.5 rounded-md text-xs font-medium;
   }
   .badge-blue {
     @apply inline-flex items-center gap-1 px-2 py-0.5 rounded-md text-xs font-medium;
-    background: rgba(10,103,255,0.15);
-    color: #5DA8FF;
-    border: 1px solid rgba(10,103,255,0.30);
+    background: rgba(10,103,255,0.10);
+    color: #0A67FF;
+    border: 1px solid rgba(10,103,255,0.25);
   }
   .badge-cyan {
     @apply inline-flex items-center gap-1 px-2 py-0.5 rounded-md text-xs font-medium;
-    background: rgba(0,200,255,0.12);
-    color: #00C8FF;
-    border: 1px solid rgba(0,200,255,0.25);
+    background: rgba(0,168,232,0.10);
+    color: #0284C7;
+    border: 1px solid rgba(0,168,232,0.25);
   }
   .badge-green {
     @apply inline-flex items-center gap-1 px-2 py-0.5 rounded-md text-xs font-medium;
-    background: rgba(16,217,160,0.12);
-    color: #10D9A0;
-    border: 1px solid rgba(16,217,160,0.25);
+    background: rgba(5,150,105,0.10);
+    color: #059669;
+    border: 1px solid rgba(5,150,105,0.22);
   }
   .badge-amber {
     @apply inline-flex items-center gap-1 px-2 py-0.5 rounded-md text-xs font-medium;
-    background: rgba(245,158,11,0.12);
-    color: #F59E0B;
-    border: 1px solid rgba(245,158,11,0.25);
+    background: rgba(217,119,6,0.10);
+    color: #D97706;
+    border: 1px solid rgba(217,119,6,0.22);
   }
   .badge-red {
     @apply inline-flex items-center gap-1 px-2 py-0.5 rounded-md text-xs font-medium;
-    background: rgba(255,77,106,0.12);
-    color: #FF6B85;
-    border: 1px solid rgba(255,77,106,0.25);
+    background: rgba(220,38,38,0.10);
+    color: #DC2626;
+    border: 1px solid rgba(220,38,38,0.22);
   }
   .badge-purple {
     @apply inline-flex items-center gap-1 px-2 py-0.5 rounded-md text-xs font-medium;
-    background: rgba(167,139,250,0.12);
-    color: #A78BFA;
-    border: 1px solid rgba(167,139,250,0.25);
+    background: rgba(124,58,237,0.10);
+    color: #7C3AED;
+    border: 1px solid rgba(124,58,237,0.22);
   }
   .badge-gray {
     @apply inline-flex items-center gap-1 px-2 py-0.5 rounded-md text-xs font-medium;
@@ -127,19 +136,21 @@
     @apply text-left text-xs font-medium uppercase tracking-wider px-4 py-3;
     color: var(--c-text3);
     border-bottom: 1px solid var(--c-border);
+    background: #F5F8FF;
   }
   .td { @apply px-4 py-3 text-sm; color: var(--c-text2); }
 
   .input {
     @apply text-sm rounded-lg px-3 py-2 w-full transition-colors outline-none;
-    background: var(--c-surface2);
+    background: #F5F8FF;
     color: var(--c-text);
     border: 1px solid var(--c-border2);
   }
   .input::placeholder { color: var(--c-text3); }
   .input:focus {
     border-color: var(--c-blue);
-    box-shadow: 0 0 0 2px rgba(10,103,255,0.15);
+    box-shadow: 0 0 0 3px rgba(10,103,255,0.12);
+    background: #fff;
   }
 
   .stat-card  { @apply card flex flex-col gap-1; }
@@ -152,4 +163,54 @@
 
   .score-bar  { @apply h-1.5 rounded-full overflow-hidden; background: var(--c-surface2); }
   .score-fill { @apply h-full rounded-full transition-all duration-500; }
+}
+
+/* ── Light Theme Visibility Overrides ── */
+.text-gray-100 { color: var(--c-text) !important; }
+.text-gray-200 { color: var(--c-text) !important; }
+.text-gray-300 { color: var(--c-text) !important; }
+.text-gray-400 { color: var(--c-text2) !important; }
+.text-gray-500 { color: var(--c-text2) !important; }
+.text-gray-600 { color: var(--c-text3) !important; }
+
+/* Custom elements that styled contact lists */
+.font-medium.text-gray-200 { color: var(--c-text) !important; }
+.td .text-gray-300 { color: var(--c-text) !important; }
+.td .text-gray-500 { color: var(--c-text2) !important; }
+.td .text-gray-600 { color: var(--c-text3) !important; }
+
+/* Dark BG hex code overrides to light theme equivalents */
+.bg-\[\#1F2937\] { background-color: var(--c-surface2) !important; color: var(--c-text) !important; }
+.bg-\[\#0F1623\] { background-color: var(--c-surface2) !important; color: var(--c-text) !important; }
+.bg-\[\#0B0F1A\] { background-color: var(--c-bg) !important; color: var(--c-text) !important; }
+.hover\:bg-\[\#374151\]:hover { background-color: #E2E8F0 !important; }
+.border-\[\#374151\] { border-color: var(--c-border) !important; }
+.divide-\[\#1F2937\] > :not([hidden]) ~ :not([hidden]) { border-color: var(--c-border) !important; }
+.hover\:bg-\[\#1F2937\]\/50:hover { background-color: rgba(10, 103, 255, 0.06) !important; }
+
+/* Ensure select inputs, form inputs and labels are readable */
+label.text-gray-400 { color: var(--c-text2) !important; }
+input.bg-\[\#0F1623\] { color: var(--c-text) !important; background-color: #FFFFFF !important; }
+
+/* Keep active buttons and status texts readable */
+.btn-primary, .btn-primary * { color: #FFFFFF !important; }
+button.btn-primary, button.bg-blue-600 { color: #FFFFFF !important; }
+button.bg-blue-600 * { color: #FFFFFF !important; }
+
+/* Override bg-emerald-950/60 NEW badge for light theme */
+.bg-emerald-950\/60 {
+  background-color: rgba(16, 185, 129, 0.1) !important;
+  border-color: rgba(16, 185, 129, 0.3) !important;
+  color: #059669 !important;
+}
+
+/* Constraint box styling overrides */
+.bg-amber-900\/10 {
+  background-color: rgba(245, 158, 11, 0.08) !important;
+}
+.border-amber-800\/40 {
+  border-color: rgba(245, 158, 11, 0.25) !important;
+}
+.text-amber-300, .text-amber-400 {
+  color: #D97706 !important;
 }

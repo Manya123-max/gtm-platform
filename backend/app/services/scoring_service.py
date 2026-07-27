@@ -11,7 +11,8 @@ import structlog
 
 logger = structlog.get_logger()
 
-MODEL_PATH = "/app/models/win_pattern_model.pkl"
+CURRENT_DIR = os.path.dirname(os.path.abspath(__file__))
+MODEL_PATH = os.path.abspath(os.path.join(CURRENT_DIR, "..", "models", "win_pattern_model.pkl"))
 FEATURE_NAMES = [
     "employee_count_bin",
     "industry_encoded",
@@ -24,23 +25,44 @@ FEATURE_NAMES = [
 # Rule-based scoring weights used before enough training data
 RULE_WEIGHTS = {
     "title_keywords": {
-        "cro": 20, "vp of sales": 18, "chief revenue": 18, "head of sales": 16,
-        "director of sales": 15, "vp sales": 18, "sales director": 14,
-        "revenue operations": 14, "revops": 14, "ceo": 12, "founder": 10,
-        "sales manager": 8, "account executive": 6,
+        "cro": 30, 
+        "vp of sales": 27, "vp sales": 27, "vice president of sales": 27,
+        "chief revenue": 27, 
+        "head of sales": 24,
+        "director of sales": 22, "director sales": 22, "sales director": 21,
+        "revenue operations": 21, "revops": 21, 
+        "ceo": 18, "founder": 15,
+        "sales manager": 12, "account executive": 9,
     },
     "company_size": {
-        "1-10": 5, "11-50": 10, "51-200": 18, "201-500": 20,
-        "501-1000": 15, "1001-5000": 10, "5001+": 5,
+        "1-10": 6, 
+        "11-50": 12, 
+        "51-200": 22, 
+        "201-500": 25,
+        "501-1000": 18, 
+        "1001-5000": 12, 
+        "5001+": 6,
     },
     "funding_stage": {
-        "seed": 12, "series a": 18, "series b": 20, "series c": 16,
-        "series d": 12, "growth": 10, "public": 8, "bootstrapped": 8,
+        "seed": 9, "series a": 13, "series b": 15, "series c": 12,
+        "series d": 9, "growth": 7, "public": 6, "bootstrapped": 6,
     },
     "industry": {
-        "saas": 20, "software": 18, "technology": 15, "fintech": 14,
-        "healthtech": 12, "ecommerce": 10, "media": 8,
+        "saas": 20,
+        "software": 18,
+        "technology": 15,
+        "fintech": 14,
+        "financial": 12,
+        "healthtech": 12,
+        "health": 10,
+        "medical": 10,
+        "ecommerce": 10,
+        "retail": 8,
+        "media": 8,
     },
+    "tech_stack": {
+        "has_tech_stack": 10,
+    }
 }
 
 
@@ -84,56 +106,81 @@ class WinPatternScorer:
 
     def _score_rule_based(self, contact: Dict) -> Tuple[float, Dict]:
         """
-        Rule-based scoring used before enough training data.
-        Returns score and per-dimension breakdown.
+        Rule-based scoring updated for robust normalization and numeric size matching.
         """
         score = 0
         breakdown = {}
 
-        # Title score
+        # 1. Title score (case-insensitive substring match with normalized punctuation and synonyms)
         title = (contact.get("title") or "").lower()
+        title_norm = title.replace(",", " ").replace("-", " ").replace("/", " ")
+        title_norm = title_norm.replace("vice president", "vp").replace("avp", "vp").replace("assistant vice president", "vp")
+        title_norm = " ".join(title_norm.split())
+
         title_score = 0
         for kw, pts in RULE_WEIGHTS["title_keywords"].items():
-            if kw in title:
+            if kw in title_norm:
                 title_score = pts
                 break
         score += title_score
         breakdown["title"] = title_score
 
-        # Company size
-        size = str(contact.get("company_size") or "").lower()
+        # 2. Company size (numeric range match with string fallback)
         size_score = 0
-        for size_range, pts in RULE_WEIGHTS["company_size"].items():
-            if size_range.replace("-", " to ") in size or size_range in size:
-                size_score = pts
-                break
-        if not size_score and contact.get("employee_count"):
-            ec = int(contact["employee_count"])
-            if 51 <= ec <= 500:
-                size_score = 18
-            elif 11 <= ec <= 50:
-                size_score = 10
+        ec = contact.get("employee_count")
+        if ec is not None:
+            try:
+                ec_val = int(ec)
+                if 1 <= ec_val <= 10:
+                    size_key = "1-10"
+                elif 11 <= ec_val <= 50:
+                    size_key = "11-50"
+                elif 51 <= ec_val <= 200:
+                    size_key = "51-200"
+                elif 201 <= ec_val <= 500:
+                    size_key = "201-500"
+                elif 501 <= ec_val <= 1000:
+                    size_key = "501-1000"
+                elif 1001 <= ec_val <= 5000:
+                    size_key = "1001-5000"
+                elif ec_val >= 5001:
+                    size_key = "5001+"
+                else:
+                    size_key = None
+
+                if size_key:
+                    size_score = RULE_WEIGHTS["company_size"].get(size_key, 0)
+            except ValueError:
+                pass
+
+        if not size_score:
+            # Fallback to substring matching if numeric employee count is not available
+            size = str(contact.get("company_size") or "").lower()
+            for size_range, pts in RULE_WEIGHTS["company_size"].items():
+                if size_range.replace("-", " to ") in size or size_range in size:
+                    size_score = pts
+                    break
         score += size_score
         breakdown["company_size"] = size_score
 
-        # Funding stage
-        funding = (contact.get("funding_stage") or "").lower()
+        # 3. Funding stage (normalize underscores to spaces)
+        funding = (contact.get("funding_stage") or "").lower().replace("_", " ")
         funding_score = next(
             (pts for kw, pts in RULE_WEIGHTS["funding_stage"].items() if kw in funding), 0
         )
         score += funding_score
         breakdown["funding_stage"] = funding_score
 
-        # Industry
-        industry = (contact.get("industry") or "").lower()
+        # 4. Industry (normalize underscores and hyphens)
+        industry = (contact.get("industry") or "").lower().replace("_", " ").replace("-", "")
         industry_score = next(
             (pts for kw, pts in RULE_WEIGHTS["industry"].items() if kw in industry), 5
         )
         score += industry_score
         breakdown["industry"] = industry_score
 
-        # Tech stack data available
-        has_tech = 5 if contact.get("tech_stack") else 0
+        # 5. Tech stack (pulled from RULE_WEIGHTS)
+        has_tech = RULE_WEIGHTS["tech_stack"]["has_tech_stack"] if contact.get("tech_stack") else 0
         score += has_tech
         breakdown["has_tech_stack"] = has_tech
 

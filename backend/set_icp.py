@@ -24,28 +24,26 @@ async def update():
 
         if exists:
             await db.execute(
-                text("UPDATE agent_schedules SET config = :cfg WHERE agent_id = 'A1'"),
-                {"cfg": json.dumps(config)}
+                text("UPDATE agent_schedules SET cron = '0 8 * * 1', enabled = true WHERE agent_id = 'A1'")
             )
-            print("Updated existing A1 schedule config")
+            print("Updated existing A1 schedule")
         else:
             await db.execute(
                 text("""
                     INSERT INTO agent_schedules
-                        (agent_id, schedule_cron, config, is_active)
+                        (agent_id, cron, enabled, task_name)
                     VALUES
-                        ('A1', '0 8 * * 1', :cfg, true)
-                """),
-                {"cfg": json.dumps(config)}
+                        ('A1', '0 8 * * 1', true, 'app.workers.scheduler_tasks.run_prospect_agent')
+                """)
             )
-            print("Inserted new A1 schedule config")
+            print("Inserted new A1 schedule")
 
         await db.commit()
 
         result = await db.execute(
-            text("SELECT agent_id, config FROM agent_schedules WHERE agent_id = 'A1'")
+            text("SELECT agent_id, cron, enabled FROM agent_schedules WHERE agent_id = 'A1'")
         )
         row = result.fetchone()
-        print("Saved config:", row[1])
+        print("Saved schedule:", row[0], "cron:", row[1], "enabled:", row[2])
 
 asyncio.run(update())

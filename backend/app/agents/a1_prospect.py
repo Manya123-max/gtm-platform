@@ -40,7 +40,7 @@ class ProspectAgent:
             if contact.get("win_pattern_score", 0) >= settings.ICP_SCORE_THRESHOLD
         ]
 
-        save_result = await self._save_contacts(qualified)
+        save_result = await self._save_contacts(qualified, icp_config.get("user_input_id"))
         reason = self._reason(raw_contacts, scored, qualified, save_result, provider_meta)
 
         await self._log_funnel_event(
@@ -147,6 +147,33 @@ class ProspectAgent:
                             body=match_resp.text[:250],
                         )
 
+                # Enrich organization details (tech stack and funding stage)
+                org_cache = {}
+                for person in enriched_people:
+                    org = person.get("organization") or {}
+                    org_id = org.get("id")
+                    if org_id and org_id not in org_cache:
+                        try:
+                            org_resp = await client.get(
+                                f"https://api.apollo.io/api/v1/organizations/{org_id}",
+                                headers=headers,
+                                timeout=10
+                            )
+                            if org_resp.status_code == 200:
+                                org_cache[org_id] = org_resp.json().get("organization") or {}
+                            else:
+                                logger.warning("Apollo org fetch failed", org_id=org_id, status=org_resp.status_code)
+                        except Exception as e:
+                            logger.warning("Apollo org fetch exception", org_id=org_id, error=str(e))
+
+                # Inject detailed organization profile data back into person objects
+                for person in enriched_people:
+                    org = person.get("organization") or {}
+                    org_id = org.get("id")
+                    if org_id and org_id in org_cache:
+                        detailed_org = org_cache[org_id]
+                        org.update(detailed_org)
+
                 contacts = [
                     self._parse_apollo_contact(person)
                     for person in enriched_people
@@ -182,6 +209,24 @@ class ProspectAgent:
         domain = organization.get("primary_domain") or organization.get("website_url") or ""
         domain = domain.replace("https://", "").replace("http://", "").strip("/")
 
+        # Parse technologies from Apollo's "current_technologies" array of dicts
+        techs = organization.get("current_technologies") or []
+        tech_list = []
+        if isinstance(techs, list):
+            for t in techs:
+                if isinstance(t, dict) and t.get("name"):
+                    tech_list.append(t["name"])
+                elif isinstance(t, str):
+                    tech_list.append(t)
+        
+        # Fallback to "technology_names" string array
+        if not tech_list and organization.get("technology_names"):
+            tech_list = organization.get("technology_names") or []
+        
+        # Fallback to "technologies" string array
+        if not tech_list and organization.get("technologies"):
+            tech_list = organization.get("technologies") or []
+
         return {
             "email": (person.get("email") or "").strip().lower(),
             "first_name": person.get("first_name") or "",
@@ -194,8 +239,8 @@ class ProspectAgent:
             "employee_count": organization.get("estimated_num_employees"),
             "industry": organization.get("industry") or "",
             "geography": person.get("city") or person.get("country") or "",
-            "tech_stack": organization.get("technologies") or [],
-            "funding_stage": organization.get("latest_funding_stage") or "",
+            "tech_stack": tech_list,
+            "funding_stage": organization.get("latest_funding_stage") or organization.get("funding_stage") or "",
             "apollo_id": person.get("id") or "",
             "source": "apollo",
             "email_valid": True,
@@ -213,7 +258,11 @@ class ProspectAgent:
             scored.append(contact)
         return scored
 
-    async def _save_contacts(self, contacts: List[Dict[str, Any]]) -> Dict[str, Any]:
+    async def _save_contacts(
+        self,
+        contacts: List[Dict[str, Any]],
+        user_input_id: Optional[int] = None,
+    ) -> Dict[str, Any]:
         inserted_ids: List[str] = []
         updated_ids: List[str] = []
 
@@ -243,6 +292,8 @@ class ProspectAgent:
                 contact.verified_at = datetime.utcnow()
                 contact.enriched_at = datetime.utcnow()
                 contact.source = "apollo"
+                if user_input_id is not None:
+                    contact.user_input_id = user_input_id
                 updated_ids.append(str(contact.id))
             else:
                 contact = Contact(
@@ -268,6 +319,7 @@ class ProspectAgent:
                     enriched_at=datetime.utcnow(),
                     source="apollo",
                     apollo_id=data.get("apollo_id"),
+                    user_input_id=user_input_id,
                 )
                 self.db.add(contact)
                 await self.db.flush()

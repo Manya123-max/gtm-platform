@@ -4,6 +4,8 @@ import { fetchDeals, fetchPipelineSummary, fetchPendingActions, approveAction, d
 import { BarChart, Bar, XAxis, YAxis, Tooltip, ResponsiveContainer, LineChart, Line, CartesianGrid } from 'recharts'
 import { AlertTriangle, CheckCircle, X, Bot, Play, Loader2, FileText, Clock } from 'lucide-react'
 import { useState, useEffect } from 'react'
+import { useLocation } from 'react-router-dom'
+import { useSession } from '../context/SessionContext'
 
 function RiskBadge({ score }) {
   if (score >= 0.6) return <span className="badge badge-red">High Risk</span>
@@ -12,8 +14,15 @@ function RiskBadge({ score }) {
 }
 
 export function Deals() {
-  const { data: deals = [], isLoading } = useQuery({ queryKey: ['deals'], queryFn: fetchDeals })
-  const { data: summary = [] } = useQuery({ queryKey: ['pipeline-summary'], queryFn: fetchPipelineSummary })
+  const { activeSessionId, ourCompanyName } = useSession()
+  const { data: deals = [], isLoading } = useQuery({
+    queryKey: ['deals', activeSessionId],
+    queryFn: () => fetchDeals(activeSessionId != null ? { user_input_id: activeSessionId } : {})
+  })
+  const { data: summary = [] } = useQuery({
+    queryKey: ['pipeline-summary', activeSessionId],
+    queryFn: () => fetchPipelineSummary(activeSessionId)
+  })
   const { data: actions = [] } = useQuery({ queryKey: ['pending-actions'], queryFn: fetchPendingActions })
   const qc = useQueryClient()
 
@@ -32,7 +41,9 @@ export function Deals() {
   return (
     <div className="max-w-6xl mx-auto">
       <div className="mb-6">
-        <h1 className="text-xl font-semibold text-gray-100">Deals</h1>
+        <h1 className="text-xl font-semibold text-gray-100">
+          Deals {ourCompanyName ? `for ${ourCompanyName}` : ''}
+        </h1>
         <p className="text-sm text-gray-500 mt-0.5">Pipeline health and A5 risk detection</p>
       </div>
 
@@ -130,6 +141,7 @@ export function Deals() {
 
 // ── Revenue Page ──────────────────────────────────────────────────────────
 export function Revenue() {
+  const { activeSessionId, ourCompanyName } = useSession()
   const { data: forecast } = useQuery({ queryKey: ['forecast'], queryFn: fetchForecast })
   const { data: metrics = {} } = useQuery({
     queryKey: ['funnel-metrics', 30],
@@ -151,7 +163,9 @@ export function Revenue() {
   return (
     <div className="max-w-6xl mx-auto">
       <div className="mb-6">
-        <h1 className="text-xl font-semibold text-gray-100">Revenue Intelligence</h1>
+        <h1 className="text-xl font-semibold text-gray-100">
+          Revenue Intelligence {ourCompanyName ? `for ${ourCompanyName}` : ''}
+        </h1>
         <p className="text-sm text-gray-500 mt-0.5">A7 forecast model — 30/60/90-day pipeline</p>
       </div>
 
@@ -263,11 +277,95 @@ const AGENTS = [
 const SCHEDULABLE = new Set(['A1', 'A2', 'A6'])
 
 export function Agents() {
+  const { activeSessionId, ourCompanyName } = useSession()
   const queryClient = useQueryClient()
+  const location = useLocation()
+  const incomingRunId = location.state?.runId
+
   const [running, setRunning] = useState({})
   const [results, setResults] = useState({})
   const [pipelineRunning, setPipelineRunning] = useState(false)
   const [pipelineStatus, setPipelineStatus] = useState('')
+
+  // Define summarizeAgentOutput BEFORE pollWorkflowRun so it can be referenced
+  const summarizeAgentOutput = (agentId, output = {}) => {
+    if (output.reason) return output.reason
+    if (agentId === 'A1') return `saved ${output.saved_count ?? 0}, updated ${output.updated_count ?? 0}`
+    if (agentId === 'A2') return `signals saved ${output.signals_saved ?? 0}, detected ${output.signals_detected ?? 0}`
+    if (agentId === 'A3') return `drafts ${output.drafts_created ?? 0}, sent ${output.sent ?? 0}, skipped ${output.skipped ?? 0}`
+    if (agentId === 'A5') return `deals scanned ${output.deals_scanned ?? 0}, flagged ${output.deals_flagged ?? 0}`
+    if (agentId === 'A6') return `content ${output.content_pieces_generated ?? 0}, briefs ${output.briefs_created ?? 0}`
+    if (agentId === 'A7') return `forecast ${output.forecast_30d != null ? `$${Math.round(output.forecast_30d).toLocaleString()}` : 'created'}`
+    return output.status || 'completed'
+  }
+
+  const pollWorkflowRun = async (workflowRunId) => {
+    setPipelineRunning(true)
+    setPipelineStatus('Starting GTM pipeline...')
+    try {
+      for (let attempt = 0; attempt < 300; attempt += 1) {
+        const data = await fetchWorkflowRun(workflowRunId)
+        const status = data?.workflow?.status || 'queued'
+        const currentAgent = data?.workflow?.current_agent
+        const statusMsg = currentAgent
+          ? `${status} — running ${currentAgent}`
+          : status
+        setPipelineStatus(statusMsg)
+
+        const agentsInRun = data?.agents || []
+        const newRunning = {}
+        const newResults = {}
+
+        agentsInRun.forEach(agent => {
+          const agentId = agent.agent_id
+          const agentStatus = agent.status?.toLowerCase()
+
+          if (['running', 'started'].includes(agentStatus)) {
+            newRunning[agentId] = true
+            newResults[agentId] = 'Running...'
+          } else if (agentStatus === 'queued') {
+            newRunning[agentId] = false
+            newResults[agentId] = 'Queued'
+          } else if (['completed', 'success'].includes(agentStatus)) {
+            newRunning[agentId] = false
+            newResults[agentId] = `Completed — ${summarizeAgentOutput(agentId, agent.output_payload || {})}`
+          } else if (agentStatus === 'failed') {
+            newRunning[agentId] = false
+            newResults[agentId] = `Failed — ${agent.error_message || 'error'}`
+          }
+        })
+
+        setRunning(current => ({ ...current, ...newRunning }))
+        setResults(current => ({ ...current, ...newResults }))
+
+        if (['completed', 'failed', 'cancelled'].includes(status.toLowerCase())) {
+          setPipelineStatus(
+            status.toLowerCase() === 'completed'
+              ? '✓ Pipeline completed — contacts and dashboard updated'
+              : `Pipeline ${status.toLowerCase()}`
+          )
+          await Promise.all([
+            queryClient.invalidateQueries({ queryKey: ['overview'] }),
+            queryClient.invalidateQueries({ queryKey: ['contacts'] }),
+            queryClient.invalidateQueries({ queryKey: ['funnel-metrics'] }),
+          ])
+          break
+        }
+        await new Promise(resolve => setTimeout(resolve, 2000))
+      }
+    } catch (error) {
+      console.error('Polling workflow run failed:', error)
+      setPipelineStatus('Pipeline failed — check logs')
+    } finally {
+      setPipelineRunning(false)
+    }
+  }
+
+  useEffect(() => {
+    if (incomingRunId) {
+      pollWorkflowRun(incomingRunId)
+    }
+  }, [incomingRunId])
 
   // ── Schedule state ──────────────────────────────────────────────────────
   const [agentModes, setAgentModes] = useState({})          // 'manual' | 'schedule'
@@ -327,16 +425,6 @@ export function Agents() {
     throw new Error('Task status polling timed out')
   }
 
-  const summarizeAgentOutput = (agentId, output = {}) => {
-    if (output.reason) return output.reason
-    if (agentId === 'A1') return `saved ${output.saved_count ?? 0}, updated ${output.updated_count ?? 0}`
-    if (agentId === 'A2') return `signals saved ${output.signals_saved ?? 0}, detected ${output.signals_detected ?? 0}`
-    if (agentId === 'A3') return `drafts ${output.drafts_created ?? 0}, sent ${output.sent ?? 0}, skipped ${output.skipped ?? 0}`
-    if (agentId === 'A5') return `deals scanned ${output.deals_scanned ?? 0}, flagged ${output.deals_flagged ?? 0}`
-    if (agentId === 'A6') return `content ${output.content_pieces_generated ?? 0}, briefs ${output.briefs_created ?? 0}`
-    if (agentId === 'A7') return `forecast ${output.forecast_30d != null ? `$${Math.round(output.forecast_30d).toLocaleString()}` : 'created'}`
-    return output.status || 'completed'
-  }
 
   const trigger = async agentId => {
     setRunning(current => ({ ...current, [agentId]: true }))
@@ -406,13 +494,31 @@ export function Agents() {
 
   return (
     <div className="max-w-4xl mx-auto">
+
+      {/* Live pipeline status banner — shown when redirected from intake form */}
+      {pipelineStatus && (
+        <div className={`mb-5 flex items-center gap-3 px-4 py-3 rounded-xl border text-sm ${
+          pipelineStatus.startsWith('✓')
+            ? 'bg-emerald-950/40 border-emerald-700/40 text-emerald-300'
+            : pipelineStatus.toLowerCase().includes('fail')
+            ? 'bg-red-950/40 border-red-700/40 text-red-300'
+            : 'bg-blue-950/40 border-blue-700/40 text-blue-300'
+        }`}>
+          {pipelineRunning
+            ? <Loader2 size={16} className="animate-spin shrink-0" />
+            : pipelineStatus.startsWith('✓')
+            ? <CheckCircle size={16} className="shrink-0 text-emerald-400" />
+            : <Bot size={16} className="shrink-0" />}
+          <span className="font-medium">{pipelineStatus}</span>
+        </div>
+      )}
+
       <div className="mb-6 flex items-start justify-between gap-4">
         <div>
-          <h1 className="text-xl font-semibold text-gray-100">Agent Control</h1>
+          <h1 className="text-xl font-semibold text-gray-100">
+            Agent Control {ourCompanyName ? `for ${ourCompanyName}` : ''}
+          </h1>
           <p className="text-sm text-gray-500 mt-0.5">Manual agent execution with persistent workflow status</p>
-          {(pipelineStatus || results.__pipeline__) && (
-            <p className="text-xs text-emerald-400 mt-2">Full pipeline: {results.__pipeline__ || pipelineStatus}</p>
-          )}
         </div>
         <button
           onClick={runFullPipeline}
@@ -533,12 +639,18 @@ export function Agents() {
 
 // ── Outreach Page ─────────────────────────────────────────────────────────
 export function Outreach() {
-  const { data: drafts = [] } = useQuery({ queryKey: ['drafts'], queryFn: fetchDrafts })
+  const { activeSessionId, ourCompanyName } = useSession()
+  const { data: drafts = [] } = useQuery({
+    queryKey: ['drafts', activeSessionId],
+    queryFn: () => fetchDrafts(activeSessionId),
+  })
 
   return (
     <div className="max-w-4xl mx-auto">
       <div className="mb-6">
-        <h1 className="text-xl font-semibold text-gray-100">Outreach</h1>
+        <h1 className="text-xl font-semibold text-gray-100">
+          Outreach {ourCompanyName ? `for ${ourCompanyName}` : ''}
+        </h1>
         <p className="text-sm text-gray-500 mt-0.5">A3 generated drafts and sent log</p>
       </div>
       <div className="card p-0 overflow-hidden">
@@ -573,9 +685,14 @@ export function Outreach() {
 // ── Content Page ──────────────────────────────────────────────────────────
 export function Content() {
   const [format, setFormat] = useState('')
+  const { activeSessionId, ourCompanyName } = useSession()
   const { data: content = [] } = useQuery({
-    queryKey: ['content', format],
-    queryFn: () => fetchContent({ format: format || undefined, limit: 30 }),
+    queryKey: ['content', format, activeSessionId],
+    queryFn: () => fetchContent({
+      format: format || undefined,
+      limit: 30,
+      ...(activeSessionId != null ? { user_input_id: activeSessionId } : {}),
+    }),
   })
 
   const formats = ['linkedin_post','email_sequence','case_study','blog_article','sales_deck_outline']
@@ -584,7 +701,9 @@ export function Content() {
     <div className="max-w-4xl mx-auto">
       <div className="flex items-center justify-between mb-6">
         <div>
-          <h1 className="text-xl font-semibold text-gray-100">Content</h1>
+          <h1 className="text-xl font-semibold text-gray-100">
+            Content {ourCompanyName ? `for ${ourCompanyName}` : ''}
+          </h1>
           <p className="text-sm text-gray-500 mt-0.5">A6 demand-driven content library</p>
         </div>
         <select className="input w-44" value={format} onChange={e => setFormat(e.target.value)}>

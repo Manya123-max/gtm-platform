@@ -1,9 +1,9 @@
 import asyncio
 from typing import Any, Dict, List, Optional
-
+from app.core.config import settings
 import structlog
 from celery import chain
-
+from sqlalchemy import select
 from app.core.celery_app import celery_app
 from app.core.database import AsyncSessionLocal
 from app.orchestrator.orchestrator_service import OrchestratorService
@@ -101,29 +101,51 @@ def run_agent_node(
                         cfg: Dict[str, Any] = dict(cfg_value)
                     else:
                         from app.models.models import UserInput
+                        from app.agents.industry_tag_map import resolve_industries
+                        from app.api.v1 import _expand_size_range
                         stmt = select(UserInput).order_by(UserInput.id.desc()).limit(1)
                         res = await db.execute(stmt)
                         user_input = res.scalars().first()
                         if user_input:
-                            titles = [t.strip() for t in user_input.job_title.split(",") if t.strip()]
-                            geographies = [g.strip() for g in user_input.location.split(",") if g.strip()]
-                            size = user_input.company_size.replace("-", ",").strip()
-                            employee_ranges = [size] if size else ["11,200"]
+                            titles = [
+                                t.strip()
+                                for t in (user_input.target_job_titles or "").split(",")
+                                if t.strip()
+                            ]
+                            geographies = [
+                                g.strip()
+                                for g in (user_input.target_location or "").split(",")
+                                if g.strip()
+                            ]
+                            employee_ranges = _expand_size_range(
+                                user_input.target_company_size or "11-200"
+                            )
+                            industry_tag_ids, industry_kw_fallback = resolve_industries(
+                                user_input.target_industries or ""
+                            )
+                            kw_list = [
+                                k.strip()
+                                for k in (user_input.target_keywords or "").split(",")
+                                if k.strip()
+                            ]
+                            kw_list += industry_kw_fallback
                             cfg = {
-                                "titles": titles,
-                                "geographies": geographies,
-                                "employee_ranges": employee_ranges,
-                                "limit": 10,
+                                "titles":                 titles,
+                                "organization_locations": geographies,
+                                "employee_ranges":        employee_ranges,
+                                "industry_tag_ids":       industry_tag_ids if industry_tag_ids else None,
+                                "org_keyword_tags":       kw_list if kw_list else None,
+                                "vendor_services":        user_input.our_services,
+                                "threshold":              0,
+                                "enrich_limit":           25,
+                                "user_input_id":          user_input.id,
                             }
                         else:
                             cfg = {
                                 # Empty titles keep manual test runs broad.
                                 "titles": [],
-                                "employee_ranges": [
-                                    "11,200",
-                                    "201,1000",
-                                ],
-                                "limit": 10,
+                                "employee_ranges": ["11,200", "201,1000"],
+                                "enrich_limit": 25,
                             }
 
                     raw_result = await ProspectAgent(db).run(cfg)

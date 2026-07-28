@@ -191,7 +191,7 @@ async def slack_actions(request: Request, background_tasks: BackgroundTasks):
         if action_id == "approve_reply":
             background_tasks.add_task(_approve_reply, value, user)
         elif action_id == "reject_reply":
-            logger.info("Reply rejected", thread_event_id=value, by=user)
+            background_tasks.add_task(_reject_reply, value, user)
         elif action_id == "approve_crm_action":
             background_tasks.add_task(_approve_crm_action, value, user)
  
@@ -229,6 +229,15 @@ async def _approve_reply(thread_event_id: str, approved_by: str):
     async with AsyncSessionLocal() as db:
         agent = InboundAgent(db)
         await agent.approve_reply(thread_event_id, approved_by)
+ 
+ 
+async def _reject_reply(thread_event_id: str, rejected_by: str):
+    from app.core.database import AsyncSessionLocal
+    from app.agents.a4_inbound import InboundAgent
+ 
+    async with AsyncSessionLocal() as db:
+        agent = InboundAgent(db)
+        await agent.reject_reply(thread_event_id, rejected_by)
  
  
 async def _approve_crm_action(action_id: str, approved_by: str):

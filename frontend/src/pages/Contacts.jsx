@@ -148,7 +148,17 @@ export default function Contacts() {
                     <span className="text-xs text-gray-500">{c.readiness_score?.toFixed(0)}%</span>
                   </div>
                 </td>
-                <td className="td"><SignalBadge type={c.signal_type} /></td>
+                <td className="td">
+                  <div className="flex flex-wrap gap-1">
+                    {c.signal_type ? (
+                      c.signal_type.split(',').map(type => (
+                        <SignalBadge key={type} type={type} />
+                      ))
+                    ) : (
+                      <span className="text-gray-600 text-xs">—</span>
+                    )}
+                  </div>
+                </td>
                 <td className="td">
                   {c.do_not_contact
                     ? <span className="badge badge-red">DNC</span>

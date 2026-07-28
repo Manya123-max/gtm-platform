@@ -37,6 +37,7 @@ class ReplyIntent(str, enum.Enum):
     OUT_OF_OFFICE = "out_of_office"
     BOUNCE = "bounce"
     REFERRAL = "referral"
+    UNSUBSCRIBE = "unsubscribe"
     UNKNOWN = "unknown"
 
 
@@ -260,6 +261,8 @@ class ConversationThread(Base):
     slack_message_ts: Mapped[Optional[str]] = mapped_column(String(100))
     approved_by: Mapped[Optional[str]] = mapped_column(String(100))
     approved_at: Mapped[Optional[datetime]] = mapped_column(DateTime)
+    rejected_by: Mapped[Optional[str]] = mapped_column(String(100))
+    rejected_at: Mapped[Optional[datetime]] = mapped_column(DateTime)
 
     sent_at: Mapped[Optional[datetime]] = mapped_column(DateTime)
     occurred_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow, index=True)

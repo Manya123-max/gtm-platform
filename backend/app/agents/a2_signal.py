@@ -134,8 +134,36 @@ class SignalAgent:
                 logger.warning("Signal detector error", error=str(result))
         return signals
 
+    def _clean_company_name(self, name: Optional[str]) -> str:
+        if not name:
+            return ""
+        # Remove parenthetical details e.g., Proximus Media House (PMH) -> Proximus Media House
+        import re
+        name = re.sub(r"\(.*?\)", "", name)
+        # Remove suffixes after common delimiters: | , -
+        for delimiter in ["|", "-", "—"]:
+            if delimiter in name:
+                name = name.split(delimiter)[0]
+        # Remove common corporate suffixes
+        suffixes = [
+            " corporation", " corp.", " corp", 
+            " incorporated", " inc.", " inc", 
+            " limited", " ltd.", " ltd", 
+            " llc", " l.l.c.", 
+            " spa", " s.p.a.", 
+            " worldwide", " holdings", " group",
+            " tecnologia", " technology"
+        ]
+        name_lower = name.lower().strip()
+        for suffix in suffixes:
+            if name_lower.endswith(suffix):
+                name = name[:len(name) - len(suffix)]
+                name_lower = name.lower().strip()
+        return name.strip()
+
     async def _check_job_postings(self, contact: Contact, weights: Dict[SignalType, float]) -> List[Dict[str, Any]]:
-        if not settings.ADZUNA_APP_ID or not settings.ADZUNA_API_KEY or not contact.company:
+        company = self._clean_company_name(contact.company)
+        if not settings.ADZUNA_APP_ID or not settings.ADZUNA_API_KEY or not company:
             return []
 
         try:
@@ -145,8 +173,8 @@ class SignalAgent:
                     params={
                         "app_id": settings.ADZUNA_APP_ID,
                         "app_key": settings.ADZUNA_API_KEY,
-                        "what_or": f'"{contact.company}"',
-                        "results_per_page": 10,
+                        "what_or": f'"{company}"',
+                        "results_per_page": 20,
                         "sort_by": "date",
                     },
                 )
@@ -161,7 +189,7 @@ class SignalAgent:
             job_text = " ".join(titles + descriptions)
 
             signals: List[Dict[str, Any]] = []
-            if any(term in job_text for term in ["sdr", "bdr", "sales development", "business development rep"]):
+            if any(term in job_text for term in ["sdr", "bdr", "sales development", "business development rep", "hiring", "recruiting", "sales", "careers", "we are hiring", "open position"]):
                 signals.append({
                     "contact_id": contact.id,
                     "signal_type": SignalType.JOB_POSTING,
@@ -184,11 +212,12 @@ class SignalAgent:
 
             return signals
         except Exception as exc:
-            logger.warning("Adzuna check failed", company=contact.company, error=str(exc))
+            logger.warning("Adzuna check failed", company=company, error=str(exc))
             return []
 
     async def _check_news(self, contact: Contact, weights: Dict[SignalType, float]) -> List[Dict[str, Any]]:
-        if not settings.NEWS_API_KEY or not contact.company:
+        company = self._clean_company_name(contact.company)
+        if not settings.NEWS_API_KEY or not company:
             return []
 
         try:
@@ -196,10 +225,10 @@ class SignalAgent:
                 response = await client.get(
                     "https://newsapi.org/v2/everything",
                     params={
-                        "q": f'"{contact.company}"',
+                        "q": f'"{company}"',
                         "sortBy": "publishedAt",
                         "language": "en",
-                        "pageSize": 5,
+                        "pageSize": 15,
                         "from": (datetime.utcnow() - timedelta(days=30)).strftime("%Y-%m-%d"),
                     },
                     headers={"X-Api-Key": settings.NEWS_API_KEY},
@@ -217,7 +246,7 @@ class SignalAgent:
             headline = articles[0].get("title")
 
             signals: List[Dict[str, Any]] = []
-            if any(term in combined_text for term in ["funding", "raised", "series a", "series b", "investment", "venture"]):
+            if any(term in combined_text for term in ["funding", "raised", "series a", "series b", "series c", "investment", "venture", "round", "ipo", "capital"]):
                 signals.append({
                     "contact_id": contact.id,
                     "signal_type": SignalType.FUNDING_ROUND,
@@ -226,7 +255,7 @@ class SignalAgent:
                     "raw_data": {"article_count": len(articles), "headline": headline},
                 })
 
-            if any(term in combined_text for term in ["expansion", "new market", "launch", "opens office", "acquires"]):
+            if any(term in combined_text for term in ["expansion", "new market", "launch", "opens office", "acquires", "acquisition", "partnership", "collaboration", "growth"]):
                 signals.append({
                     "contact_id": contact.id,
                     "signal_type": SignalType.NEWS_EXPANSION,
@@ -237,7 +266,7 @@ class SignalAgent:
 
             return signals
         except Exception as exc:
-            logger.warning("NewsAPI check failed", company=contact.company, error=str(exc))
+            logger.warning("NewsAPI check failed", company=company, error=str(exc))
             return []
 
     async def _save_signals(self, signals: List[Dict[str, Any]]) -> int:
@@ -269,17 +298,25 @@ class SignalAgent:
         return saved
 
     async def _update_contact_signal_scores(self, signals: List[Dict[str, Any]]) -> int:
-        contact_scores: Dict[Any, float] = {}
+        contact_signals: Dict[Any, List[Dict[str, Any]]] = {}
         for signal in signals:
             contact_id = signal["contact_id"]
-            contact_scores[contact_id] = max(contact_scores.get(contact_id, 0), signal["confidence"])
+            if contact_id not in contact_signals:
+                contact_signals[contact_id] = []
+            contact_signals[contact_id].append(signal)
 
         updated = 0
-        for contact_id, score in contact_scores.items():
+        for contact_id, sigs in contact_signals.items():
             result = await self.db.execute(select(Contact).where(Contact.id == contact_id))
             contact = result.scalar_one_or_none()
             if contact:
-                contact.signal_score = score * 100
+                best_sig = max(sigs, key=lambda s: s["confidence"])
+                contact.signal_score = best_sig["confidence"] * 100
+                
+                # Combine unique signal types as comma-separated
+                sig_types = sorted(list(set(s["signal_type"].value for s in sigs)))
+                contact.signal_type = ",".join(sig_types)
+                
                 contact.latest_signal_at = datetime.utcnow()
                 updated += 1
 

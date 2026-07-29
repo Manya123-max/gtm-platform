@@ -57,10 +57,13 @@ class Settings(BaseSettings):
     APOLLO_SEARCH_MAX_PAGES:  int = 25   # ↑ was 10 on free tier
 
     # ── News / job signals ────────────────────────────────────────────────
-    NEWS_API_KEY:    str = ""
-    ADZUNA_APP_ID:   str = ""
-    ADZUNA_API_KEY:  str = ""
-    APIFY_API_TOKEN: str = ""
+    NEWS_API_KEY:           str = ""
+    ADZUNA_APP_ID:          str = ""
+    ADZUNA_API_KEY:         str = ""
+    APIFY_API_TOKEN:        str = ""
+    PREDICTLEADS_API_KEY:   str = ""
+    PREDICTLEADS_API_TOKEN: str = ""
+    CURRENTS_API_KEY:       str = ""
 
     # ── CRM / calendar / email ────────────────────────────────────────────
     HUBSPOT_ACCESS_TOKEN: str = ""

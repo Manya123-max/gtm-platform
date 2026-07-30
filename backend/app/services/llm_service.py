@@ -19,8 +19,8 @@ logger = structlog.get_logger()
 
 ANTHROPIC_URL = "https://api.anthropic.com/v1/messages"
 ANTHROPIC_VERSION = "2023-06-01"
-HAIKU_MODEL = "claude-haiku-4-5-20251001"
-SONNET_MODEL = "claude-sonnet-4-6"
+HAIKU_MODEL = "claude-3-haiku-20240307"
+SONNET_MODEL = "claude-3-5-sonnet-latest"
 
 
 def _anthropic_headers() -> Dict[str, str]:
@@ -53,6 +53,40 @@ async def _call_anthropic(
         return resp.json()["content"][0]["text"].strip()
 
 
+GROQ_URL = "https://api.groq.com/openai/v1/chat/completions"
+
+
+async def _call_groq(
+    system: str,
+    user: str,
+    max_tokens: int,
+    force_json: bool = False,
+) -> str:
+    headers = {
+        "Authorization": f"Bearer {settings.GROQ_API_KEY}",
+        "Content-Type":  "application/json",
+    }
+    payload = {
+        "model":      "llama-3.3-70b-versatile",
+        "max_tokens": max_tokens,
+        "messages":   [
+            {"role": "system", "content": system},
+            {"role": "user", "content": user}
+        ],
+    }
+    if force_json:
+        payload["response_format"] = {"type": "json_object"}
+        
+    async with httpx.AsyncClient(timeout=60) as client:
+        resp = await client.post(
+            GROQ_URL,
+            headers=headers,
+            json=payload,
+        )
+        resp.raise_for_status()
+        return resp.json()["choices"][0]["message"]["content"].strip()
+
+
 def _clean_json(content: str, model: str) -> Dict[str, Any]:
     """Strip markdown fences and parse JSON."""
     if content.startswith("```"):
@@ -67,7 +101,7 @@ def _clean_json(content: str, model: str) -> Dict[str, Any]:
 
 class LLMService:
     def __init__(self) -> None:
-        if not settings.ANTHROPIC_API_KEY:
+        if not getattr(settings, "USE_GROQ", False) and not settings.ANTHROPIC_API_KEY:
             raise RuntimeError(
                 "ANTHROPIC_API_KEY is not set. "
                 "Add it to backend/.env and restart the backend."
@@ -88,6 +122,11 @@ class LLMService:
         (content generation, deal analysis, forecast narrative).
         Default is Haiku for cost efficiency.
         """
+        if getattr(settings, "USE_GROQ", False):
+            content = await _call_groq(system, user, max_tokens, force_json=True)
+            logger.info("LLM complete (Groq)", model="llama-3.3-70b-versatile", tokens=max_tokens)
+            return _clean_json(content, "llama-3.3-70b-versatile")
+
         json_instruction = (
             "\n\nReturn ONLY valid JSON matching this schema, no markdown fences: "
             + json.dumps(response_format)
@@ -122,6 +161,11 @@ class LLMService:
         else:
             system = "You are a helpful GTM AI assistant."
             user   = system_or_prompt
+
+        if getattr(settings, "USE_GROQ", False):
+            content = await _call_groq(system, user, max_tokens)
+            logger.info("LLM raw (Groq)", model="llama-3.3-70b-versatile", tokens=max_tokens)
+            return content
 
         model   = SONNET_MODEL if use_sonnet else HAIKU_MODEL
         content = await _call_anthropic(system, user, model, max_tokens)

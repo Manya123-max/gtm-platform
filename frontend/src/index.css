@@ -214,3 +214,21 @@ button.bg-blue-600 * { color: #FFFFFF !important; }
 .text-amber-300, .text-amber-400 {
   color: #D97706 !important;
 }
+
+@keyframes fadeIn {
+  from { opacity: 0; }
+  to { opacity: 1; }
+}
+
+@keyframes scaleUp {
+  from { transform: scale(0.95); opacity: 0; }
+  to { transform: scale(1); opacity: 1; }
+}
+
+.animate-fadeIn {
+  animation: fadeIn 0.2s ease-out forwards;
+}
+
+.animate-scaleUp {
+  animation: scaleUp 0.25s cubic-bezier(0.16, 1, 0.3, 1) forwards;
+}

@@ -3,7 +3,7 @@ import { useQuery } from '@tanstack/react-query'
 import { fetchContacts } from '../api'
 import { useState } from 'react'
 import { useNavigate } from 'react-router-dom'
-import { Search, ArrowUpDown, Sparkles } from 'lucide-react'
+import { Search, ArrowUpDown, Sparkles, ArrowDown, ArrowUp } from 'lucide-react'
 import { useSession } from '../context/SessionContext'
 
 function ScorePill({ score }) {
@@ -19,6 +19,7 @@ function SignalBadge({ type }) {
     funding_round:     ['badge-purple', 'Funding'],
     job_posting:       ['badge-amber', 'Hiring'],
     news_expansion:    ['badge-gray', 'News'],
+    earnings_call:     ['badge-cyan', 'Earnings Call'],
   }
   const [cls, label] = map[type] || ['badge-gray', type]
   return <span className={`badge ${cls}`}>{label}</span>
@@ -36,15 +37,17 @@ export default function Contacts() {
   const [search, setSearch] = useState('')
   const [minScore, setMinScore] = useState('')
   const [sortBy, setSortBy] = useState('newest')
+  const [sortOrder, setSortOrder] = useState('desc')
   const navigate = useNavigate()
   const { activeSessionId, ourCompanyName } = useSession()
 
   const { data: contacts = [], isLoading } = useQuery({
-    queryKey: ['contacts', minScore, sortBy, activeSessionId],
+    queryKey: ['contacts', minScore, sortBy, sortOrder, activeSessionId],
     queryFn: () => fetchContacts({
       min_score: minScore || undefined,
       limit: 100,
       sort_by: sortBy,
+      sort_order: sortOrder,
       ...(activeSessionId != null ? { user_input_id: activeSessionId } : {}),
     }),
   })
@@ -89,13 +92,24 @@ export default function Contacts() {
             <option value="70">Score ≥ 70</option>
             <option value="80">Score ≥ 80</option>
           </select>
+          <div className="relative">
+            <select 
+              className="input pl-8 w-40 appearance-none bg-[#1F2937] hover:bg-[#374151] border border-[#374151] text-xs text-gray-400 cursor-pointer pr-8" 
+              value={sortBy} 
+              onChange={e => setSortBy(e.target.value)}
+            >
+              <option value="newest">Sort: Newest</option>
+              <option value="score">Sort: ICP Score</option>
+              <option value="signal_score">Sort: Signal Score</option>
+            </select>
+            <ArrowUpDown size={12} className="absolute left-3 top-1/2 -translate-y-1/2 text-gray-400 pointer-events-none" />
+          </div>
           <button
-            onClick={() => setSortBy(s => s === 'newest' ? 'score' : 'newest')}
-            className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-[#1F2937] hover:bg-[#374151] border border-[#374151] text-xs text-gray-400 transition-colors"
-            title={sortBy === 'newest' ? 'Currently: Newest first — click for Score' : 'Currently: Score — click for Newest'}
+            onClick={() => setSortOrder(o => o === 'desc' ? 'asc' : 'desc')}
+            className="flex items-center justify-center p-2 rounded-lg bg-[#1F2937] hover:bg-[#374151] border border-[#374151] text-gray-400 transition-colors cursor-pointer"
+            title={sortOrder === 'desc' ? 'Sorting: Descending' : 'Sorting: Ascending'}
           >
-            <ArrowUpDown size={12} />
-            {sortBy === 'newest' ? 'Newest' : 'Score'}
+            {sortOrder === 'desc' ? <ArrowDown size={14} /> : <ArrowUp size={14} />}
           </button>
         </div>
       </div>
@@ -107,6 +121,7 @@ export default function Contacts() {
               <th className="th">Contact</th>
               <th className="th">Company</th>
               <th className="th">ICP Score</th>
+              <th className="th">Signal Score</th>
               <th className="th">Readiness</th>
               <th className="th">Signal</th>
               <th className="th">Status</th>
@@ -114,9 +129,9 @@ export default function Contacts() {
           </thead>
           <tbody>
             {isLoading ? (
-              <tr><td colSpan={6} className="td text-center text-gray-600 py-12">Loading…</td></tr>
+              <tr><td colSpan={7} className="td text-center text-gray-600 py-12">Loading…</td></tr>
             ) : filtered.length === 0 ? (
-              <tr><td colSpan={6} className="td text-center text-gray-600 py-12">No contacts found</td></tr>
+              <tr><td colSpan={7} className="td text-center text-gray-600 py-12">No contacts found</td></tr>
             ) : filtered.map(c => (
               <tr key={c.id} className="table-row cursor-pointer" onClick={() => navigate(`/contacts/${c.id}`)}>
                 <td className="td">
@@ -140,6 +155,7 @@ export default function Contacts() {
                   {c.industry && <div className="text-xs text-gray-600">{c.industry}</div>}
                 </td>
                 <td className="td"><ScorePill score={c.icp_score} /></td>
+                <td className="td"><ScorePill score={c.signal_score} /></td>
                 <td className="td">
                   <div className="flex items-center gap-2">
                     <div className="score-bar w-16">
@@ -149,11 +165,23 @@ export default function Contacts() {
                   </div>
                 </td>
                 <td className="td">
-                  <div className="flex flex-wrap gap-1">
+                  <div className="flex flex-wrap gap-1 items-center">
                     {c.signal_type ? (
-                      c.signal_type.split(',').map(type => (
-                        <SignalBadge key={type} type={type} />
-                      ))
+                      (() => {
+                        const types = c.signal_type.split(',').filter(Boolean);
+                        const displayed = types.slice(0, 1);
+                        const extra = types.length - displayed.length;
+                        return (
+                          <>
+                            {displayed.map(type => (
+                              <SignalBadge key={type} type={type} />
+                            ))}
+                            {extra > 0 && (
+                              <span className="bg-gray-100 text-gray-700 text-[10px] font-semibold px-1.5 py-0.5 rounded border border-gray-200">+{extra}</span>
+                            )}
+                          </>
+                        )
+                      })()
                     ) : (
                       <span className="text-gray-600 text-xs">—</span>
                     )}

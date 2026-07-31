@@ -1,0 +1,155 @@
+[1mdiff --git a/backend/.env.example b/backend/.env.example[m
+[1mindex 38543d3..f58133b 100644[m
+[1m--- a/backend/.env.example[m
+[1m+++ b/backend/.env.example[m
+[36m@@ -33,11 +33,23 @@[m [mAPOLLO_API_KEY=YOUR_APOLLO_ORG_KEY[m
+ APOLLO_SEARCH_MAX_PAGES=25[m
+ [m
+ # ── Signal APIs ───────────────────────────────────────────────────────────[m
+[31m-NEWS_API_KEY=[m
+ ADZUNA_APP_ID=[m
+ ADZUNA_API_KEY=[m
+ APIFY_API_TOKEN=[m
+ [m
+[32m+[m[32m# PredictLeads  primary structured hiring/funding/news signals (A2)[m
+[32m+[m[32m# Sign up free (100 req/month): https://predictleads.com  Docs: https://docs.predictleads.com[m
+[32m+[m[32mPREDICTLEADS_API_KEY=[m
+[32m+[m[32mPREDICTLEADS_API_TOKEN=[m
+[32m+[m
+[32m+[m[32m# Currents API  supplementary keyword-matched news, higher free-tier limit than NewsAPI[m
+[32m+[m[32m# Sign up free: https://currentsapi.services[m
+[32m+[m[32mCURRENTS_API_KEY=[m
+[32m+[m
+[32m+[m[32m# NewsAPI  legacy, optional. Low free-tier rate limit (100 req/day, dev-only).[m
+[32m+[m[32m# Leave blank now that PredictLeads + Currents cover this.[m
+[32m+[m[32mNEWS_API_KEY=[m
+[32m+[m
+ # ── CRM / calendar ───────────────────────────────────────────────────────[m
+ HUBSPOT_ACCESS_TOKEN=[m
+ GMAIL_CLIENT_ID=[m
+[36m@@ -79,7 +91,6 @@[m [mENABLE_INSTANTLY=false[m
+ DRY_RUN_OUTREACH=true[m
+ REQUIRE_HUMAN_APPROVAL=true[m
+ ENABLE_SLACK_APPROVALS=false[m
+[31m-SLACK_SIGNING_SECRET=[m
+ ALLOW_DEMO_PROSPECTS=false[m
+ [m
+ # ── Scoring thresholds ────────────────────────────────────────────────────[m
+[1mdiff --git a/backend/app/agents/a2_signal.py b/backend/app/agents/a2_signal.py[m
+[1mindex e06c3a9..33fd676 100644[m
+[1m--- a/backend/app/agents/a2_signal.py[m
+[1m+++ b/backend/app/agents/a2_signal.py[m
+[36m@@ -1,9 +1,16 @@[m
+ """[m
+ A2 Signal Intelligence Agent.[m
+ [m
+[31m-Uses only the configured sources for this deployment:[m
+[31m-- Adzuna for hiring signals[m
+[31m-- NewsAPI for funding and expansion news[m
+[32m+[m[32mSources for this deployment:[m
+[32m+[m[32m- Adzuna              hiring signals (job board search)[m
+[32m+[m[32m- PredictLeads        structured hiring / funding / news-event signals (primary;[m
+[32m+[m[32m                       replaces most of NewsAPI's job with categorized data instead[m
+[32m+[m[32m                       of keyword matching)[m
+[32m+[m[32m- Currents API        supplementary keyword-matched news, higher free-tier rate[m
+[32m+[m[32m                       limit than NewsAPI and commercial-use friendly[m
+[32m+[m[32m- NewsAPI             legacy source, kept only as an optional extra if a key is[m
+[32m+[m[32m                       still configured (low free-tier rate limit — see PredictLeads[m
+[32m+[m[32m                       / Currents above for the replacements)[m
+ """[m
+ import asyncio[m
+ from datetime import datetime, timedelta[m
+[36m@@ -22,13 +29,15 @@[m [mlogger = structlog.get_logger()[m
+ DEFAULT_WEIGHTS = {[m
+     SignalType.NEW_HIRE: 0.65,[m
+     SignalType.FUNDING_ROUND: 0.60,[m
+[31m-    SignalType.JOB_POSTING: 0.45,[m
+[32m+[m[32m    SignalType.JOB_POSTING: 0.60,[m
+     SignalType.NEWS_EXPANSION: 0.25,[m
+[32m+[m[32m    SignalType.TECH_STACK_CHANGE: 0.50,[m
+[32m+[m[32m    SignalType.EARNINGS_CALL: 0.45,[m
+ }[m
+ [m
+ [m
+ class SignalAgent:[m
+[31m-    """A2: Detects buying signals through Adzuna and NewsAPI."""[m
+[32m+[m[32m    """A2: Detects buying signals through Adzuna, PredictLeads, Currents API, and (optionally) NewsAPI."""[m
+ [m
+     def __init__(self, db: AsyncSession):[m
+         self.db = db[m
+[36m@@ -122,6 +131,8 @@[m [mclass SignalAgent:[m
+     async def _detect_signals(self, contact: Contact, weights: Dict[SignalType, float]) -> List[Dict[str, Any]]:[m
+         tasks = [[m
+             self._check_job_postings(contact, weights),[m
+[32m+[m[32m            self._check_predictleads(contact, weights),[m
+[32m+[m[32m            self._check_currents(contact, weights),[m
+             self._check_news(contact, weights),[m
+         ][m
+ [m
+[36m@@ -134,6 +145,14 @@[m [mclass SignalAgent:[m
+                 logger.warning("Signal detector error", error=str(result))[m
+         return signals[m
+ [m
+[32m+[m[32m    def _get_company_domain(self, contact: Contact) -> str:[m
+[32m+[m[32m        """Resolve a bare domain for domain-keyed APIs (PredictLeads)."""[m
+[32m+[m[32m        if contact.company_domain:[m
+[32m+[m[32m            return contact.company_domain.strip().lower().replace("https://", "").replace("http://", "").split("/")[0][m
+[32m+[m[32m        email = contact.email or ""[m
+[32m+[m[32m        parts = email.split("@")[m
+[32m+[m[32m        return parts[1].lower() if len(parts) > 1 else ""[m
+[32m+[m
+     def _clean_company_name(self, name: Optional[str]) -> str:[m
+         if not name:[m
+             return ""[m
+[36m@@ -161,15 +180,53 @@[m [mclass SignalAgent:[m
+                 name_lower = name.lower().strip()[m
+         return name.strip()[m
+ [m
+[32m+[m[32m    def _get_adzuna_country_code(self, contact: Contact) -> str:[m
+[32m+[m[32m        # Check email domain extension[m
+[32m+[m[32m        email = contact.email or ""[m
+[32m+[m[32m        parts = email.split("@")[m
+[32m+[m[32m        if len(parts) > 1:[m
+[32m+[m[32m            domain = parts[1].lower()[m
+[32m+[m[32m            tld = domain.split(".")[-1][m
+[32m+[m[41m            [m
+[32m+[m[32m            # Map top-level domains to Adzuna country codes[m
+[32m+[m[32m            tld_map = {[m
+[32m+[m[32m                "us": "us", "uk": "gb", "gb": "gb", "co.uk": "gb",[m
+[32m+[m[32m                "ca": "ca", "au": "au", "nz": "nz", "za": "za",[m
+[32m+[m[32m                "in": "in", "de": "de", "fr": "fr", "it": "it",[m
+[32m+[m[32m                "nl": "nl", "at": "at", "pl": "pl", "ru": "ru",[m
+[32m+[m[32m                "sg": "sg", "br": "br", "mx": "mx", "be": "be",[m
+[32m+[m[32m                "ch": "ch", "es": "es", "se": "se"[m
+[32m+[m[32m            }[m
+[32m+[m[32m            if tld in tld_map:[m
+[32m+[m[32m                return tld_map[tld][m
+[32m+[m
+[32m+[m[32m        # Check geography string[m
+[32m+[m[32m        geo = (contact.geography or "").lower()[m
+[32m+[m[32m        geo_map = {[m
+[32m+[m[32m            "india": "in", "united kingdom": "gb", "uk": "gb",[m
+[32m+[m[32m            "germany": "de", "france": "fr", "italy": "it",[m
+[32m+[m[32m            "brazil": "br", "canada": "ca", "australia": "au",[m
+[32m+[m[32m            "poland": "pl", "belgium": "be", "spain": "es",[m
+[32m+[m[32m            "south africa": "za", "new zealand": "nz", "switzerland": "ch",[m
+[32m+[m[32m            "netherlands": "nl", "austria": "at", "singapore": "sg",[m
+[32m+[m[32m            "mexico": "mx", "russia": "ru", "sweden": "se"[m
+[32m+[m[32m        }[m
+[32m+[m[32m        for country, code in geo_map.items():[m
+[32m+[m[32m            if country in geo:[m
+[32m+[m[32m                return code[m
+[32m+[m
+[32m+[m[32m        return "us"  # default fallback[m
+[32m+[m
+     async def _check_job_postings(self, contact: Contact, weights: Dict[SignalType, float]) -> List[Dict[str, Any]]:[m
+         company = self._clean_company_name(contact.company)[m
+         if not settings.ADZUNA_APP_ID or not settings.ADZUNA_API_KEY or not company:[m
+             return [][m
+ [m
+[32m+[m[32m        country_code = self._get_adzuna_country_code(contact)[m
+         try:[m
+             async with httpx.AsyncClient(timeout=15) as client:[m
+                 response = await client.get([m
+[31m-                    "https://api.adzuna.com/v1/api/jobs/us/search/1",[m
+[32m+[m[32m       

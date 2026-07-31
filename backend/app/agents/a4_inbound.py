@@ -196,9 +196,11 @@ class InboundAgent:
             "thread_event_id": thread_event.id,
         }
 
-    async def approve_reply(self, thread_event_id: str, approved_by: str) -> bool:
+    async def approve_reply(
+        self, thread_event_id: str, approved_by: str, custom_content: Optional[str] = None
+    ) -> bool:
         """
-        Called by Slack action handler when rep approves a draft.
+        Called by Slack action handler when rep approves a draft (or saves an edited response).
         Sends the reply and optionally adds a booking link.
         """
         result = await self.db.execute(
@@ -207,6 +209,9 @@ class InboundAgent:
         thread_event = result.scalar_one_or_none()
         if not thread_event or thread_event.approved_at or thread_event.rejected_at:
             return False
+
+        if custom_content:
+            thread_event.draft_content = custom_content
 
         contact_result = await self.db.execute(
             select(Contact).where(Contact.id == thread_event.contact_id)

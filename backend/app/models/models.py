@@ -96,7 +96,7 @@ class Contact(Base):
     win_pattern_score: Mapped[Optional[float]] = mapped_column(Float)
 
     # Signal  A2
-    signal_type: Mapped[Optional[str]] = mapped_column(String(50))
+    signal_type: Mapped[Optional[str]] = mapped_column(String(255))
     signal_score: Mapped[Optional[float]] = mapped_column(Float)
     latest_signal_at: Mapped[Optional[datetime]] = mapped_column(DateTime)
 

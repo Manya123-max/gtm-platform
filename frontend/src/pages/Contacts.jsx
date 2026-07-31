@@ -20,6 +20,8 @@ function SignalBadge({ type }) {
     job_posting:       ['badge-amber', 'Hiring'],
     news_expansion:    ['badge-gray', 'News'],
     earnings_call:     ['badge-cyan', 'Earnings Call'],
+    social_engagement: ['badge-blue', 'Social Buzz'],
+    competitor_review: ['badge-amber', 'Competitor Review'],
   }
   const [cls, label] = map[type] || ['badge-gray', type]
   return <span className={`badge ${cls}`}>{label}</span>

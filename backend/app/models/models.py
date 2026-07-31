@@ -97,7 +97,7 @@ class Contact(Base):
     win_pattern_score: Mapped[Optional[float]] = mapped_column(Float)
 
     # Signal  A2
-    signal_type: Mapped[Optional[str]] = mapped_column(String(50))
+    signal_type: Mapped[Optional[str]] = mapped_column(String(255))
     signal_score: Mapped[Optional[float]] = mapped_column(Float)
     latest_signal_at: Mapped[Optional[datetime]] = mapped_column(DateTime)
 
@@ -119,7 +119,7 @@ class Contact(Base):
     source: Mapped[Optional[str]] = mapped_column(String(50))
     hubspot_id: Mapped[Optional[str]] = mapped_column(String(100))
     apollo_id: Mapped[Optional[str]] = mapped_column(String(100))
-    user_input_id: Mapped[Optional[int]] = mapped_column(Integer, ForeignKey("user_inputs.id"), nullable=True, index=True)
+    user_input_id: Mapped[Optional[int]] = mapped_column(Integer, ForeignKey("user_inputs.id"), nullable=True)
 
     # Relationships
     signals: Mapped[List["SignalEvent"]] = relationship("SignalEvent", back_populates="contact")

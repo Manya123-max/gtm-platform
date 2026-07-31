@@ -249,3 +249,74 @@ async def test_slack_webhook_actions_signature_verification(mock_reject_reply):
     res_invalid = client.post("/webhook/slack/actions", content=payload_body, headers=headers_invalid)
     assert res_invalid.status_code == 401
     assert res_invalid.json()["detail"] == "Invalid Slack signature"
+
+
+@pytest.mark.asyncio
+@patch("app.core.celery_app.celery_app.send_task")
+async def test_approve_reply_with_custom_content(mock_send_task, mock_db, sample_contact):
+    """Test that approve_reply updates draft_content when custom_content is provided."""
+    agent = InboundAgent(mock_db)
+    mock_thread = MagicMock(approved_at=None, rejected_at=None, draft_content="Original Draft", contact_id=sample_contact.id)
+    mock_result_thread = MagicMock()
+    mock_result_thread.scalar_one_or_none.return_value = mock_thread
+    mock_result_contact = MagicMock()
+    mock_result_contact.scalar_one_or_none.return_value = sample_contact
+
+    mock_db.execute.side_effect = [mock_result_thread, mock_result_contact]
+    agent._send_reply_via_resend = AsyncMock()
+
+    res = await agent.approve_reply("thread-123", "manager@example.com", custom_content="Edited Custom Response")
+
+    assert res is True
+    assert mock_thread.draft_content == "Edited Custom Response"
+
+
+@pytest.mark.asyncio
+@patch("app.main._approve_reply", new_callable=AsyncMock)
+@patch("app.core.config.settings.SLACK_SIGNING_SECRET", "test_secret_123")
+async def test_slack_webhook_view_submission_modal(mock_approve_reply):
+    """Test /webhook/slack/actions modal view_submission payload handling."""
+    import hmac
+    import hashlib
+    import time
+    import json
+    from urllib.parse import quote
+    from fastapi.testclient import TestClient
+    from app.main import app
+
+    client = TestClient(app)
+    view_payload = {
+        "type": "view_submission",
+        "user": {"email": "manager@example.com"},
+        "view": {
+            "callback_id": "edit_reply_modal",
+            "private_metadata": "thread-abc-999",
+            "state": {
+                "values": {
+                    "draft_input_block": {
+                        "draft_text_input": {
+                            "value": "This is an edited response via Slack modal!"
+                        }
+                    }
+                }
+            }
+        }
+    }
+    payload_str = quote(json.dumps(view_payload))
+    payload_body = f"payload={payload_str}"
+    timestamp = str(int(time.time()))
+
+    sig_base = f"v0:{timestamp}:{payload_body}"
+    valid_sig = "v0=" + hmac.new(
+        b"test_secret_123", sig_base.encode(), hashlib.sha256
+    ).hexdigest()
+
+    headers = {
+        "X-Slack-Request-Timestamp": timestamp,
+        "X-Slack-Signature": valid_sig,
+        "Content-Type": "application/x-www-form-urlencoded",
+    }
+
+    res = client.post("/webhook/slack/actions", content=payload_body, headers=headers)
+    assert res.status_code == 200
+    assert res.json() == {"response_action": "clear"}

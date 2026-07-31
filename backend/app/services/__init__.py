@@ -37,10 +37,13 @@ class SlackService:
                 {"type": "mrkdwn", "text": f"Contact: {contact.company or 'unknown'} | {'ðŸ“… Calendar link will be included' if should_include_calendar else 'No calendar link'}"}
             ]},
             {"type": "actions", "elements": [
-                {"type": "button", "text": {"type": "plain_text", "text": "âœ“ Approve & Send"},
+                {"type": "button", "text": {"type": "plain_text", "text": "✓ Approve & Send"},
                  "style": "primary", "action_id": "approve_reply",
                  "value": thread_event_id},
-                {"type": "button", "text": {"type": "plain_text", "text": "âœ— Reject"},
+                {"type": "button", "text": {"type": "plain_text", "text": "✏️ Edit Response"},
+                 "action_id": "edit_reply",
+                 "value": thread_event_id},
+                {"type": "button", "text": {"type": "plain_text", "text": "✗ Reject"},
                  "style": "danger", "action_id": "reject_reply",
                  "value": thread_event_id},
             ]},
@@ -58,6 +61,47 @@ class SlackService:
         except Exception as e:
             logger.error("Slack approval send failed", error=str(e))
             return None
+
+    async def open_edit_modal(
+        self, trigger_id: str, thread_event_id: str, current_draft: str
+    ) -> bool:
+        if not settings.SLACK_BOT_TOKEN:
+            return False
+
+        view = {
+            "type": "modal",
+            "callback_id": "edit_reply_modal",
+            "private_metadata": thread_event_id,
+            "title": {"type": "plain_text", "text": "Edit AI Response"},
+            "submit": {"type": "plain_text", "text": "Save & Send"},
+            "close": {"type": "plain_text", "text": "Cancel"},
+            "blocks": [
+                {
+                    "type": "input",
+                    "block_id": "draft_input_block",
+                    "element": {
+                        "type": "plain_text_input",
+                        "action_id": "draft_text_input",
+                        "multiline": True,
+                        "initial_value": (current_draft or "")[:2000],
+                    },
+                    "label": {"type": "plain_text", "text": "Draft Response Text"},
+                }
+            ],
+        }
+
+        try:
+            async with httpx.AsyncClient(timeout=10) as client:
+                resp = await client.post(
+                    "https://slack.com/api/views.open",
+                    headers={"Authorization": f"Bearer {settings.SLACK_BOT_TOKEN}"},
+                    json={"trigger_id": trigger_id, "view": view},
+                )
+                data = resp.json()
+                return data.get("ok", False)
+        except Exception as e:
+            logger.error("Slack modal open failed", error=str(e))
+            return False
 
     async def send_daily_digest(self, pending_actions: list) -> bool:
         if not settings.SLACK_BOT_TOKEN or not pending_actions:

@@ -181,8 +181,21 @@ async def slack_actions(request: Request, background_tasks: BackgroundTasks):
     parsed = parse_qs(body.decode())
     payload = json.loads(parsed.get("payload", ["{}"])[0])
  
+    payload_type = payload.get("type")
+    user = payload.get("user", {}).get("email") or payload.get("user", {}).get("username") or payload.get("user", {}).get("id", "unknown")
+ 
+    if payload_type == "view_submission":
+        view = payload.get("view", {})
+        callback_id = view.get("callback_id")
+        if callback_id == "edit_reply_modal":
+            thread_event_id = view.get("private_metadata")
+            values = view.get("state", {}).get("values", {})
+            edited_text = values.get("draft_input_block", {}).get("draft_text_input", {}).get("value")
+            if thread_event_id and edited_text:
+                background_tasks.add_task(_approve_reply, thread_event_id, user, edited_text)
+            return JSONResponse({"response_action": "clear"})
+ 
     actions = payload.get("actions", [])
-    user = payload.get("user", {}).get("email", "unknown")
  
     for action in actions:
         action_id = action.get("action_id")
@@ -190,6 +203,10 @@ async def slack_actions(request: Request, background_tasks: BackgroundTasks):
  
         if action_id == "approve_reply":
             background_tasks.add_task(_approve_reply, value, user)
+        elif action_id == "edit_reply":
+            trigger_id = payload.get("trigger_id")
+            if trigger_id and value:
+                background_tasks.add_task(_open_edit_modal, trigger_id, value)
         elif action_id == "reject_reply":
             background_tasks.add_task(_reject_reply, value, user)
         elif action_id == "approve_crm_action":
@@ -222,13 +239,28 @@ async def _handle_unsubscribe(email: str):
             logger.info("Contact marked DNC", email=email)
  
  
-async def _approve_reply(thread_event_id: str, approved_by: str):
+async def _approve_reply(thread_event_id: str, approved_by: str, custom_content: Optional[str] = None):
     from app.core.database import AsyncSessionLocal
     from app.agents.a4_inbound import InboundAgent
  
     async with AsyncSessionLocal() as db:
         agent = InboundAgent(db)
-        await agent.approve_reply(thread_event_id, approved_by)
+        await agent.approve_reply(thread_event_id, approved_by, custom_content)
+ 
+ 
+async def _open_edit_modal(trigger_id: str, thread_event_id: str):
+    from app.core.database import AsyncSessionLocal
+    from app.models.models import ConversationThread
+    from app.services import SlackService
+    from sqlalchemy import select
+ 
+    async with AsyncSessionLocal() as db:
+        result = await db.execute(select(ConversationThread).where(ConversationThread.id == thread_event_id))
+        thread_event = result.scalar_one_or_none()
+        current_draft = thread_event.draft_content if thread_event else ""
+ 
+    slack = SlackService()
+    await slack.open_edit_modal(trigger_id, thread_event_id, current_draft)
  
  
 async def _reject_reply(thread_event_id: str, rejected_by: str):

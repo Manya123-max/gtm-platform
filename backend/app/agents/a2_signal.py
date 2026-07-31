@@ -1,9 +1,16 @@
 """
 A2 Signal Intelligence Agent.
 
-Uses only the configured sources for this deployment:
-- Adzuna for hiring signals
-- NewsAPI for funding and expansion news
+Sources for this deployment:
+- Adzuna              hiring signals (job board search)
+- PredictLeads        structured hiring / funding / news-event signals (primary;
+                       replaces most of NewsAPI's job with categorized data instead
+                       of keyword matching)
+- Currents API        supplementary keyword-matched news, higher free-tier rate
+                       limit than NewsAPI and commercial-use friendly
+- NewsAPI             legacy source, kept only as an optional extra if a key is
+                       still configured (low free-tier rate limit — see PredictLeads
+                       / Currents above for the replacements)
 """
 import asyncio
 from datetime import datetime, timedelta
@@ -22,13 +29,15 @@ logger = structlog.get_logger()
 DEFAULT_WEIGHTS = {
     SignalType.NEW_HIRE: 0.65,
     SignalType.FUNDING_ROUND: 0.60,
-    SignalType.JOB_POSTING: 0.45,
+    SignalType.JOB_POSTING: 0.60,
     SignalType.NEWS_EXPANSION: 0.25,
+    SignalType.TECH_STACK_CHANGE: 0.50,
+    SignalType.EARNINGS_CALL: 0.45,
 }
 
 
 class SignalAgent:
-    """A2: Detects buying signals through Adzuna and NewsAPI."""
+    """A2: Detects buying signals through Adzuna, PredictLeads, Currents API, and (optionally) NewsAPI."""
 
     def __init__(self, db: AsyncSession):
         self.db = db
@@ -44,6 +53,8 @@ class SignalAgent:
         all_signals: List[Dict[str, Any]] = []
         for contact in contacts:
             all_signals.extend(await self._detect_signals(contact, weights))
+            # Rate limit delay to prevent Adzuna/Currents/NewsAPI 503 gateway timeouts
+            await asyncio.sleep(0.5)
 
         saved = await self._save_signals(all_signals)
         updated = await self._update_contact_signal_scores(all_signals)
@@ -122,6 +133,8 @@ class SignalAgent:
     async def _detect_signals(self, contact: Contact, weights: Dict[SignalType, float]) -> List[Dict[str, Any]]:
         tasks = [
             self._check_job_postings(contact, weights),
+            self._check_predictleads(contact, weights),
+            self._check_currents(contact, weights),
             self._check_news(contact, weights),
         ]
 
@@ -134,19 +147,93 @@ class SignalAgent:
                 logger.warning("Signal detector error", error=str(result))
         return signals
 
+    def _get_company_domain(self, contact: Contact) -> str:
+        """Resolve a bare domain for domain-keyed APIs (PredictLeads)."""
+        if contact.company_domain:
+            return contact.company_domain.strip().lower().replace("https://", "").replace("http://", "").split("/")[0]
+        email = contact.email or ""
+        parts = email.split("@")
+        return parts[1].lower() if len(parts) > 1 else ""
+
+    def _clean_company_name(self, name: Optional[str]) -> str:
+        if not name:
+            return ""
+        # Remove parenthetical details e.g., Proximus Media House (PMH) -> Proximus Media House
+        import re
+        name = re.sub(r"\(.*?\)", "", name)
+        # Remove suffixes after common delimiters: | , -
+        for delimiter in ["|", "-", "—"]:
+            if delimiter in name:
+                name = name.split(delimiter)[0]
+        # Remove common corporate suffixes
+        suffixes = [
+            " corporation", " corp.", " corp", 
+            " incorporated", " inc.", " inc", 
+            " limited", " ltd.", " ltd", 
+            " llc", " l.l.c.", 
+            " spa", " s.p.a.", 
+            " worldwide", " holdings", " group",
+            " tecnologia", " technology"
+        ]
+        name_lower = name.lower().strip()
+        for suffix in suffixes:
+            if name_lower.endswith(suffix):
+                name = name[:len(name) - len(suffix)]
+                name_lower = name.lower().strip()
+        return name.strip()
+
+    def _get_adzuna_country_code(self, contact: Contact) -> str:
+        # Check email domain extension
+        email = contact.email or ""
+        parts = email.split("@")
+        if len(parts) > 1:
+            domain = parts[1].lower()
+            tld = domain.split(".")[-1]
+            
+            # Map top-level domains to Adzuna country codes
+            tld_map = {
+                "us": "us", "uk": "gb", "gb": "gb", "co.uk": "gb",
+                "ca": "ca", "au": "au", "nz": "nz", "za": "za",
+                "in": "in", "de": "de", "fr": "fr", "it": "it",
+                "nl": "nl", "at": "at", "pl": "pl", "ru": "ru",
+                "sg": "sg", "br": "br", "mx": "mx", "be": "be",
+                "ch": "ch", "es": "es", "se": "se"
+            }
+            if tld in tld_map:
+                return tld_map[tld]
+
+        # Check geography string
+        geo = (contact.geography or "").lower()
+        geo_map = {
+            "india": "in", "united kingdom": "gb", "uk": "gb",
+            "germany": "de", "france": "fr", "italy": "it",
+            "brazil": "br", "canada": "ca", "australia": "au",
+            "poland": "pl", "belgium": "be", "spain": "es",
+            "south africa": "za", "new zealand": "nz", "switzerland": "ch",
+            "netherlands": "nl", "austria": "at", "singapore": "sg",
+            "mexico": "mx", "russia": "ru", "sweden": "se"
+        }
+        for country, code in geo_map.items():
+            if country in geo:
+                return code
+
+        return "us"  # default fallback
+
     async def _check_job_postings(self, contact: Contact, weights: Dict[SignalType, float]) -> List[Dict[str, Any]]:
-        if not settings.ADZUNA_APP_ID or not settings.ADZUNA_API_KEY or not contact.company:
+        company = self._clean_company_name(contact.company)
+        if not settings.ADZUNA_APP_ID or not settings.ADZUNA_API_KEY or not company:
             return []
 
+        country_code = self._get_adzuna_country_code(contact)
         try:
             async with httpx.AsyncClient(timeout=15) as client:
                 response = await client.get(
-                    "https://api.adzuna.com/v1/api/jobs/us/search/1",
+                    f"https://api.adzuna.com/v1/api/jobs/{country_code}/search/1",
                     params={
                         "app_id": settings.ADZUNA_APP_ID,
                         "app_key": settings.ADZUNA_API_KEY,
-                        "what_or": f'"{contact.company}"',
-                        "results_per_page": 10,
+                        "what_or": f'"{company}"',
+                        "results_per_page": 20,
                         "sort_by": "date",
                     },
                 )
@@ -155,19 +242,39 @@ class SignalAgent:
             jobs = response.json().get("results", [])
             if not jobs:
                 return []
-
             titles = [job.get("title", "").lower() for job in jobs]
             descriptions = [(job.get("description") or "")[:200].lower() for job in jobs]
             job_text = " ".join(titles + descriptions)
 
+            locations = sorted(list(set(
+                job.get("location", {}).get("display_name")
+                for job in jobs
+                if job.get("location", {}) and job.get("location", {}).get("display_name")
+            )))
+
+            salaries_max = [job.get("salary_max") for job in jobs if job.get("salary_max")]
+            salaries_min = [job.get("salary_min") for job in jobs if job.get("salary_min")]
+            max_salary = max(salaries_max) if salaries_max else None
+            min_salary = min(salaries_min) if salaries_min else None
+
             signals: List[Dict[str, Any]] = []
-            if any(term in job_text for term in ["sdr", "bdr", "sales development", "business development rep"]):
+            if any(term in job_text for term in ["sdr", "bdr", "sales development", "business development rep", "hiring", "recruiting", "sales", "careers", "we are hiring", "open position"]):
+                job_data = {
+                    "job_count": len(jobs),
+                    "roles": titles,
+                    "locations": locations
+                }
+                if max_salary is not None:
+                    job_data["max_salary"] = max_salary
+                if min_salary is not None:
+                    job_data["min_salary"] = min_salary
+
                 signals.append({
                     "contact_id": contact.id,
                     "signal_type": SignalType.JOB_POSTING,
                     "signal_source": "adzuna",
                     "confidence": weights.get(SignalType.JOB_POSTING, DEFAULT_WEIGHTS[SignalType.JOB_POSTING]),
-                    "raw_data": {"job_count": len(jobs), "roles": titles[:5]},
+                    "raw_data": job_data,
                 })
 
             if any(term in job_text for term in ["vp of sales", "director of sales", "chief revenue", "head of sales"]):
@@ -178,17 +285,261 @@ class SignalAgent:
                     "confidence": weights.get(SignalType.NEW_HIRE, DEFAULT_WEIGHTS[SignalType.NEW_HIRE]),
                     "raw_data": {
                         "trigger": "leadership_hire",
-                        "roles": [title for title in titles if "director" in title or "vp" in title][:5],
+                        "roles": [title for title in titles if "director" in title or "vp" in title][:20],
                     },
+                })
+
+            # Check for geographic expansion based on hiring locations
+            contact_geo = (contact.geography or "").strip().lower()
+            expansion_locations = []
+            if contact_geo:
+                for loc in locations:
+                    if contact_geo not in loc.lower():
+                        expansion_locations.append(loc)
+            if expansion_locations:
+                signals.append({
+                    "contact_id": contact.id,
+                    "signal_type": SignalType.NEWS_EXPANSION,
+                    "signal_source": "adzuna",
+                    "confidence": weights.get(SignalType.NEWS_EXPANSION, DEFAULT_WEIGHTS[SignalType.NEWS_EXPANSION]),
+                    "raw_data": {
+                        "trigger": "geographic_expansion",
+                        "locations": expansion_locations,
+                    }
                 })
 
             return signals
         except Exception as exc:
-            logger.warning("Adzuna check failed", company=contact.company, error=str(exc))
+            logger.warning("Adzuna check failed", company=company, error=str(exc))
+            return []
+
+    # PredictLeads news_event categories that indicate expansion-style activity.
+    # NOTE: verify this list against docs.predictleads.com > News Events Dataset >
+    # Categories for your account's schema version before relying on it in prod.
+    _PREDICTLEADS_EXPANSION_CATEGORIES = {
+        "expansion", "new_office", "partnership", "product_launch",
+        "acquisition", "merger", "new_market",
+    }
+
+    async def _check_predictleads(self, contact: Contact, weights: Dict[SignalType, float]) -> List[Dict[str, Any]]:
+        domain = self._get_company_domain(contact)
+        if not settings.PREDICTLEADS_API_KEY or not settings.PREDICTLEADS_API_TOKEN or not domain:
+            return []
+
+        headers = {
+            "X-Api-Key": settings.PREDICTLEADS_API_KEY,
+            "X-Api-Token": settings.PREDICTLEADS_API_TOKEN,
+        }
+        signals: List[Dict[str, Any]] = []
+        cutoff = datetime.utcnow() - timedelta(days=90)
+
+        try:
+            async with httpx.AsyncClient(timeout=15) as client:
+                # Financing events → FUNDING_ROUND
+                fin_resp = await client.get(
+                    f"https://predictleads.com/api/v3/companies/{domain}/financing_events",
+                    headers=headers,
+                )
+                if fin_resp.status_code == 200:
+                    events = fin_resp.json().get("data", [])
+                    recent = [
+                        e for e in events
+                        if self._parse_iso(e.get("attributes", {}).get("announced_on")
+                                            or e.get("attributes", {}).get("first_seen_at")) >= cutoff
+                    ]
+                    if recent:
+                        latest = recent[0].get("attributes", {})
+                        signals.append({
+                            "contact_id": contact.id,
+                            "signal_type": SignalType.FUNDING_ROUND,
+                            "signal_source": "predictleads",
+                            "confidence": weights.get(SignalType.FUNDING_ROUND, DEFAULT_WEIGHTS[SignalType.FUNDING_ROUND]),
+                            "raw_data": {
+                                "event_count": len(recent),
+                                "round_type": latest.get("round_type") or latest.get("category"),
+                                "amount": latest.get("amount"),
+                            },
+                        })
+                elif fin_resp.status_code not in (404,):
+                    logger.warning("PredictLeads financing_events non-200", domain=domain, status=fin_resp.status_code)
+
+                # News events → NEWS_EXPANSION (structured category match, no keyword guessing)
+                news_resp = await client.get(
+                    f"https://predictleads.com/api/v3/companies/{domain}/news_events",
+                    headers=headers,
+                )
+                if news_resp.status_code == 200:
+                    events = news_resp.json().get("data", [])
+                    recent = [
+                        e for e in events
+                        if self._parse_iso(e.get("attributes", {}).get("published_at")
+                                            or e.get("attributes", {}).get("first_seen_at")) >= cutoff
+                        and (e.get("attributes", {}).get("category") in self._PREDICTLEADS_EXPANSION_CATEGORIES)
+                    ]
+                    if recent:
+                        latest = recent[0].get("attributes", {})
+                        signals.append({
+                            "contact_id": contact.id,
+                            "signal_type": SignalType.NEWS_EXPANSION,
+                            "signal_source": "predictleads",
+                            "confidence": weights.get(SignalType.NEWS_EXPANSION, DEFAULT_WEIGHTS[SignalType.NEWS_EXPANSION]),
+                            "raw_data": {
+                                "event_count": len(recent),
+                                "category": latest.get("category"),
+                                "headline": latest.get("title") or latest.get("headline"),
+                            },
+                        })
+                elif news_resp.status_code not in (404,):
+                    logger.warning("PredictLeads news_events non-200", domain=domain, status=news_resp.status_code)
+
+                # Job openings → NEW_HIRE (leadership roles), complements Adzuna where
+                # its country coverage is thin, since PredictLeads scrapes career pages directly
+                jobs_resp = await client.get(
+                    f"https://predictleads.com/api/v3/companies/{domain}/job_openings",
+                    headers=headers,
+                    params={"page[size]": 25},
+                )
+                if jobs_resp.status_code == 200:
+                    jobs = jobs_resp.json().get("data", [])
+                    leadership = [
+                        j for j in jobs
+                        if j.get("attributes", {}).get("seniority") in {"c_level", "vice_president", "head", "director"}
+                    ]
+                    if leadership:
+                        signals.append({
+                            "contact_id": contact.id,
+                            "signal_type": SignalType.NEW_HIRE,
+                            "signal_source": "predictleads",
+                            "confidence": weights.get(SignalType.NEW_HIRE, DEFAULT_WEIGHTS[SignalType.NEW_HIRE]),
+                            "raw_data": {
+                                "trigger": "leadership_hire",
+                                "roles": [j.get("attributes", {}).get("title") for j in leadership][:20],
+                            },
+                        })
+                elif jobs_resp.status_code not in (404,):
+                    logger.warning("PredictLeads job_openings non-200", domain=domain, status=jobs_resp.status_code)
+
+                # Technologies Used → TECH_STACK_CHANGE
+                tech_resp = await client.get(
+                    f"https://predictleads.com/api/v3/companies/{domain}/technologies",
+                    headers=headers,
+                )
+                if tech_resp.status_code == 200:
+                    techs = tech_resp.json().get("data", [])
+                    recent_techs = [
+                        t for t in techs
+                        if self._parse_iso(t.get("attributes", {}).get("first_seen_at") 
+                                           or t.get("attributes", {}).get("announced_on")
+                                           or t.get("attributes", {}).get("first_detected_on")
+                                           or t.get("attributes", {}).get("added_on")) >= cutoff
+                    ]
+                    if recent_techs:
+                        signals.append({
+                            "contact_id": contact.id,
+                            "signal_type": SignalType.TECH_STACK_CHANGE,
+                            "signal_source": "predictleads",
+                            "confidence": weights.get(SignalType.TECH_STACK_CHANGE, DEFAULT_WEIGHTS[SignalType.TECH_STACK_CHANGE]),
+                            "raw_data": {
+                                "tech_count": len(recent_techs),
+                                "technologies": [t.get("attributes", {}).get("name") for t in recent_techs][:20],
+                                "categories": [t.get("attributes", {}).get("category") for t in recent_techs][:20],
+                            },
+                        })
+                elif tech_resp.status_code not in (404,):
+                    logger.warning("PredictLeads technologies non-200", domain=domain, status=tech_resp.status_code)
+
+            return signals
+        except Exception as exc:
+            logger.warning("PredictLeads check failed", domain=domain, error=str(exc))
+            return []
+
+    @staticmethod
+    def _parse_iso(value: Optional[str]) -> datetime:
+        if not value:
+            return datetime.min
+        try:
+            return datetime.fromisoformat(value.replace("Z", "+00:00")).replace(tzinfo=None)
+        except ValueError:
+            return datetime.min
+
+    async def _check_currents(self, contact: Contact, weights: Dict[SignalType, float]) -> List[Dict[str, Any]]:
+        """Supplementary keyword-matched news via Currents API (higher free-tier
+        rate limit than NewsAPI, commercial use allowed). Same matching logic as
+        the legacy _check_news so results stay comparable."""
+        company = self._clean_company_name(contact.company)
+        if not settings.CURRENTS_API_KEY or not company:
+            return []
+
+        try:
+            async with httpx.AsyncClient(timeout=15) as client:
+                response = await client.get(
+                    "https://api.currentsapi.services/v1/search",
+                    params={
+                        "keywords": company,
+                        "language": "en",
+                        "start_date": (datetime.utcnow() - timedelta(days=6)).strftime("%Y-%m-%dT%H:%M:%SZ"),
+                    },
+                    headers={
+                        "Authorization": settings.CURRENTS_API_KEY,
+                    },
+                )
+                response.raise_for_status()
+
+            articles = response.json().get("news", [])
+            if not articles:
+                return []
+
+            combined_text = " ".join(
+                f"{a.get('title', '')} {a.get('description') or ''}".lower()
+                for a in articles
+            )
+            headline = articles[0].get("title")
+
+            signals: List[Dict[str, Any]] = []
+            if any(term in combined_text for term in ["funding", "raised", "series a", "series b", "series c", "investment", "venture", "round", "ipo", "capital"]):
+                signals.append({
+                    "contact_id": contact.id,
+                    "signal_type": SignalType.FUNDING_ROUND,
+                    "signal_source": "currents",
+                    "confidence": weights.get(SignalType.FUNDING_ROUND, DEFAULT_WEIGHTS[SignalType.FUNDING_ROUND]),
+                    "raw_data": {"article_count": len(articles), "headline": headline},
+                })
+
+            if any(term in combined_text for term in ["expansion", "new market", "launch", "opens office", "acquires", "acquisition", "partnership", "collaboration", "growth", "unveils new product", "launches new platform"]):
+                signals.append({
+                    "contact_id": contact.id,
+                    "signal_type": SignalType.NEWS_EXPANSION,
+                    "signal_source": "currents",
+                    "confidence": weights.get(SignalType.NEWS_EXPANSION, DEFAULT_WEIGHTS[SignalType.NEWS_EXPANSION]),
+                    "raw_data": {"article_count": len(articles), "headline": headline},
+                })
+
+            if any(term in combined_text for term in ["earnings call", "quarterly results", "financial report", "q1 results", "q2 results", "q3 results", "q4 results", "net income", "revenue reports", "financial results"]):
+                signals.append({
+                    "contact_id": contact.id,
+                    "signal_type": SignalType.EARNINGS_CALL,
+                    "signal_source": "currents",
+                    "confidence": weights.get(SignalType.EARNINGS_CALL, DEFAULT_WEIGHTS[SignalType.EARNINGS_CALL]),
+                    "raw_data": {"article_count": len(articles), "headline": headline},
+                })
+
+            if any(term in combined_text for term in ["appoints", "joins as", "hires new", "c-level", "chief executive", "cfo", "cto", "vice president", "executive team", "executive appointment", "welcomes new"]):
+                signals.append({
+                    "contact_id": contact.id,
+                    "signal_type": SignalType.NEW_HIRE,
+                    "signal_source": "currents",
+                    "confidence": weights.get(SignalType.NEW_HIRE, DEFAULT_WEIGHTS[SignalType.NEW_HIRE]),
+                    "raw_data": {"article_count": len(articles), "headline": headline},
+                })
+
+            return signals
+        except Exception as exc:
+            logger.warning("Currents API check failed", company=company, error=str(exc))
             return []
 
     async def _check_news(self, contact: Contact, weights: Dict[SignalType, float]) -> List[Dict[str, Any]]:
-        if not settings.NEWS_API_KEY or not contact.company:
+        company = self._clean_company_name(contact.company)
+        if not settings.NEWS_API_KEY or not company:
             return []
 
         try:
@@ -196,10 +547,10 @@ class SignalAgent:
                 response = await client.get(
                     "https://newsapi.org/v2/everything",
                     params={
-                        "q": f'"{contact.company}"',
+                        "q": f'"{company}"',
                         "sortBy": "publishedAt",
                         "language": "en",
-                        "pageSize": 5,
+                        "pageSize": 15,
                         "from": (datetime.utcnow() - timedelta(days=30)).strftime("%Y-%m-%d"),
                     },
                     headers={"X-Api-Key": settings.NEWS_API_KEY},
@@ -217,7 +568,7 @@ class SignalAgent:
             headline = articles[0].get("title")
 
             signals: List[Dict[str, Any]] = []
-            if any(term in combined_text for term in ["funding", "raised", "series a", "series b", "investment", "venture"]):
+            if any(term in combined_text for term in ["funding", "raised", "series a", "series b", "series c", "investment", "venture", "round", "ipo", "capital"]):
                 signals.append({
                     "contact_id": contact.id,
                     "signal_type": SignalType.FUNDING_ROUND,
@@ -226,7 +577,7 @@ class SignalAgent:
                     "raw_data": {"article_count": len(articles), "headline": headline},
                 })
 
-            if any(term in combined_text for term in ["expansion", "new market", "launch", "opens office", "acquires"]):
+            if any(term in combined_text for term in ["expansion", "new market", "launch", "opens office", "acquires", "acquisition", "partnership", "collaboration", "growth", "unveils new product", "launches new platform"]):
                 signals.append({
                     "contact_id": contact.id,
                     "signal_type": SignalType.NEWS_EXPANSION,
@@ -235,9 +586,27 @@ class SignalAgent:
                     "raw_data": {"article_count": len(articles), "headline": headline},
                 })
 
+            if any(term in combined_text for term in ["earnings call", "quarterly results", "financial report", "q1 results", "q2 results", "q3 results", "q4 results", "net income", "revenue reports", "financial results"]):
+                signals.append({
+                    "contact_id": contact.id,
+                    "signal_type": SignalType.EARNINGS_CALL,
+                    "signal_source": "newsapi",
+                    "confidence": weights.get(SignalType.EARNINGS_CALL, DEFAULT_WEIGHTS[SignalType.EARNINGS_CALL]),
+                    "raw_data": {"article_count": len(articles), "headline": headline},
+                })
+
+            if any(term in combined_text for term in ["appoints", "joins as", "hires new", "c-level", "chief executive", "cfo", "cto", "vice president", "executive team", "executive appointment", "welcomes new"]):
+                signals.append({
+                    "contact_id": contact.id,
+                    "signal_type": SignalType.NEW_HIRE,
+                    "signal_source": "newsapi",
+                    "confidence": weights.get(SignalType.NEW_HIRE, DEFAULT_WEIGHTS[SignalType.NEW_HIRE]),
+                    "raw_data": {"article_count": len(articles), "headline": headline},
+                })
+
             return signals
         except Exception as exc:
-            logger.warning("NewsAPI check failed", company=contact.company, error=str(exc))
+            logger.warning("NewsAPI check failed", company=company, error=str(exc))
             return []
 
     async def _save_signals(self, signals: List[Dict[str, Any]]) -> int:
@@ -269,17 +638,25 @@ class SignalAgent:
         return saved
 
     async def _update_contact_signal_scores(self, signals: List[Dict[str, Any]]) -> int:
-        contact_scores: Dict[Any, float] = {}
+        contact_signals: Dict[Any, List[Dict[str, Any]]] = {}
         for signal in signals:
             contact_id = signal["contact_id"]
-            contact_scores[contact_id] = max(contact_scores.get(contact_id, 0), signal["confidence"])
+            if contact_id not in contact_signals:
+                contact_signals[contact_id] = []
+            contact_signals[contact_id].append(signal)
 
         updated = 0
-        for contact_id, score in contact_scores.items():
+        for contact_id, sigs in contact_signals.items():
             result = await self.db.execute(select(Contact).where(Contact.id == contact_id))
             contact = result.scalar_one_or_none()
             if contact:
-                contact.signal_score = score * 100
+                best_sig = max(sigs, key=lambda s: s["confidence"])
+                contact.signal_score = best_sig["confidence"] * 100
+                
+                # Combine unique signal types as comma-separated
+                sig_types = sorted(list(set(s["signal_type"].value for s in sigs)))
+                contact.signal_type = ",".join(sig_types)
+                
                 contact.latest_signal_at = datetime.utcnow()
                 updated += 1
 
@@ -347,10 +724,16 @@ class SignalAgent:
     def _result_reason(self, contacts: List[Contact], signals: List[Dict[str, Any]], saved: int) -> str:
         if not contacts:
             return "No eligible contacts found for signal scanning"
-        if not settings.ADZUNA_APP_ID and not settings.NEWS_API_KEY:
-            return "A2 skipped external checks because Adzuna and NewsAPI are not configured"
+        any_source_configured = any([
+            settings.ADZUNA_APP_ID,
+            settings.PREDICTLEADS_API_KEY,
+            settings.CURRENTS_API_KEY,
+            settings.NEWS_API_KEY,
+        ])
+        if not any_source_configured:
+            return "A2 skipped external checks because no signal source (Adzuna / PredictLeads / Currents / NewsAPI) is configured"
         if not signals:
-            return "No qualifying Adzuna or NewsAPI buying signals found"
+            return "No qualifying buying signals found across configured sources"
         if saved == 0:
             return "Signals were detected but all were duplicates inside the dedupe window"
         return f"Saved {saved} new buying signal(s)"

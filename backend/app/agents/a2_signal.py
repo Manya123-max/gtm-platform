@@ -55,6 +55,8 @@ class SignalAgent:
         all_signals: List[Dict[str, Any]] = []
         for contact in contacts:
             all_signals.extend(await self._detect_signals(contact, weights))
+            # Rate limit delay to prevent Adzuna/Currents/NewsAPI 503 gateway timeouts
+            await asyncio.sleep(0.5)
 
         saved = await self._save_signals(all_signals)
         updated = await self._update_contact_signal_scores(all_signals)

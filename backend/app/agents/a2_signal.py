@@ -33,6 +33,8 @@ DEFAULT_WEIGHTS = {
     SignalType.NEWS_EXPANSION: 0.25,
     SignalType.TECH_STACK_CHANGE: 0.50,
     SignalType.EARNINGS_CALL: 0.45,
+    SignalType.COMPETITOR_REVIEW: 0.55,
+    SignalType.SOCIAL_ENGAGEMENT: 0.40,
 }
 
 
@@ -134,6 +136,7 @@ class SignalAgent:
             self._check_predictleads(contact, weights),
             self._check_currents(contact, weights),
             self._check_news(contact, weights),
+            self._check_apify(contact, weights),
         ]
 
         signals: List[Dict[str, Any]] = []
@@ -605,6 +608,59 @@ class SignalAgent:
             return signals
         except Exception as exc:
             logger.warning("NewsAPI check failed", company=company, error=str(exc))
+            return []
+
+    async def _check_apify(self, contact: Contact, weights: Dict[SignalType, float]) -> List[Dict[str, Any]]:
+        company = self._clean_company_name(contact.company)
+        if not company or not settings.APIFY_API_TOKEN:
+            return []
+
+        try:
+            async with httpx.AsyncClient(timeout=30) as client:
+                # Trigger Apify Reddit Scraper actor searching for company name
+                resp = await client.post(
+                    "https://api.apify.com/v2/acts/automation-lab~reddit-scraper/runs",
+                    headers={"Authorization": f"Bearer {settings.APIFY_API_TOKEN}"},
+                    json={
+                        "searchQueries": [company],
+                        "searchType": "posts",
+                        "maxPosts": 5,
+                    },
+                    timeout=15,
+                )
+                resp.raise_for_status()
+                run_data = resp.json().get("data", {})
+                run_id = run_data.get("id")
+                
+                if not run_id:
+                    return []
+                    
+                # Poll for scraper run (simple sleep)
+                await asyncio.sleep(15)
+                
+                result_resp = await client.get(
+                    f"https://api.apify.com/v2/acts/automation-lab~reddit-scraper/runs/{run_id}/dataset/items",
+                    headers={"Authorization": f"Bearer {settings.APIFY_API_TOKEN}"},
+                )
+                
+                if result_resp.status_code == 200:
+                    items = result_resp.json()
+                    if items:
+                        headline = items[0].get("title", f"Social discussions about {company}")
+                        return [{
+                            "contact_id": contact.id,
+                            "signal_type": SignalType.SOCIAL_ENGAGEMENT,
+                            "signal_source": "apify_reddit",
+                            "confidence": weights.get(SignalType.SOCIAL_ENGAGEMENT, DEFAULT_WEIGHTS[SignalType.SOCIAL_ENGAGEMENT]),
+                            "raw_data": {
+                                "mention_count": len(items),
+                                "headline": headline,
+                                "urls": [item.get("url") for item in items if item.get("url")][:5]
+                             }
+                        }]
+            return []
+        except Exception as exc:
+            logger.warning("Apify check failed", company=company, error=str(exc))
             return []
 
     async def _save_signals(self, signals: List[Dict[str, Any]]) -> int:

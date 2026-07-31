@@ -249,6 +249,12 @@ export default function ContactDetail() {
                     <div className="text-sm font-bold text-[#3A5280] mt-0.5">${selectedSignal.raw_data.max_salary.toLocaleString()}</div>
                   </div>
                 )}
+                {selectedSignal.raw_data?.mention_count !== undefined && (
+                  <div>
+                    <div className="text-[10px] uppercase font-bold tracking-wider text-[#7A96C4]">Mention Count</div>
+                    <div className="text-sm font-bold text-[#3A5280] mt-0.5">{selectedSignal.raw_data.mention_count} discussions</div>
+                  </div>
+                )}
               </div>
 
               {selectedSignal.raw_data?.headline && (
@@ -308,8 +314,27 @@ export default function ContactDetail() {
                 </div>
               )}
 
+              {selectedSignal.raw_data?.urls && selectedSignal.raw_data.urls.length > 0 && (
+                <div>
+                  <div className="text-[10px] uppercase font-bold tracking-wider text-[#7A96C4] mb-1.5">Discussion Links</div>
+                  <div className="space-y-1">
+                    {selectedSignal.raw_data.urls.map((url, idx) => (
+                      <a 
+                        key={idx} 
+                        href={url}
+                        target="_blank"
+                        rel="noopener noreferrer"
+                        className="block text-xs font-semibold text-blue-600 hover:text-blue-800 hover:underline truncate"
+                      >
+                        {url}
+                      </a>
+                    ))}
+                  </div>
+                </div>
+              )}
+
               {/* Raw JSON as fallback */}
-              {!selectedSignal.raw_data?.roles && !selectedSignal.raw_data?.technologies && !selectedSignal.raw_data?.locations && !selectedSignal.raw_data?.headline && !selectedSignal.raw_data?.amount && !selectedSignal.raw_data?.job_count && (
+              {!selectedSignal.raw_data?.roles && !selectedSignal.raw_data?.technologies && !selectedSignal.raw_data?.locations && !selectedSignal.raw_data?.urls && !selectedSignal.raw_data?.headline && !selectedSignal.raw_data?.amount && !selectedSignal.raw_data?.job_count && (
                 <div>
                   <div className="text-[10px] uppercase font-bold tracking-wider text-[#7A96C4] mb-1.5">Raw Details</div>
                   <pre className="text-xs bg-gray-50 border border-gray-100 p-3 rounded-xl overflow-x-auto text-[#3A5280] font-mono">

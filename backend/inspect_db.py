@@ -11,18 +11,11 @@ async def main():
     db = AsyncSessionLocal()
     try:
         from sqlalchemy import select
-        res = await db.execute(select(Contact))
-        contacts = res.scalars().all()
-        print("CONTACTS SIGNAL TYPES:")
-        for c in contacts:
-            if c.signal_type:
-                print(f"Contact: {c.first_name} {c.last_name} | Company: {c.company} | SignalType: {repr(c.signal_type)}")
-                
-        res = await db.execute(select(SignalEvent))
+        res = await db.execute(select(SignalEvent).where(SignalEvent.signal_type == "social_engagement"))
         signals = res.scalars().all()
-        print("\nALL SIGNAL EVENTS IN DB:")
+        print("\nSOCIAL ENGAGEMENT SIGNALS IN DB:")
         for s in signals:
-            print(f"Contact ID: {s.contact_id} | Signal: {s.signal_type} | Source: {s.signal_source}")
+            print(f"Contact ID: {s.contact_id} | Signal: {s.signal_type} | Source: {s.signal_source} | Data: {s.raw_data}")
     finally:
         await db.close()
 

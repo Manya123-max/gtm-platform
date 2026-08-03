@@ -259,10 +259,33 @@ export default function ContactDetail() {
 
               {selectedSignal.raw_data?.headline && (
                 <div>
-                  <div className="text-[10px] uppercase font-bold tracking-wider text-[#7A96C4]">Headline</div>
+                  <div className="text-[10px] uppercase font-bold tracking-wider text-[#7A96C4]">Matched Article</div>
                   <div className="text-sm font-semibold italic text-[#3A5280] mt-1.5 p-3.5 bg-[#F0F5FF]/70 rounded-xl border border-[#BFCFEA]/40 leading-relaxed">
                     "{selectedSignal.raw_data.headline}"
                   </div>
+                </div>
+              )}
+
+              {selectedSignal.raw_data?.description && (
+                <div>
+                  <div className="text-[10px] uppercase font-bold tracking-wider text-[#7A96C4] mt-4">Details / Summary</div>
+                  <div className="text-sm text-[#4E6180] mt-1.5 p-3.5 bg-gray-50/50 rounded-xl border border-gray-200/55 leading-relaxed">
+                    {selectedSignal.raw_data.description}
+                  </div>
+                </div>
+              )}
+
+              {selectedSignal.raw_data?.url && (
+                <div className="mt-2 text-right">
+                  <a 
+                    href={selectedSignal.raw_data.url} 
+                    target="_blank" 
+                    rel="noopener noreferrer"
+                    className="inline-flex items-center gap-1 text-xs font-bold text-[#3B82F6] hover:text-[#1D4ED8] transition-colors"
+                  >
+                    <span>View Original Source</span>
+                    <span className="text-[10px]">↗</span>
+                  </a>
                 </div>
               )}
 

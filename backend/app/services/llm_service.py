@@ -29,7 +29,7 @@ HAIKU_MODEL  = "claude-3-haiku-20240307"
 SONNET_MODEL = "claude-3-5-sonnet-latest"
 
 GROQ_URL     = "https://api.groq.com/openai/v1/chat/completions"
-GEMINI_URL   = "https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent"
+GEMINI_URL   = "https://generativelanguage.googleapis.com/v1beta/models/gemini-flash-latest:generateContent"
 MISTRAL_URL  = "https://api.mistral.ai/v1/chat/completions"
 DEEPSEEK_URL = "https://api.deepseek.com/v1/chat/completions"
 ANTHROPIC_URL = "https://api.anthropic.com/v1/messages"

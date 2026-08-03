@@ -13,6 +13,7 @@ Sources for this deployment:
                        / Currents above for the replacements)
 """
 import asyncio
+import re
 from datetime import datetime, timedelta
 from typing import Any, Dict, List, Optional
 
@@ -36,6 +37,15 @@ DEFAULT_WEIGHTS = {
     SignalType.COMPETITOR_REVIEW: 0.55,
     SignalType.SOCIAL_ENGAGEMENT: 0.40,
 }
+
+
+def _has_keyword(text: str, keywords: List[str]) -> bool:
+    text_lower = text.lower()
+    for kw in keywords:
+        pattern = r'\b' + re.escape(kw.lower()) + r'\b'
+        if re.search(pattern, text_lower):
+            return True
+    return False
 
 
 class SignalAgent:
@@ -492,48 +502,77 @@ class SignalAgent:
             if not articles:
                 return []
 
-            combined_text = " ".join(
-                f"{a.get('title', '')} {a.get('description') or ''}".lower()
-                for a in articles
-            )
-            headline = articles[0].get("title")
-
             signals: List[Dict[str, Any]] = []
-            if any(term in combined_text for term in ["funding", "raised", "series a", "series b", "series c", "investment", "venture", "round", "ipo", "capital"]):
-                signals.append({
-                    "contact_id": contact.id,
-                    "signal_type": SignalType.FUNDING_ROUND,
-                    "signal_source": "currents",
-                    "confidence": weights.get(SignalType.FUNDING_ROUND, DEFAULT_WEIGHTS[SignalType.FUNDING_ROUND]),
-                    "raw_data": {"article_count": len(articles), "headline": headline},
-                })
+            detected_types = set()
 
-            if any(term in combined_text for term in ["expansion", "new market", "launch", "opens office", "acquires", "acquisition", "partnership", "collaboration", "growth", "unveils new product", "launches new platform"]):
-                signals.append({
-                    "contact_id": contact.id,
-                    "signal_type": SignalType.NEWS_EXPANSION,
-                    "signal_source": "currents",
-                    "confidence": weights.get(SignalType.NEWS_EXPANSION, DEFAULT_WEIGHTS[SignalType.NEWS_EXPANSION]),
-                    "raw_data": {"article_count": len(articles), "headline": headline},
-                })
+            for a in articles:
+                title = a.get("title", "")
+                description = a.get("description") or ""
+                article_text = f"{title} {description}".lower()
 
-            if any(term in combined_text for term in ["earnings call", "quarterly results", "financial report", "q1 results", "q2 results", "q3 results", "q4 results", "net income", "revenue reports", "financial results"]):
-                signals.append({
-                    "contact_id": contact.id,
-                    "signal_type": SignalType.EARNINGS_CALL,
-                    "signal_source": "currents",
-                    "confidence": weights.get(SignalType.EARNINGS_CALL, DEFAULT_WEIGHTS[SignalType.EARNINGS_CALL]),
-                    "raw_data": {"article_count": len(articles), "headline": headline},
-                })
+                if SignalType.FUNDING_ROUND not in detected_types:
+                    if _has_keyword(article_text, ["funding", "raised", "series a", "series b", "series c", "investment", "venture", "round", "ipo", "capital"]):
+                        signals.append({
+                            "contact_id": contact.id,
+                            "signal_type": SignalType.FUNDING_ROUND,
+                            "signal_source": "currents",
+                            "confidence": weights.get(SignalType.FUNDING_ROUND, DEFAULT_WEIGHTS[SignalType.FUNDING_ROUND]),
+                            "raw_data": {
+                                "article_count": len(articles),
+                                "headline": title,
+                                "description": description,
+                                "url": a.get("url")
+                            },
+                        })
+                        detected_types.add(SignalType.FUNDING_ROUND)
 
-            if any(term in combined_text for term in ["appoints", "joins as", "hires new", "c-level", "chief executive", "cfo", "cto", "vice president", "executive team", "executive appointment", "welcomes new"]):
-                signals.append({
-                    "contact_id": contact.id,
-                    "signal_type": SignalType.NEW_HIRE,
-                    "signal_source": "currents",
-                    "confidence": weights.get(SignalType.NEW_HIRE, DEFAULT_WEIGHTS[SignalType.NEW_HIRE]),
-                    "raw_data": {"article_count": len(articles), "headline": headline},
-                })
+                if SignalType.NEWS_EXPANSION not in detected_types:
+                    if _has_keyword(article_text, ["expansion", "new market", "launch", "opens office", "acquires", "acquisition", "partnership", "collaboration", "growth", "unveils new product", "launches new platform"]):
+                        signals.append({
+                            "contact_id": contact.id,
+                            "signal_type": SignalType.NEWS_EXPANSION,
+                            "signal_source": "currents",
+                            "confidence": weights.get(SignalType.NEWS_EXPANSION, DEFAULT_WEIGHTS[SignalType.NEWS_EXPANSION]),
+                            "raw_data": {
+                                "article_count": len(articles),
+                                "headline": title,
+                                "description": description,
+                                "url": a.get("url")
+                            },
+                        })
+                        detected_types.add(SignalType.NEWS_EXPANSION)
+
+                if SignalType.EARNINGS_CALL not in detected_types:
+                    if _has_keyword(article_text, ["earnings call", "quarterly results", "financial report", "q1 results", "q2 results", "q3 results", "q4 results", "net income", "revenue reports", "financial results"]):
+                        signals.append({
+                            "contact_id": contact.id,
+                            "signal_type": SignalType.EARNINGS_CALL,
+                            "signal_source": "currents",
+                            "confidence": weights.get(SignalType.EARNINGS_CALL, DEFAULT_WEIGHTS[SignalType.EARNINGS_CALL]),
+                            "raw_data": {
+                                "article_count": len(articles),
+                                "headline": title,
+                                "description": description,
+                                "url": a.get("url")
+                            },
+                        })
+                        detected_types.add(SignalType.EARNINGS_CALL)
+
+                if SignalType.NEW_HIRE not in detected_types:
+                    if _has_keyword(article_text, ["appoints", "joins as", "hires new", "c-level", "chief executive", "cfo", "cto", "vice president", "executive team", "executive appointment", "welcomes new"]):
+                        signals.append({
+                            "contact_id": contact.id,
+                            "signal_type": SignalType.NEW_HIRE,
+                            "signal_source": "currents",
+                            "confidence": weights.get(SignalType.NEW_HIRE, DEFAULT_WEIGHTS[SignalType.NEW_HIRE]),
+                            "raw_data": {
+                                "article_count": len(articles),
+                                "headline": title,
+                                "description": description,
+                                "url": a.get("url")
+                            },
+                        })
+                        detected_types.add(SignalType.NEW_HIRE)
 
             return signals
         except Exception as exc:
@@ -564,48 +603,77 @@ class SignalAgent:
             if not articles:
                 return []
 
-            combined_text = " ".join(
-                f"{article.get('title', '')} {article.get('description') or ''}".lower()
-                for article in articles
-            )
-            headline = articles[0].get("title")
-
             signals: List[Dict[str, Any]] = []
-            if any(term in combined_text for term in ["funding", "raised", "series a", "series b", "series c", "investment", "venture", "round", "ipo", "capital"]):
-                signals.append({
-                    "contact_id": contact.id,
-                    "signal_type": SignalType.FUNDING_ROUND,
-                    "signal_source": "newsapi",
-                    "confidence": weights.get(SignalType.FUNDING_ROUND, DEFAULT_WEIGHTS[SignalType.FUNDING_ROUND]),
-                    "raw_data": {"article_count": len(articles), "headline": headline},
-                })
+            detected_types = set()
 
-            if any(term in combined_text for term in ["expansion", "new market", "launch", "opens office", "acquires", "acquisition", "partnership", "collaboration", "growth", "unveils new product", "launches new platform"]):
-                signals.append({
-                    "contact_id": contact.id,
-                    "signal_type": SignalType.NEWS_EXPANSION,
-                    "signal_source": "newsapi",
-                    "confidence": weights.get(SignalType.NEWS_EXPANSION, DEFAULT_WEIGHTS[SignalType.NEWS_EXPANSION]),
-                    "raw_data": {"article_count": len(articles), "headline": headline},
-                })
+            for article in articles:
+                title = article.get("title", "")
+                description = article.get("description") or ""
+                article_text = f"{title} {description}".lower()
 
-            if any(term in combined_text for term in ["earnings call", "quarterly results", "financial report", "q1 results", "q2 results", "q3 results", "q4 results", "net income", "revenue reports", "financial results"]):
-                signals.append({
-                    "contact_id": contact.id,
-                    "signal_type": SignalType.EARNINGS_CALL,
-                    "signal_source": "newsapi",
-                    "confidence": weights.get(SignalType.EARNINGS_CALL, DEFAULT_WEIGHTS[SignalType.EARNINGS_CALL]),
-                    "raw_data": {"article_count": len(articles), "headline": headline},
-                })
+                if SignalType.FUNDING_ROUND not in detected_types:
+                    if _has_keyword(article_text, ["funding", "raised", "series a", "series b", "series c", "investment", "venture", "round", "ipo", "capital"]):
+                        signals.append({
+                            "contact_id": contact.id,
+                            "signal_type": SignalType.FUNDING_ROUND,
+                            "signal_source": "newsapi",
+                            "confidence": weights.get(SignalType.FUNDING_ROUND, DEFAULT_WEIGHTS[SignalType.FUNDING_ROUND]),
+                            "raw_data": {
+                                "article_count": len(articles),
+                                "headline": title,
+                                "description": description,
+                                "url": article.get("url")
+                            },
+                        })
+                        detected_types.add(SignalType.FUNDING_ROUND)
 
-            if any(term in combined_text for term in ["appoints", "joins as", "hires new", "c-level", "chief executive", "cfo", "cto", "vice president", "executive team", "executive appointment", "welcomes new"]):
-                signals.append({
-                    "contact_id": contact.id,
-                    "signal_type": SignalType.NEW_HIRE,
-                    "signal_source": "newsapi",
-                    "confidence": weights.get(SignalType.NEW_HIRE, DEFAULT_WEIGHTS[SignalType.NEW_HIRE]),
-                    "raw_data": {"article_count": len(articles), "headline": headline},
-                })
+                if SignalType.NEWS_EXPANSION not in detected_types:
+                    if _has_keyword(article_text, ["expansion", "new market", "launch", "opens office", "acquires", "acquisition", "partnership", "collaboration", "growth", "unveils new product", "launches new platform"]):
+                        signals.append({
+                            "contact_id": contact.id,
+                            "signal_type": SignalType.NEWS_EXPANSION,
+                            "signal_source": "newsapi",
+                            "confidence": weights.get(SignalType.NEWS_EXPANSION, DEFAULT_WEIGHTS[SignalType.NEWS_EXPANSION]),
+                            "raw_data": {
+                                "article_count": len(articles),
+                                "headline": title,
+                                "description": description,
+                                "url": article.get("url")
+                            },
+                        })
+                        detected_types.add(SignalType.NEWS_EXPANSION)
+
+                if SignalType.EARNINGS_CALL not in detected_types:
+                    if _has_keyword(article_text, ["earnings call", "quarterly results", "financial report", "q1 results", "q2 results", "q3 results", "q4 results", "net income", "revenue reports", "financial results"]):
+                        signals.append({
+                            "contact_id": contact.id,
+                            "signal_type": SignalType.EARNINGS_CALL,
+                            "signal_source": "newsapi",
+                            "confidence": weights.get(SignalType.EARNINGS_CALL, DEFAULT_WEIGHTS[SignalType.EARNINGS_CALL]),
+                            "raw_data": {
+                                "article_count": len(articles),
+                                "headline": title,
+                                "description": description,
+                                "url": article.get("url")
+                            },
+                        })
+                        detected_types.add(SignalType.EARNINGS_CALL)
+
+                if SignalType.NEW_HIRE not in detected_types:
+                    if _has_keyword(article_text, ["appoints", "joins as", "hires new", "c-level", "chief executive", "cfo", "cto", "vice president", "executive team", "executive appointment", "welcomes new"]):
+                        signals.append({
+                            "contact_id": contact.id,
+                            "signal_type": SignalType.NEW_HIRE,
+                            "signal_source": "newsapi",
+                            "confidence": weights.get(SignalType.NEW_HIRE, DEFAULT_WEIGHTS[SignalType.NEW_HIRE]),
+                            "raw_data": {
+                                "article_count": len(articles),
+                                "headline": title,
+                                "description": description,
+                                "url": article.get("url")
+                            },
+                        })
+                        detected_types.add(SignalType.NEW_HIRE)
 
             return signals
         except Exception as exc:

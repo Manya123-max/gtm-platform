@@ -53,7 +53,7 @@ class DraftManager:
                 OutreachDraft.approval_state == "pending"
             ))
         )
-        return result.scalar_one_or_none() is not None
+        return result.scalars().first() is not None
 
     async def approve_draft(self, draft_id: str) -> bool:
         """Approve a draft and trigger send logic."""

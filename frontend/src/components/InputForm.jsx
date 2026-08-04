@@ -1,18 +1,16 @@
 import React, { useState } from 'react';
 import { useNavigate } from 'react-router-dom';
-import { useSession } from '../context/SessionContext';
 
 function InputForm() {
     const navigate = useNavigate();
-    const { setActiveSessionId } = useSession();
     const [formData, setFormData] = useState({
-        ourCompanyName:     '',
-        ourServices:        '',
-        targetLocation:     '',
-        targetIndustries:   '',   // optional
-        targetCompanySize:  '',
-        targetKeywords:     '',   // optional
-        targetJobTitles:    '',
+        ourCompanyName: '',
+        ourServices: '',
+        targetLocation: '',
+        targetIndustries: '',
+        targetCompanySize: '',
+        targetKeywords: '',
+        targetJobTitles: '',
     });
     const [status, setStatus] = useState({ type: '', message: '' });
     const [submitting, setSubmitting] = useState(false);
@@ -27,14 +25,14 @@ function InputForm() {
         setSubmitting(true);
         setStatus({ type: '', message: '' });
 
-        // camelCase → snake_case for FastAPI
+        // Convert camelCase form state -> snake_case expected by FastAPI
         const payload = {
             our_company_name:    formData.ourCompanyName,
             our_services:        formData.ourServices,
             target_location:     formData.targetLocation,
-            target_industries:   formData.targetIndustries,   // may be ""
+            target_industries:   formData.targetIndustries,
             target_company_size: formData.targetCompanySize,
-            target_keywords:     formData.targetKeywords,     // may be ""
+            target_keywords:     formData.targetKeywords,
             target_job_titles:   formData.targetJobTitles,
         };
 
@@ -51,24 +49,21 @@ function InputForm() {
 
             const data = await response.json();
             console.log('Saved:', data);
-            if (data.user_input_id) {
-                setActiveSessionId(data.user_input_id);
-            }
-            setStatus({ type: 'success', message: 'Details submitted! Redirecting to Agent Control...' });
+            setStatus({ type: 'success', message: 'Company details submitted successfully! Redirecting to Agent Control...' });
 
-            // Reset form
+            // Reset form fields
             setFormData({
-                ourCompanyName:     '',
-                ourServices:        '',
-                targetLocation:     '',
-                targetIndustries:   '',
-                targetCompanySize:  '',
-                targetKeywords:     '',
-                targetJobTitles:    '',
+                ourCompanyName: '',
+                ourServices: '',
+                targetLocation: '',
+                targetIndustries: '',
+                targetCompanySize: '',
+                targetKeywords: '',
+                targetJobTitles: '',
             });
 
             setTimeout(() => {
-                navigate('/agents', { state: { runId: data.workflow_run_id } });
+                navigate('/agents');
             }, 1500);
         } catch (err) {
             console.error('Submit failed:', err);
@@ -81,10 +76,8 @@ function InputForm() {
     return (
         <div className="max-w-xl mx-auto">
             <div className="mb-6">
-                <h1 className="text-xl font-semibold text-gray-100">Input</h1>
-                <p className="text-sm text-gray-500 mt-0.5">
-                    Define your offering and ideal customer profile to feed the GTM pipeline
-                </p>
+                <h1 className="text-xl font-semibold text-gray-100">Intake Form</h1>
+                <p className="text-sm text-gray-500 mt-0.5">Submit your company and target audience details to feed the GTM pipeline</p>
             </div>
 
             <form onSubmit={handleSubmit} className="card space-y-4">
@@ -94,126 +87,85 @@ function InputForm() {
                     </div>
                 )}
 
-                {/* ── Our Company Name ── */}
                 <div>
-                    <label className="block text-xs font-medium text-gray-400 mb-1.5">
-                        Our Company Name
-                    </label>
+                    <label className="block text-xs font-medium text-gray-400 mb-1.5">Your Company Name</label>
                     <input
                         className="input"
                         type="text"
                         name="ourCompanyName"
                         value={formData.ourCompanyName}
                         onChange={handleChange}
-                        placeholder="e.g. CloudLabs"
+                        placeholder="e.g. Acme Corp"
                         required
                     />
                 </div>
-
-                {/* ── Our Services ── */}
                 <div>
-                    <label className="block text-xs font-medium text-gray-400 mb-1.5">
-                        Our Services
-                    </label>
+                    <label className="block text-xs font-medium text-gray-400 mb-1.5">Your Services Offered</label>
                     <input
                         className="input"
                         type="text"
                         name="ourServices"
                         value={formData.ourServices}
                         onChange={handleChange}
-                        placeholder="e.g. AI Consulting, Cloud Migration"
+                        placeholder="e.g. AI Consulting, Cloud Migrations"
                         required
                     />
-                    <p className="text-xs text-gray-500 mt-1">
-                        Used for email personalisation only — not sent to Apollo search
-                    </p>
                 </div>
-
-                {/* ── Target Location ── */}
                 <div>
-                    <label className="block text-xs font-medium text-gray-400 mb-1.5">
-                        Target Location
-                    </label>
+                    <label className="block text-xs font-medium text-gray-400 mb-1.5">Target Location</label>
                     <input
                         className="input"
                         type="text"
                         name="targetLocation"
                         value={formData.targetLocation}
                         onChange={handleChange}
-                        placeholder="e.g. United States, India"
+                        placeholder="e.g. United States"
                         required
                     />
                 </div>
-
-                {/* ── Target Industries (Optional) ── */}
                 <div>
-                    <label className="block text-xs font-medium text-gray-400 mb-1.5">
-                        Target Industries
-                        <span className="ml-1.5 text-gray-500 font-normal">(Optional)</span>
-                    </label>
+                    <label className="block text-xs font-medium text-gray-400 mb-1.5">Target Industries <span className="text-gray-600">(optional)</span></label>
                     <input
                         className="input"
                         type="text"
                         name="targetIndustries"
                         value={formData.targetIndustries}
                         onChange={handleChange}
-                        placeholder="e.g. SaaS, Fintech, Healthcare"
+                        placeholder="e.g. SaaS, Fintech"
                     />
-                    <p className="text-xs text-gray-500 mt-1">
-                        Leave blank to search across all industries
-                    </p>
                 </div>
-
-                {/* ── Target Company Size ── */}
                 <div>
-                    <label className="block text-xs font-medium text-gray-400 mb-1.5">
-                        Target Company Size
-                    </label>
+                    <label className="block text-xs font-medium text-gray-400 mb-1.5">Target Company Size</label>
                     <input
                         className="input"
                         type="text"
                         name="targetCompanySize"
                         value={formData.targetCompanySize}
                         onChange={handleChange}
-                        placeholder="e.g. 50-5000  (min employees – max employees)"
+                        placeholder="e.g. 50-200"
                         required
                     />
-                    <p className="text-xs text-gray-500 mt-1">
-                        All company sizes within this range will be included
-                    </p>
                 </div>
-
-                {/* ── Target Keywords (Optional) ── */}
                 <div>
-                    <label className="block text-xs font-medium text-gray-400 mb-1.5">
-                        Target Keywords
-                        <span className="ml-1.5 text-gray-500 font-normal">(Optional)</span>
-                    </label>
+                    <label className="block text-xs font-medium text-gray-400 mb-1.5">Target Job Titles</label>
                     <input
                         className="input"
                         type="text"
-                        name="targetKeywords"
-                        value={formData.targetKeywords}
-                        onChange={handleChange}
-                        placeholder="e.g. kubernetes, machine learning, digital transformation"
-                    />
-                    <p className="text-xs text-gray-500 mt-1">
-                        Signals used to narrow prospect companies
-                    </p>
-                </div>
-
-                {/* ── Target Job Titles ── */}
-                <div>
-                    <label className="block text-xs font-medium text-gray-400 mb-1.5">
-                        Target Job Titles
-                    </label>
-                    <textarea
-                        className="input min-h-[80px]"
                         name="targetJobTitles"
                         value={formData.targetJobTitles}
                         onChange={handleChange}
-                        placeholder="e.g. CTO, VP Engineering, Head of AI"
+                        placeholder="e.g. CTO, VP of Engineering"
                         required
+                    />
+                </div>
+                <div>
+                    <label className="block text-xs font-medium text-gray-400 mb-1.5">Target Keywords <span className="text-gray-600">(optional)</span></label>
+                    <textarea
+                        className="input min-h-[80px]"
+                        name="targetKeywords"
+                        value={formData.targetKeywords}
+                        onChange={handleChange}
+                        placeholder="e.g. Kubernetes, AWS, machine learning"
                     />
                 </div>
 
@@ -222,7 +174,7 @@ function InputForm() {
                     type="submit"
                     disabled={submitting}
                 >
-                    {submitting ? 'Submitting...' : 'Start GTM Pipeline'}
+                    {submitting ? 'Submitting...' : 'Submit Details'}
                 </button>
             </form>
         </div>

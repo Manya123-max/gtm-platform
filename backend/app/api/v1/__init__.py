@@ -7,7 +7,7 @@ from uuid import UUID
 
 from fastapi import APIRouter, Depends, HTTPException, Query, BackgroundTasks
 from sqlalchemy.ext.asyncio import AsyncSession
-from sqlalchemy import select, and_, func, desc
+from sqlalchemy import select, and_, func, desc, asc
 from pydantic import BaseModel
 
 from app.core.config import settings
@@ -217,6 +217,7 @@ async def list_contacts(
     has_signal: Optional[bool] = None,
     do_not_contact: Optional[bool] = False,
     sort_by: str = "newest",
+    sort_order: str = "desc",
     user_input_id: Optional[int] = None,
     db: AsyncSession = Depends(get_db),
 ):
@@ -227,10 +228,15 @@ async def list_contacts(
         q = q.where(Contact.icp_score >= min_score)
     if has_signal:
         q = q.where(Contact.signal_score.isnot(None))
+    
+    order_func = desc if sort_order == "desc" else asc
+    
     if sort_by == "score":
-        q = q.order_by(desc(Contact.icp_score), desc(Contact.created_at))
+        q = q.order_by(order_func(Contact.icp_score), desc(Contact.created_at))
+    elif sort_by == "signal_score":
+        q = q.order_by(order_func(Contact.signal_score), desc(Contact.created_at))
     else:
-        q = q.order_by(desc(Contact.created_at), desc(Contact.icp_score))
+        q = q.order_by(order_func(Contact.created_at), desc(Contact.icp_score))
     q = q.offset(skip).limit(limit)
     result = await db.execute(q)
     return result.scalars().all()
@@ -895,10 +901,15 @@ class EditDraftRequest(BaseModel):
     body: str
 
 @router.get("/drafts")
-async def get_drafts(db: AsyncSession = Depends(get_db)):
+async def get_drafts(
+    user_input_id: Optional[int] = None,
+    db: AsyncSession = Depends(get_db)
+):
+    q = select(OutreachDraft)
+    if user_input_id is not None:
+        q = q.join(Contact).where(Contact.user_input_id == user_input_id)
     result = await db.execute(
-        select(OutreachDraft)
-        .order_by(OutreachDraft.created_at.desc())
+        q.order_by(OutreachDraft.created_at.desc())
     )
     drafts = result.scalars().all()
     
@@ -926,7 +937,8 @@ async def get_drafts(db: AsyncSession = Depends(get_db)):
                 "last_name": contact.last_name if contact else "",
                 "email": contact.email if contact else "",
                 "company": contact.company if contact else "",
-                "title": contact.title if contact else ""
+                "title": contact.title if contact else "",
+                "user_input_id": contact.user_input_id if contact else None
             } if contact else None,
             "signal": {
                 "signal_type": signal.signal_type if signal else "",
@@ -965,7 +977,8 @@ async def preview_draft(draft_id: str, db: AsyncSession = Depends(get_db)):
             "last_name": contact.last_name if contact else "",
             "email": contact.email if contact else "",
             "company": contact.company if contact else "",
-            "title": contact.title if contact else ""
+            "title": contact.title if contact else "",
+            "user_input_id": contact.user_input_id if contact else None
         } if contact else None,
         "signal": {
             "signal_type": signal.signal_type if signal else "",

@@ -137,7 +137,7 @@ def run_agent_node(
                                 "org_keyword_tags":       kw_list if kw_list else None,
                                 "vendor_services":        user_input.our_services,
                                 "threshold":              0,
-                                "enrich_limit":           25,
+                                "enrich_limit":           settings.APOLLO_ENRICH_LIMIT,
                                 "user_input_id":          user_input.id,
                             }
                         else:
@@ -145,7 +145,7 @@ def run_agent_node(
                                 # Empty titles keep manual test runs broad.
                                 "titles": [],
                                 "employee_ranges": ["11,200", "201,1000"],
-                                "enrich_limit": 25,
+                                "enrich_limit": settings.APOLLO_ENRICH_LIMIT,
                             }
 
                     raw_result = await ProspectAgent(db).run(cfg)
@@ -164,17 +164,14 @@ def run_agent_node(
 
                 elif current_agent_id == "A3":
                     contact_signal_pairs = (
-                        payload_data.get(
-                            "contact_signal_pairs"
-                        )
-                        or previous.get(
-                            "contact_signal_pairs"
-                        )
+                        payload_data.get("contact_signal_pairs")
+                        or previous.get("contact_signal_pairs")
                         or []
                     )
-
+                    user_input_id = payload_data.get("user_input_id") or previous.get("user_input_id")
                     raw_result = await OutreachAgent(db).run(
-                        contact_signal_pairs
+                        contact_signal_pairs,
+                        user_input_id=user_input_id
                     )
 
                 elif current_agent_id == "A5":

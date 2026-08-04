@@ -103,6 +103,7 @@ class SlackService:
             logger.error("Slack modal open failed", error=str(e))
             return False
 
+
     async def send_daily_digest(self, pending_actions: list) -> bool:
         if not settings.SLACK_BOT_TOKEN or not pending_actions:
             return False
@@ -142,6 +143,51 @@ class SlackService:
                 return resp.json().get("ok", False)
         except Exception as e:
             logger.error("Slack alert failed", error=str(e))
+            return False
+
+
+# ── Ntfy Service ────────────────────────────────────────────────────────
+
+class NtfyService:
+    """Plain push notification via ntfy.sh — default approval channel."""
+
+    async def send_approval_alert(
+        self, contact, reply_text: str, draft_response: str,
+        intent: str, readiness_score: float, thread_event_id: str,
+    ) -> bool:
+        if not settings.NTFY_APPROVAL_TOPIC:
+            return False
+        message = (
+            f"Reply from {contact.email} ({contact.company or 'unknown'})\n"
+            f"Score: {readiness_score:.0f}/100 | Intent: {intent}\n\n"
+            f"Their reply: {reply_text[:300]}\n\n"
+            f"Draft: {draft_response[:300]}\n\n"
+            f"thread_event_id: {thread_event_id}"
+        )
+        try:
+            async with httpx.AsyncClient(timeout=10) as client:
+                resp = await client.post(
+                    f"{settings.NTFY_BASE_URL}/{settings.NTFY_APPROVAL_TOPIC}",
+                    content=message.encode("utf-8"),
+                    headers={"Title": "GTM reply needs approval", "Priority": "high"},
+                )
+                return resp.status_code == 200
+        except Exception as e:
+            logger.error("Ntfy approval alert failed", error=str(e))
+            return False
+
+    async def send_alert(self, message: str) -> bool:
+        if not settings.NTFY_ALERTS_TOPIC:
+            return False
+        try:
+            async with httpx.AsyncClient(timeout=10) as client:
+                resp = await client.post(
+                    f"{settings.NTFY_BASE_URL}/{settings.NTFY_ALERTS_TOPIC}",
+                    content=message.encode("utf-8"),
+                )
+                return resp.status_code == 200
+        except Exception as e:
+            logger.error("Ntfy alert failed", error=str(e))
             return False
 
 
@@ -336,8 +382,6 @@ class ResendService:
             logger.error("Resend send_email failed", to=to, error=str(e))
             return None
 
-
-# â”€â”€ Embedding Service â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 # ── Embedding Service ─────────────────────────────────────────────────────
 

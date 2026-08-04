@@ -19,6 +19,7 @@ from app.models.models import (
 from app.services.llm_service import LLMService
 from app.services.slack_service import SlackService
 from app.services.cal_service import CalService
+from app.services.notification_service import NtfyService 
 from app.services.resend_service import ResendService
 
 logger = structlog.get_logger()
@@ -74,6 +75,7 @@ class InboundAgent:
         self.db = db
         self.llm = LLMService()
         self.slack = SlackService()
+        self.ntfy = NtfyService() 
         self.cal = CalService()
         self.resend = ResendService()
 
@@ -162,7 +164,7 @@ class InboundAgent:
         # Check if meeting threshold crossed
         should_request_meeting = new_score >= settings.READINESS_SCORE_MEETING_THRESHOLD
 
-        # Send to Slack for approval if enabled
+        # Notify a human — Slack (interactive) or ntfy (heads-up only)
         if settings.ENABLE_SLACK_APPROVALS:
             slack_ts = await self.slack.send_approval_request(
                 contact=contact,
@@ -176,8 +178,18 @@ class InboundAgent:
             if slack_ts:
                 thread_event.slack_message_ts = slack_ts
                 await self.db.commit()
+        else:
+            await self.ntfy.send_approval_alert(
+                contact=contact,
+                reply_text=reply_text,
+                draft_response=draft,
+                intent=intent,
+                readiness_score=new_score,
+                thread_event_id=thread_event.id,
+            )
 
-        # Schedule fallback task (2-hour timeout) — runs regardless of Slack status
+        # Schedule fallback task (2-hour timeout) — ALWAYS, regardless of
+        # notification provider, so a reply can never sit unanswered forever.
         from app.core.celery_app import celery_app
         celery_app.send_task(
             "app.workers.agent_tasks.reply_approval_timeout",

@@ -809,9 +809,10 @@ async def submit_input(data: InputData, db: AsyncSession = Depends(get_db)):
     if "A4" in agent_ids:
         agent_ids.remove("A4")
 
+    workflow = None  # initialise so workflow_id_str is safe even if agent_ids is empty
     if agent_ids:
-        titles = [t.strip() for t in data.job_title.split(",") if t.strip()]
-        geographies = [g.strip() for g in data.location.split(",") if g.strip()]
+        titles = [t.strip() for t in data.target_job_titles.split(",") if t.strip()]
+        geographies = [g.strip() for g in data.target_location.split(",") if g.strip()]
 
         # Map raw input to Apollo's valid employee range format
         def to_apollo_ranges(size_str: str) -> list:
@@ -828,13 +829,13 @@ async def submit_input(data: InputData, db: AsyncSession = Depends(get_db)):
             except Exception:
                 return ["51,200"]
 
-        employee_ranges = to_apollo_ranges(data.company_size) or ["51,200"]
+        employee_ranges = to_apollo_ranges(data.target_company_size) or ["51,200"]
 
         keyword_list = []
-        if data.keywords:
-           keyword_list.extend([k.strip() for k in data.keywords.split(",") if k.strip()])
-        if data.services:
-           keyword_list.extend([s.strip() for s in data.services.split(",") if s.strip()])
+        if data.target_keywords:
+           keyword_list.extend([k.strip() for k in data.target_keywords.split(",") if k.strip()])
+        if data.our_services:
+           keyword_list.extend([s.strip() for s in data.our_services.split(",") if s.strip()])
 
         payload = {
             "icp_config": {

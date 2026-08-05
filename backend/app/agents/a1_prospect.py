@@ -101,7 +101,7 @@ class ProspectAgent:
             }
 
         max_pages = max(1, int(icp_config.get("max_pages", settings.APOLLO_SEARCH_MAX_PAGES)))
-        enrich_limit = int(icp_config.get("enrich_limit", 25))
+        enrich_limit = int(icp_config.get("enrich_limit", 10))
         threshold = icp_config.get("threshold", settings.ICP_SCORE_THRESHOLD)
 
         headers = {
@@ -436,6 +436,24 @@ class ProspectAgent:
         )
         domain = domain.replace("https://", "").replace("http://", "").strip("/")
 
+        # Parse technologies from Apollo's "current_technologies" array of dicts
+        techs = organization.get("current_technologies") or []
+        tech_list = []
+        if isinstance(techs, list):
+            for t in techs:
+                if isinstance(t, dict) and t.get("name"):
+                    tech_list.append(t["name"])
+                elif isinstance(t, str):
+                    tech_list.append(t)
+        
+        # Fallback to "technology_names" string array
+        if not tech_list and organization.get("technology_names"):
+            tech_list = organization.get("technology_names") or []
+        
+        # Fallback to "technologies" string array
+        if not tech_list and organization.get("technologies"):
+            tech_list = organization.get("technologies") or []
+
         return {
             "email":          (person.get("email") or "").strip().lower(),
             "first_name":     person.get("first_name") or "",
@@ -448,8 +466,8 @@ class ProspectAgent:
             "employee_count": organization.get("estimated_num_employees"),
             "industry":       organization.get("industry") or "",
             "geography":      person.get("city") or person.get("country") or "",
-            "tech_stack":     organization.get("technologies") or [],
-            "funding_stage":  organization.get("latest_funding_stage") or "",
+            "tech_stack":     tech_list,
+            "funding_stage":  organization.get("latest_funding_stage") or organization.get("funding_stage") or "",
             "apollo_id":      person.get("id") or "",
             "_org_id":        organization.get("id") or "",   # used for conditional org enrich
             "source":         "apollo",
@@ -477,7 +495,6 @@ class ProspectAgent:
     # ------------------------------------------------------------------
     # Save contacts
     # ------------------------------------------------------------------
-
     async def _save_contacts(
         self,
         contacts: List[Dict[str, Any]],

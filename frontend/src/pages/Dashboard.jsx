@@ -1,5 +1,5 @@
 import { useQuery, useQueryClient } from '@tanstack/react-query'
-import { fetchOverview, fetchForecast, fetchPendingActions, runOrchestratorAgent, waitForWorkflowCompletion } from '../api'
+import { fetchOverview, fetchForecast, fetchPendingActions, runOrchestratorAgent, waitForWorkflowCompletion, fetchOutreachAnalytics } from '../api'
 import {
   BarChart, Bar, XAxis, YAxis, Tooltip, ResponsiveContainer,
   LineChart, Line, CartesianGrid
@@ -138,6 +138,7 @@ export default function Dashboard() {
   })
   const { data: forecast } = useQuery({ queryKey: ['forecast'], queryFn: fetchForecast })
   const { data: actions } = useQuery({ queryKey: ['pending-actions'], queryFn: fetchPendingActions })
+  const { data: analytics } = useQuery({ queryKey: ['outreach-analytics'], queryFn: fetchOutreachAnalytics })
 
   if (isLoading) return (
     <div className="flex items-center justify-center h-64 text-gray-600 text-sm">
@@ -235,6 +236,149 @@ export default function Dashboard() {
               Run A7 to generate forecast
             </div>
           )}
+        </div>
+      </div>
+
+      {/* Outreach Analytics Section */}
+      <div className="grid grid-cols-1 lg:grid-cols-3 gap-6 mb-6">
+        {/* Left Column: Draft Queue Summary */}
+        <div className="card">
+          <div className="section-title">Draft Approvals Summary</div>
+          <div className="section-sub">State of outreach generation queue</div>
+          {analytics?.summary ? (
+            <div className="space-y-3 mt-2">
+              <div className="flex justify-between items-center text-sm border-b border-[#BFCFEA] pb-2">
+                <span className="text-gray-500 font-medium">Pending Review</span>
+                <span className="badge badge-amber font-semibold">{analytics.summary.draft_pending}</span>
+              </div>
+              <div className="flex justify-between items-center text-sm border-b border-[#BFCFEA] pb-2">
+                <span className="text-gray-500 font-medium">Approved & Sent</span>
+                <span className="badge badge-green font-semibold">{analytics.summary.draft_approved}</span>
+              </div>
+              <div className="flex justify-between items-center text-sm border-b border-[#BFCFEA] pb-2">
+                <span className="text-gray-500 font-medium">Rejected/Dismissed</span>
+                <span className="badge badge-red font-semibold">{analytics.summary.draft_rejected}</span>
+              </div>
+              <div className="flex justify-between items-center text-sm pt-1">
+                <span className="text-gray-500 font-medium">Total Drafts Generated</span>
+                <span className="text-gray-800 font-bold">{analytics.summary.total_drafts}</span>
+              </div>
+            </div>
+          ) : (
+            <div className="text-xs text-gray-500 text-center py-6">No summary data available</div>
+          )}
+        </div>
+
+        {/* Middle Column: Channel Performance */}
+        <div className="card lg:col-span-2">
+          <div className="section-title">Outreach Channel Performance</div>
+          <div className="section-sub">Conversion stats grouped by contact channel</div>
+          <div className="overflow-x-auto mt-2">
+            <table className="min-w-full text-xs">
+              <thead>
+                <tr>
+                  <th className="th text-left">Channel</th>
+                  <th className="th text-center">Sent</th>
+                  <th className="th text-center">Replies</th>
+                  <th className="th text-center">Reply %</th>
+                  <th className="th text-center">Meetings</th>
+                  <th className="th text-center">Meeting %</th>
+                </tr>
+              </thead>
+              <tbody>
+                {analytics?.channel_performance?.length > 0 ? (
+                  analytics.channel_performance.map((c, i) => (
+                    <tr key={i} className="table-row">
+                      <td className="td font-semibold text-gray-800 capitalize">{c.channel}</td>
+                      <td className="td text-center">{c.sent}</td>
+                      <td className="td text-center">{c.replies}</td>
+                      <td className="td text-center text-emerald-600 font-medium">{c.reply_rate}%</td>
+                      <td className="td text-center">{c.meetings}</td>
+                      <td className="td text-center text-blue-600 font-medium">{c.meeting_rate}%</td>
+                    </tr>
+                  ))
+                ) : (
+                  <tr>
+                    <td colSpan={6} className="td text-center text-gray-500 py-6">No channel stats logged yet</td>
+                  </tr>
+                )}
+              </tbody>
+            </table>
+          </div>
+        </div>
+      </div>
+
+      <div className="grid grid-cols-1 lg:grid-cols-2 gap-6 mb-6">
+        {/* Left Column: Business Case Performance */}
+        <div className="card">
+          <div className="section-title">Business Case Performance</div>
+          <div className="section-sub">Draft approvals breakdown per business case</div>
+          <div className="overflow-x-auto mt-2">
+            <table className="min-w-full text-xs">
+              <thead>
+                <tr>
+                  <th className="th text-left">Business Case</th>
+                  <th className="th text-center">Total</th>
+                  <th className="th text-center">Approved</th>
+                  <th className="th text-center">Rejected</th>
+                  <th className="th text-center">Approve %</th>
+                </tr>
+              </thead>
+              <tbody>
+                {analytics?.business_case_performance?.length > 0 ? (
+                  analytics.business_case_performance.map((b, i) => (
+                    <tr key={i} className="table-row">
+                      <td className="td font-semibold text-gray-800">{b.business_case}</td>
+                      <td className="td text-center">{b.total_drafts}</td>
+                      <td className="td text-center text-green-600">{b.approved}</td>
+                      <td className="td text-center text-red-600">{b.rejected}</td>
+                      <td className="td text-center font-bold text-gray-700">{b.approval_rate}%</td>
+                    </tr>
+                  ))
+                ) : (
+                  <tr>
+                    <td colSpan={5} className="td text-center text-gray-500 py-6">No business case drafts logged</td>
+                  </tr>
+                )}
+              </tbody>
+            </table>
+          </div>
+        </div>
+
+        {/* Right Column: Template Performance */}
+        <div className="card">
+          <div className="section-title">Template & Variant Performance</div>
+          <div className="section-sub">Reply rates tracked across AI copywriting variants</div>
+          <div className="overflow-x-auto mt-2">
+            <table className="min-w-full text-xs">
+              <thead>
+                <tr>
+                  <th className="th text-left">Variant ID</th>
+                  <th className="th text-left">Signal</th>
+                  <th className="th text-center">Sent</th>
+                  <th className="th text-center">Replies</th>
+                  <th className="th text-center">Reply %</th>
+                </tr>
+              </thead>
+              <tbody>
+                {analytics?.template_performance?.length > 0 ? (
+                  analytics.template_performance.map((t, i) => (
+                    <tr key={i} className="table-row">
+                      <td className="td font-mono text-[10px] text-gray-700">{t.variant_id}</td>
+                      <td className="td text-gray-600 capitalize">{t.signal_type?.replace(/_/g, ' ')}</td>
+                      <td className="td text-center">{t.sent}</td>
+                      <td className="td text-center">{t.replies}</td>
+                      <td className="td text-center text-emerald-600 font-bold">{t.reply_rate}%</td>
+                    </tr>
+                  ))
+                ) : (
+                  <tr>
+                    <td colSpan={5} className="td text-center text-gray-500 py-6">No prompt variants logged</td>
+                  </tr>
+                )}
+              </tbody>
+            </table>
+          </div>
         </div>
       </div>
 

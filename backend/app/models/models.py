@@ -149,6 +149,8 @@ class SignalEvent(Base):
     raw_data: Mapped[Optional[dict]] = mapped_column(JSONB)
     processed: Mapped[bool] = mapped_column(Boolean, default=False)
     triggered_outreach: Mapped[bool] = mapped_column(Boolean, default=False)
+    sequence_step: Mapped[int] = mapped_column(Integer, default=0)
+    next_step_due_at: Mapped[Optional[datetime]] = mapped_column(DateTime, nullable=True)
     detected_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
 
     contact: Mapped["Contact"] = relationship("Contact", back_populates="signals")
@@ -191,6 +193,9 @@ class OutreachLog(Base):
     signal_id: Mapped[Optional[str]] = mapped_column(UUID(as_uuid=False), ForeignKey("signal_events.id"))
     # Opaque message/lead id returned by the email provider (Resend message id)
     outreach_provider_message_id: Mapped[Optional[str]] = mapped_column(String(100))
+    sequence_step: Mapped[int] = mapped_column(Integer, default=0)
+    call_script: Mapped[Optional[str]] = mapped_column(Text)
+    linkedin_note: Mapped[Optional[str]] = mapped_column(Text)
 
     # Engagement tracking
     opened: Mapped[bool] = mapped_column(Boolean, default=False)

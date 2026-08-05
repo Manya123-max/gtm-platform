@@ -228,9 +228,6 @@ async def list_contacts(
         q = q.where(Contact.icp_score >= min_score)
     if has_signal:
         q = q.where(Contact.signal_score.isnot(None))
-    
-    order_func = desc if sort_order == "desc" else asc
-    
     if sort_by == "score":
         q = q.order_by(order_func(Contact.icp_score), desc(Contact.created_at))
     elif sort_by == "signal_score":

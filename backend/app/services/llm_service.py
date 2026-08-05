@@ -29,13 +29,13 @@ HAIKU_MODEL  = "claude-3-haiku-20240307"
 SONNET_MODEL = "claude-3-5-sonnet-latest"
 
 GROQ_URL     = "https://api.groq.com/openai/v1/chat/completions"
-GEMINI_URL   = "https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent"
+GEMINI_URL   = "https://generativelanguage.googleapis.com/v1beta/models/gemini-flash-latest:generateContent"
 MISTRAL_URL  = "https://api.mistral.ai/v1/chat/completions"
 DEEPSEEK_URL = "https://api.deepseek.com/v1/chat/completions"
 ANTHROPIC_URL = "https://api.anthropic.com/v1/messages"
 ANTHROPIC_VERSION = "2023-06-01"
 
-MAX_ATTEMPTS = 2   # per provider before moving to the next
+MAX_ATTEMPTS = 4   # per provider before moving to the next
 
 
 # ── Individual provider callers ───────────────────────────────────────────────
@@ -124,7 +124,7 @@ def _build_provider_chain(
 
     if settings.GROQ_API_KEY:
         providers.append(("Groq", lambda s, u, t: _call_openai_compat(
-            GROQ_URL, settings.GROQ_API_KEY, "llama-3.3-70b-versatile",
+            GROQ_URL, settings.GROQ_API_KEY, "llama-3.1-8b-instant",
             s, u, t, force_json=force_json,
         )))
 
@@ -174,6 +174,7 @@ async def _call_with_fallback(
             try:
                 result = await caller(system, user, max_tokens)
                 logger.info("LLM success", provider=name, tokens=max_tokens)
+                await asyncio.sleep(2.0)  # Spacing delay to respect 30 RPM limits on free tiers
                 return result
             except httpx.HTTPStatusError as e:
                 status = e.response.status_code

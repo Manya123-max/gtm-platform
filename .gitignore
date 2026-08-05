@@ -41,3 +41,6 @@ Thumbs.db
 # Celery
 celerybeat-schedule
 celerybeat.pid
+
+# Local CSV imports
+backend/prospects_export.csv

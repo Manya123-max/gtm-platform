@@ -649,6 +649,7 @@ export function Outreach() {
   const [isEditing, setIsEditing] = useState(false)
   const [editSubject, setEditSubject] = useState('')
   const [editBody, setEditBody] = useState('')
+  const [activeTab, setActiveTab] = useState('active') // 'active' or 'history'
 
   const qc = useQueryClient()
   
@@ -692,6 +693,11 @@ export function Outreach() {
     })
   }
 
+  // Filter drafts into Active vs Historical
+  const activeDrafts = drafts.filter(d => d.contact?.user_input_id === activeSessionId)
+  const historicalDrafts = drafts.filter(d => d.contact?.user_input_id !== activeSessionId)
+  const displayedDrafts = activeTab === 'active' ? activeDrafts : historicalDrafts
+
   return (
     <div className="max-w-6xl mx-auto">
       <div className="mb-6 flex justify-between items-center">
@@ -709,17 +715,39 @@ export function Outreach() {
       <div className="grid grid-cols-1 lg:grid-cols-12 gap-6">
         {/* Left Column: Draft list */}
         <div className="lg:col-span-5 card p-0 overflow-hidden flex flex-col max-h-[600px]">
-          <div className="px-5 py-4 border-b border-[#1F2937] flex items-center justify-between">
-            <span className="text-sm font-medium text-gray-200">Pending Approvals</span>
-            <span className="badge badge-blue">{drafts.filter(d => d.approval_state === 'pending').length}</span>
+          {/* Tab Selection */}
+          <div className="flex border-b border-[#1F2937] bg-[#111827]">
+            <button
+              onClick={() => setActiveTab('active')}
+              className={`flex-1 py-3 text-xs font-semibold border-b-2 transition-all cursor-pointer ${
+                activeTab === 'active'
+                  ? 'border-purple-500 text-purple-400 bg-purple-950/10'
+                  : 'border-transparent text-gray-500 hover:text-gray-400 hover:bg-[#374151]/30'
+              }`}
+            >
+              Active Session ({activeDrafts.length})
+            </button>
+            <button
+              onClick={() => setActiveTab('history')}
+              className={`flex-1 py-3 text-xs font-semibold border-b-2 transition-all cursor-pointer ${
+                activeTab === 'history'
+                  ? 'border-purple-500 text-purple-400 bg-purple-950/10'
+                  : 'border-transparent text-gray-500 hover:text-gray-400 hover:bg-[#374151]/30'
+              }`}
+            >
+              History ({historicalDrafts.length})
+            </button>
           </div>
+          
           <div className="divide-y divide-[#1F2937] overflow-y-auto flex-1">
             {isLoading ? (
               <div className="p-10 text-center text-gray-500 text-sm">Loading drafts...</div>
-            ) : drafts.length === 0 ? (
-              <div className="p-10 text-center text-gray-500 text-sm">No drafts generated yet. Run Agent 3.</div>
+            ) : displayedDrafts.length === 0 ? (
+              <div className="p-10 text-center text-gray-500 text-sm">
+                No {activeTab === 'active' ? 'active session' : 'historical'} drafts.
+              </div>
             ) : (
-              drafts.map(d => {
+              displayedDrafts.map(d => {
                 const isSelected = selectedDraft?.id === d.id
                 return (
                   <div

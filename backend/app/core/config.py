@@ -61,6 +61,7 @@ class Settings(BaseSettings):
     # Increase APOLLO_SEARCH_MAX_PAGES from 10 → 25 to take advantage.
     APOLLO_API_KEY:           str = ""
     APOLLO_SEARCH_MAX_PAGES:  int = 25   # ↑ was 10 on free tier
+    APOLLO_ENRICH_LIMIT:      int = 10   # number of prospects to fetch/enrich per run (Task 6)
 
     # ── News / job signals ────────────────────────────────────────────────
     NEWS_API_KEY:           str = ""

@@ -12,7 +12,7 @@ from sqlalchemy import select, and_, or_
 from app.core.config import settings
 from app.models.models import (
     Contact, SignalEvent, OutreachLog, PromptVariant,
-    FunnelEvent, SignalType, PendingAction, ActionStatus
+    FunnelEvent, SignalType, PendingAction, ActionStatus, UserInput
 )
 from app.services.llm_service import LLMService
 from app.services.instantly_service import InstantlyService
@@ -249,20 +249,32 @@ class OutreachAgent:
         self.decision_engine = OutreachDecisionEngine(db, self.llm)
         self.draft_manager = DraftManager(db)
 
-    async def run(self, contact_signal_pairs: Optional[List[Dict]] = None) -> Dict[str, Any]:
+    async def run(
+        self,
+        contact_signal_pairs: Optional[List[Dict]] = None,
+        user_input_id: Optional[int] = None
+    ) -> Dict[str, Any]:
         """
         Process qualified contacts with signals and send outreach.
         """
         logger.info("A3 starting")
+
+        # Resolve active session ID from context, fallback to database if standalone
+        active_session_id = user_input_id
+        if active_session_id is None:
+            active_session_result = await self.db.execute(
+                select(UserInput.id).order_by(UserInput.id.desc()).limit(1)
+            )
+            active_session_id = active_session_result.scalar_one_or_none()
 
         # Get contacts with qualifying signals if not provided
         if not contact_signal_pairs:
             if settings.AGENT3_TEST_MODE:
                 contact_signal_pairs = await self._get_test_contacts()
             else:
-                contact_signal_pairs = await self._get_qualified_contacts()
+                contact_signal_pairs = await self._get_qualified_contacts(user_input_id=active_session_id)
 
-        logger.info("Processing contacts", count=len(contact_signal_pairs))
+        logger.info("Processing contacts", count=len(contact_signal_pairs), active_session_id=active_session_id)
 
         sent = 0
         drafts_created = 0
@@ -275,12 +287,23 @@ class OutreachAgent:
             "generation_failed": 0,
             "send_failed": 0,
             "decision_engine_rejected": 0,
+            "inactive_session": 0,
+            "signal_score_below_threshold": 0,
         }
 
         for pair in contact_signal_pairs:
             contact, signal = await self._resolve_pair(pair)
             if not contact or (not settings.AGENT3_TEST_MODE and not signal):
                 skip_reasons["missing_contact_or_signal"] += 1
+                continue
+
+            # Enforce strict current-session and Signal Score threshold filtering (ignoring ICP score)
+            if active_session_id is not None and contact.user_input_id != active_session_id:
+                skip_reasons["inactive_session"] += 1
+                continue
+
+            if signal and signal.confidence < settings.SIGNAL_SCORE_THRESHOLD / 100:
+                skip_reasons["signal_score_below_threshold"] += 1
                 continue
 
             # Skip if we already have a pending draft to prevent duplicates
@@ -343,27 +366,18 @@ class OutreachAgent:
             )
             drafts_created += 1
 
-            if settings.DRY_RUN_OUTREACH or settings.REQUIRE_HUMAN_APPROVAL:
-                # Add review task PendingAction
-                self.db.add(PendingAction(
-                    action_type="approve_outreach",
-                    entity_type="contact",
-                    entity_id=str(contact.id),
-                    recommended_value=message.get("subject"),
-                    current_value="draft",
-                    reason=f"Review A3 draft for {contact.email}. Business Case: {decision.get('business_case')}",
-                    agent_id="A3",
-                    status=ActionStatus.PENDING,
-                ))
-                await self.db.commit()
-            else:
-                # Direct approval and dispatch
-                success = await self.draft_manager.approve_draft(draft.id)
-                if success:
-                    sent += 1
-                    drafts_created -= 1
-                else:
-                    skip_reasons["send_failed"] += 1
+            # Add review task PendingAction (all drafts require explicit manual approval)
+            self.db.add(PendingAction(
+                action_type="approve_outreach",
+                entity_type="contact",
+                entity_id=str(contact.id),
+                recommended_value=message.get("subject"),
+                current_value="draft",
+                reason=f"Review A3 draft for {contact.email}. Business Case: {decision.get('business_case')}",
+                agent_id="A3",
+                status=ActionStatus.PENDING,
+            ))
+            await self.db.commit()
 
         await self._log_funnel_event("outreach_batch_completed", {
             "processed": len(contact_signal_pairs),
@@ -389,6 +403,7 @@ class OutreachAgent:
                 "No outreach sent; see skip_reasons"
             ),
         }
+
 
     async def _get_test_contacts(self) -> List[Dict]:
         """
@@ -434,18 +449,29 @@ class OutreachAgent:
         signal_result = await self.db.execute(signal_query)
         return contact, signal_result.scalar_one_or_none()
 
-    async def _get_qualified_contacts(self) -> List[Dict]:
+    async def _get_qualified_contacts(self, user_input_id: Optional[int] = None) -> List[Dict]:
         """
         Pull contacts with signals above threshold that haven't been contacted recently.
         Includes sequence timing logic.
         """
+        # Resolve active session ID from context, fallback to database if standalone
+        active_session_id = user_input_id
+        if active_session_id is None:
+            active_session_result = await self.db.execute(
+                select(UserInput.id).order_by(UserInput.id.desc()).limit(1)
+            )
+            active_session_id = active_session_result.scalar_one_or_none()
+
+        if active_session_id is None:
+            return []
+
         result = await self.db.execute(
             select(Contact, SignalEvent)
             .join(SignalEvent, SignalEvent.contact_id == Contact.id)
             .where(
                 and_(
+                    Contact.user_input_id == active_session_id,
                     Contact.do_not_contact == False,
-                    Contact.icp_score >= settings.ICP_SCORE_THRESHOLD,
                     SignalEvent.confidence >= settings.SIGNAL_SCORE_THRESHOLD / 100,
                     SignalEvent.processed == False,
                     SignalEvent.detected_at >= datetime.utcnow() - timedelta(days=30),

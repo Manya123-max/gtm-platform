@@ -7,7 +7,7 @@ from uuid import UUID
 
 from fastapi import APIRouter, Depends, HTTPException, Query, BackgroundTasks
 from sqlalchemy.ext.asyncio import AsyncSession
-from sqlalchemy import select, and_, func, desc
+from sqlalchemy import select, and_, func, desc, asc
 from pydantic import BaseModel
 
 from app.core.config import settings
@@ -17,7 +17,7 @@ from app.models.models import (
     Contact, SignalEvent, OutreachLog, ConversationThread,
     Deal, FunnelEvent, GeneratedContent, RevenueForecast,
     PendingAction, ActionStatus, SignalConversionRegistry,
-    PromptVariant, WorkflowRun, AgentSchedule
+    PromptVariant, WorkflowRun, AgentSchedule, OutreachDraft
 )
 
 router = APIRouter()
@@ -217,6 +217,7 @@ async def list_contacts(
     has_signal: Optional[bool] = None,
     do_not_contact: Optional[bool] = False,
     sort_by: str = "newest",
+    sort_order: str = "desc",
     user_input_id: Optional[int] = None,
     db: AsyncSession = Depends(get_db),
 ):
@@ -227,10 +228,15 @@ async def list_contacts(
         q = q.where(Contact.icp_score >= min_score)
     if has_signal:
         q = q.where(Contact.signal_score.isnot(None))
+
+    order_func = desc if sort_order == "desc" else asc
+
     if sort_by == "score":
-        q = q.order_by(desc(Contact.icp_score), desc(Contact.created_at))
+        q = q.order_by(order_func(Contact.icp_score), desc(Contact.created_at))
+    elif sort_by == "signal_score":
+        q = q.order_by(order_func(Contact.signal_score), desc(Contact.created_at))
     else:
-        q = q.order_by(desc(Contact.created_at), desc(Contact.icp_score))
+        q = q.order_by(order_func(Contact.created_at), desc(Contact.icp_score))
     q = q.offset(skip).limit(limit)
     result = await db.execute(q)
     return result.scalars().all()
@@ -331,6 +337,12 @@ async def approve_action(
     action.status = ActionStatus.APPROVED
     action.approved_by = body.approved_by
     action.approved_at = datetime.utcnow()
+    
+    if action.action_type == "approve_outreach":
+        from app.agents.draft_manager import DraftManager
+        draft_manager = DraftManager(db)
+        await draft_manager.approve_pending_draft(action.entity_id)
+
     await db.commit()
     return {"status": "approved"}
 
@@ -810,8 +822,8 @@ async def submit_input(data: InputData, db: AsyncSession = Depends(get_db)):
         agent_ids.remove("A4")
 
     if agent_ids:
-        titles = [t.strip() for t in data.job_title.split(",") if t.strip()]
-        geographies = [g.strip() for g in data.location.split(",") if g.strip()]
+        titles = [t.strip() for t in data.target_job_titles.split(",") if t.strip()]
+        geographies = [g.strip() for g in data.target_location.split(",") if g.strip()]
 
         # Map raw input to Apollo's valid employee range format
         def to_apollo_ranges(size_str: str) -> list:
@@ -828,13 +840,13 @@ async def submit_input(data: InputData, db: AsyncSession = Depends(get_db)):
             except Exception:
                 return ["51,200"]
 
-        employee_ranges = to_apollo_ranges(data.company_size) or ["51,200"]
+        employee_ranges = to_apollo_ranges(data.target_company_size) or ["51,200"]
 
         keyword_list = []
-        if data.keywords:
-           keyword_list.extend([k.strip() for k in data.keywords.split(",") if k.strip()])
-        if data.services:
-           keyword_list.extend([s.strip() for s in data.services.split(",") if s.strip()])
+        if data.target_keywords:
+           keyword_list.extend([k.strip() for k in data.target_keywords.split(",") if k.strip()])
+        if data.our_services:
+           keyword_list.extend([s.strip() for s in data.our_services.split(",") if s.strip()])
 
         payload = {
             "icp_config": {
@@ -879,4 +891,249 @@ async def submit_input(data: InputData, db: AsyncSession = Depends(get_db)):
         "message": "Input saved and GTM pipeline triggered successfully",
         "workflow_run_id": workflow_id_str,
         "user_input_id": record.id,
+    }
+
+
+# ── Draft Manager Endpoints ───────────────────────────────────────────────
+
+class EditDraftRequest(BaseModel):
+    subject: str
+    body: str
+
+@router.get("/drafts")
+async def get_drafts(db: AsyncSession = Depends(get_db)):
+    result = await db.execute(
+        select(OutreachDraft)
+        .order_by(OutreachDraft.created_at.desc())
+    )
+    drafts = result.scalars().all()
+    
+    serialized = []
+    for d in drafts:
+        contact_res = await db.execute(select(Contact).where(Contact.id == d.contact_id))
+        contact = contact_res.scalar_one_or_none()
+        signal_res = await db.execute(select(SignalEvent).where(SignalEvent.id == d.signal_id))
+        signal = signal_res.scalar_one_or_none()
+        
+        serialized.append({
+            "id": d.id,
+            "contact_id": d.contact_id,
+            "signal_id": d.signal_id,
+            "subject": d.subject,
+            "body": d.body,
+            "business_case": d.business_case,
+            "matched_services": d.matched_services,
+            "channel": d.channel,
+            "status": d.status,
+            "approval_state": d.approval_state,
+            "created_at": d.created_at.isoformat() if d.created_at else None,
+            "contact": {
+                "first_name": contact.first_name if contact else "",
+                "last_name": contact.last_name if contact else "",
+                "email": contact.email if contact else "",
+                "company": contact.company if contact else "",
+                "title": contact.title if contact else ""
+            } if contact else None,
+            "signal": {
+                "signal_type": signal.signal_type if signal else "",
+                "confidence": signal.confidence if signal else 0.0,
+                "raw_data": signal.raw_data if signal else {}
+            } if signal else None
+        })
+    return serialized
+
+@router.get("/drafts/{draft_id}/preview")
+async def preview_draft(draft_id: str, db: AsyncSession = Depends(get_db)):
+    result = await db.execute(select(OutreachDraft).where(OutreachDraft.id == draft_id))
+    d = result.scalar_one_or_none()
+    if not d:
+        raise HTTPException(status_code=404, detail="Draft not found")
+        
+    contact_res = await db.execute(select(Contact).where(Contact.id == d.contact_id))
+    contact = contact_res.scalar_one_or_none()
+    signal_res = await db.execute(select(SignalEvent).where(SignalEvent.id == d.signal_id))
+    signal = signal_res.scalar_one_or_none()
+    
+    return {
+        "id": d.id,
+        "contact_id": d.contact_id,
+        "signal_id": d.signal_id,
+        "subject": d.subject,
+        "body": d.body,
+        "business_case": d.business_case,
+        "matched_services": d.matched_services,
+        "channel": d.channel,
+        "status": d.status,
+        "approval_state": d.approval_state,
+        "created_at": d.created_at.isoformat() if d.created_at else None,
+        "contact": {
+            "first_name": contact.first_name if contact else "",
+            "last_name": contact.last_name if contact else "",
+            "email": contact.email if contact else "",
+            "company": contact.company if contact else "",
+            "title": contact.title if contact else ""
+        } if contact else None,
+        "signal": {
+            "signal_type": signal.signal_type if signal else "",
+            "confidence": signal.confidence if signal else 0.0,
+            "raw_data": signal.raw_data if signal else {}
+        } if signal else None
+    }
+
+@router.post("/drafts/{draft_id}/approve")
+async def approve_draft_route(draft_id: str, db: AsyncSession = Depends(get_db)):
+    from app.agents.draft_manager import DraftManager
+    draft_manager = DraftManager(db)
+    success = await draft_manager.approve_draft(draft_id)
+    if not success:
+        raise HTTPException(status_code=400, detail="Approval failed or draft not pending")
+    
+    draft_res = await db.execute(select(OutreachDraft).where(OutreachDraft.id == draft_id))
+    draft = draft_res.scalar_one_or_none()
+    if draft:
+        action_res = await db.execute(
+            select(PendingAction)
+            .where(and_(
+                PendingAction.entity_id == draft.contact_id,
+                PendingAction.action_type == "approve_outreach",
+                PendingAction.status == ActionStatus.PENDING
+            ))
+        )
+        action = action_res.scalar_one_or_none()
+        if action:
+            action.status = ActionStatus.APPROVED
+            action.approved_at = datetime.utcnow()
+            
+    await db.commit()
+    return {"status": "approved"}
+
+@router.post("/drafts/{draft_id}/reject")
+async def reject_draft_route(draft_id: str, db: AsyncSession = Depends(get_db)):
+    result = await db.execute(select(OutreachDraft).where(OutreachDraft.id == draft_id))
+    d = result.scalar_one_or_none()
+    if not d:
+        raise HTTPException(status_code=404, detail="Draft not found")
+    if d.approval_state != "pending":
+        raise HTTPException(status_code=400, detail="Draft not in pending state")
+        
+    d.approval_state = "rejected"
+    d.status = "failed"
+    
+    action_res = await db.execute(
+        select(PendingAction)
+        .where(and_(
+            PendingAction.entity_id == d.contact_id,
+            PendingAction.action_type == "approve_outreach",
+            PendingAction.status == ActionStatus.PENDING
+        ))
+    )
+    action = action_res.scalar_one_or_none()
+    if action:
+        action.status = ActionStatus.DISMISSED
+
+    await db.commit()
+    return {"status": "rejected"}
+
+@router.post("/drafts/{draft_id}/edit")
+async def edit_draft_route(draft_id: str, body: EditDraftRequest, db: AsyncSession = Depends(get_db)):
+    result = await db.execute(select(OutreachDraft).where(OutreachDraft.id == draft_id))
+    d = result.scalar_one_or_none()
+    if not d:
+        raise HTTPException(status_code=404, detail="Draft not found")
+    if d.approval_state != "pending":
+        raise HTTPException(status_code=400, detail="Cannot edit approved/rejected draft")
+        
+    d.subject = body.subject
+    d.body = body.body
+    await db.commit()
+    return {"status": "updated", "subject": d.subject, "body": d.body}
+
+
+@router.get("/dashboard/outreach-analytics")
+async def get_outreach_analytics(db: AsyncSession = Depends(get_db)):
+    # 1. Draft counts
+    draft_pending = await db.scalar(select(func.count(OutreachDraft.id)).where(OutreachDraft.approval_state == "pending")) or 0
+    draft_approved = await db.scalar(select(func.count(OutreachDraft.id)).where(OutreachDraft.approval_state == "approved")) or 0
+    draft_rejected = await db.scalar(select(func.count(OutreachDraft.id)).where(OutreachDraft.approval_state == "rejected")) or 0
+    total_drafts = draft_pending + draft_approved + draft_rejected
+
+    # 2. Sent logs, replies, meetings
+    total_sent = await db.scalar(select(func.count(OutreachLog.id))) or 0
+    total_replies = await db.scalar(select(func.count(OutreachLog.id)).where(OutreachLog.replied == True)) or 0
+    total_meetings = await db.scalar(select(func.count(OutreachLog.id)).where(OutreachLog.meeting_booked == True)) or 0
+
+    # 3. Channel performance
+    channel_perf_res = await db.execute(
+        select(
+            OutreachLog.channel,
+            func.count(OutreachLog.id),
+            func.count(func.nullif(OutreachLog.replied, False)),
+            func.count(func.nullif(OutreachLog.meeting_booked, False))
+        ).group_by(OutreachLog.channel)
+    )
+    channel_performance = []
+    for chan, sent, replies, meetings in channel_perf_res.all():
+        channel_performance.append({
+            "channel": chan or "email",
+            "sent": sent,
+            "replies": replies,
+            "meetings": meetings,
+            "reply_rate": round(replies / max(sent, 1) * 100, 1),
+            "meeting_rate": round(meetings / max(sent, 1) * 100, 1)
+        })
+
+    # 4. Business Case performance (Draft breakdown)
+    bc_perf_res = await db.execute(
+        select(
+            OutreachDraft.business_case,
+            func.count(OutreachDraft.id),
+            func.count(func.nullif(OutreachDraft.approval_state == "approved", False)),
+            func.count(func.nullif(OutreachDraft.approval_state == "rejected", False))
+        ).group_by(OutreachDraft.business_case)
+    )
+    business_case_performance = []
+    for bc, total, approved, rejected in bc_perf_res.all():
+        business_case_performance.append({
+            "business_case": bc or "General Sales Outreach",
+            "total_drafts": total,
+            "approved": approved,
+            "rejected": rejected,
+            "approval_rate": round(approved / max(total, 1) * 100, 1)
+        })
+
+    # 5. Template (Prompt Variant) performance
+    variant_res = await db.execute(
+        select(
+            PromptVariant.id,
+            PromptVariant.signal_type,
+            PromptVariant.send_count,
+            PromptVariant.reply_count,
+            PromptVariant.meeting_count,
+            PromptVariant.reply_rate
+        ).where(PromptVariant.is_active == True)
+    )
+    template_performance = []
+    for vid, sig, sent, replies, meetings, rate in variant_res.all():
+        template_performance.append({
+            "variant_id": vid,
+            "signal_type": sig,
+            "sent": sent,
+            "replies": replies,
+            "meetings": meetings,
+            "reply_rate": round(rate * 100, 1) if rate else 0.0
+        })
+
+    return {
+        "summary": {
+            "total_drafts": total_drafts,
+            "draft_pending": draft_pending,
+            "draft_approved": draft_approved,
+            "draft_rejected": draft_rejected,
+            "total_sent": total_sent,
+            "total_replies": total_replies,
+            "total_meetings": total_meetings,
+        },
+        "channel_performance": channel_performance,
+        "business_case_performance": business_case_performance,
+        "template_performance": template_performance
     }

@@ -46,6 +46,12 @@ export const fetchFunnelMetrics = (days = 30) => unwrap(api.get('/revenue/funnel
 export const fetchContent = (params = {}) => unwrap(api.get('/content', { params }))
 export const fetchSignalRegistry = () => unwrap(api.get('/signals/registry'))
 export const fetchDrafts = (user_input_id) => unwrap(api.get('/outreach/drafts', { params: user_input_id ? { user_input_id } : {} }))
+export const fetchOutreachDrafts = () => unwrap(api.get('/drafts'))
+export const approveOutreachDraft = id => unwrap(api.post(`/drafts/${id}/approve`))
+export const rejectOutreachDraft = id => unwrap(api.post(`/drafts/${id}/reject`))
+export const editOutreachDraft = (id, subject, body) => unwrap(api.post(`/drafts/${id}/edit`, { subject, body }))
+export const previewOutreachDraft = id => unwrap(api.get(`/drafts/${id}/preview`))
+export const fetchOutreachAnalytics = () => unwrap(api.get('/dashboard/outreach-analytics'))
 export const fetchInputHistory = () => unwrap(api.get('/input-history'))
 export const fetchActiveSession = () => unwrap(api.get('/active-session'))
 

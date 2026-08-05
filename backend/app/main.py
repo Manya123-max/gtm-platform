@@ -6,9 +6,7 @@ import json
 import hmac
 import hashlib
 from contextlib import asynccontextmanager
-from typing import Dict, Any
- 
- 
+from typing import Dict, Any, Optional
 from fastapi import FastAPI, Request, HTTPException, Depends, BackgroundTasks
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
@@ -93,8 +91,6 @@ async def submit_input(data: InputData):
         await db.refresh(record)
  
     return {"message": "Input received", "id": record.id}
- 
- 
 # ── Webhook Routes ────────────────────────────────────────────────────────
  
 @app.post("/webhook/inbound-reply")
@@ -185,20 +181,51 @@ async def slack_actions(request: Request, background_tasks: BackgroundTasks):
     parsed = parse_qs(body.decode())
     payload = json.loads(parsed.get("payload", ["{}"])[0])
  
-    actions = payload.get("actions", [])
-    user = payload.get("user", {}).get("email", "unknown")
+    payload_type = payload.get("type")
+    user = payload.get("user", {}).get("email") or payload.get("user", {}).get("username") or payload.get("user", {}).get("id", "unknown")
  
+    if payload_type == "view_submission":
+        view = payload.get("view", {})
+        callback_id = view.get("callback_id")
+        if callback_id == "edit_reply_modal":
+            thread_event_id = view.get("private_metadata")
+            values = view.get("state", {}).get("values", {})
+            edited_text = values.get("draft_input_block", {}).get("draft_text_input", {}).get("value")
+            if thread_event_id and edited_text:
+                background_tasks.add_task(_approve_reply, thread_event_id, user, edited_text)
+            return JSONResponse({"response_action": "clear"})
+ 
+    # Modal submission (rep clicked "Save & Send" in the edit modal)
+    if payload.get("type") == "view_submission":
+        view = payload.get("view", {})
+        if view.get("callback_id") == "edit_reply_modal":
+            thread_event_id = view.get("private_metadata", "")
+            edited_text = (
+                view.get("state", {})
+                    .get("values", {})
+                    .get("draft_input_block", {})
+                    .get("draft_text_input", {})
+                    .get("value", "")
+            )
+            background_tasks.add_task(_save_edited_reply, thread_event_id, edited_text, user)
+        return JSONResponse({})  # ack — closes the modal, no further Slack action needed
+
+    actions = payload.get("actions", [])
+
     for action in actions:
         action_id = action.get("action_id")
         value = action.get("value")
- 
+
         if action_id == "approve_reply":
             background_tasks.add_task(_approve_reply, value, user)
         elif action_id == "reject_reply":
             logger.info("Reply rejected", thread_event_id=value, by=user)
+        elif action_id == "edit_reply":
+            trigger_id = payload.get("trigger_id", "")
+            background_tasks.add_task(_open_edit_modal, value, trigger_id)
         elif action_id == "approve_crm_action":
             background_tasks.add_task(_approve_crm_action, value, user)
- 
+
     return JSONResponse({"text": "✓ Action received"})
  
  
@@ -226,13 +253,57 @@ async def _handle_unsubscribe(email: str):
             logger.info("Contact marked DNC", email=email)
  
  
-async def _approve_reply(thread_event_id: str, approved_by: str):
+async def _approve_reply(thread_event_id: str, approved_by: str, custom_content: Optional[str] = None):
     from app.core.database import AsyncSessionLocal
     from app.agents.a4_inbound import InboundAgent
  
     async with AsyncSessionLocal() as db:
         agent = InboundAgent(db)
-        await agent.approve_reply(thread_event_id, approved_by)
+        await agent.approve_reply(thread_event_id, approved_by, custom_content)
+
+async def approve_edited_reply(
+        self, thread_event_id: str, edited_text: str, approved_by: str
+    ) -> bool:
+        """
+        Called when a rep edits the draft in the Slack modal and hits
+        "Save & Send". Same as approve_reply, but sends the edited text
+        instead of the original AI draft.
+        """
+        result = await self.db.execute(
+            select(ConversationThread).where(ConversationThread.id == thread_event_id)
+        )
+        thread_event = result.scalar_one_or_none()
+        if not thread_event or thread_event.approved_at:
+            return False
+
+        thread_event.draft_content = edited_text  # keep an audit trail of what was actually sent
+        await self.db.commit()
+
+        return await self.approve_reply(thread_event_id, approved_by)
+ 
+ 
+async def _open_edit_modal(trigger_id: str, thread_event_id: str):
+    from app.core.database import AsyncSessionLocal
+    from app.models.models import ConversationThread
+    from app.services import SlackService
+    from sqlalchemy import select
+ 
+    async with AsyncSessionLocal() as db:
+        result = await db.execute(select(ConversationThread).where(ConversationThread.id == thread_event_id))
+        thread_event = result.scalar_one_or_none()
+        current_draft = thread_event.draft_content if thread_event else ""
+ 
+    slack = SlackService()
+    await slack.open_edit_modal(trigger_id, thread_event_id, current_draft)
+ 
+ 
+async def _reject_reply(thread_event_id: str, rejected_by: str):
+    from app.core.database import AsyncSessionLocal
+    from app.agents.a4_inbound import InboundAgent
+ 
+    async with AsyncSessionLocal() as db:
+        agent = InboundAgent(db)
+        await agent.reject_reply(thread_event_id, rejected_by)
  
  
 async def _approve_crm_action(action_id: str, approved_by: str):

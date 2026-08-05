@@ -37,6 +37,7 @@ class ReplyIntent(str, enum.Enum):
     OUT_OF_OFFICE = "out_of_office"
     BOUNCE = "bounce"
     REFERRAL = "referral"
+    UNSUBSCRIBE = "unsubscribe"
     UNKNOWN = "unknown"
 
 
@@ -96,7 +97,7 @@ class Contact(Base):
     win_pattern_score: Mapped[Optional[float]] = mapped_column(Float)
 
     # Signal  A2
-    signal_type: Mapped[Optional[str]] = mapped_column(String(50))
+    signal_type: Mapped[Optional[str]] = mapped_column(String(255))
     signal_score: Mapped[Optional[float]] = mapped_column(Float)
     latest_signal_at: Mapped[Optional[datetime]] = mapped_column(DateTime)
 
@@ -118,7 +119,7 @@ class Contact(Base):
     source: Mapped[Optional[str]] = mapped_column(String(50))
     hubspot_id: Mapped[Optional[str]] = mapped_column(String(100))
     apollo_id: Mapped[Optional[str]] = mapped_column(String(100))
-    user_input_id: Mapped[Optional[int]] = mapped_column(Integer, ForeignKey("user_inputs.id"), nullable=True, index=True)
+    user_input_id: Mapped[Optional[int]] = mapped_column(Integer, ForeignKey("user_inputs.id"), nullable=True)
 
     # Relationships
     signals: Mapped[List["SignalEvent"]] = relationship("SignalEvent", back_populates="contact")
@@ -260,6 +261,8 @@ class ConversationThread(Base):
     slack_message_ts: Mapped[Optional[str]] = mapped_column(String(100))
     approved_by: Mapped[Optional[str]] = mapped_column(String(100))
     approved_at: Mapped[Optional[datetime]] = mapped_column(DateTime)
+    rejected_by: Mapped[Optional[str]] = mapped_column(String(100))
+    rejected_at: Mapped[Optional[datetime]] = mapped_column(DateTime)
 
     sent_at: Mapped[Optional[datetime]] = mapped_column(DateTime)
     occurred_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow, index=True)
@@ -507,11 +510,12 @@ class UserInput(Base):
     """
     __tablename__ = "user_inputs"
 
-    id: Mapped[int]                    = mapped_column(Integer, primary_key=True, autoincrement=True)
-    our_company_name: Mapped[str]      = mapped_column(String(300), nullable=False, server_default="")
-    our_services: Mapped[str]          = mapped_column(String(300), nullable=False)
-    target_location: Mapped[str]       = mapped_column(String(200), nullable=False)
-    target_industries: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
-    target_company_size: Mapped[str]   = mapped_column(String(50), nullable=False)
-    target_keywords: Mapped[Optional[str]]   = mapped_column(Text, nullable=True)
-    target_job_titles: Mapped[str]     = mapped_column(String(200), nullable=False)
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    our_company_name:    Mapped[str] = mapped_column(String(300), nullable=False, server_default="")
+    our_services:        Mapped[str] = mapped_column(String(300), nullable=False)
+    target_location:     Mapped[str] = mapped_column(String(200), nullable=False)
+    target_industries:   Mapped[Optional[str]] = mapped_column(String(300), nullable=True)
+    target_company_size: Mapped[str] = mapped_column(String(50), nullable=False)
+    target_keywords:     Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    target_job_titles:   Mapped[str] = mapped_column(String(200), nullable=False)
+

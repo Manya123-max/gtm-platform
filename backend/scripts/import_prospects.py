@@ -100,11 +100,16 @@ async def main():
             if not email:
                 continue
 
-            # Check if contact already exists
-            res = await db.execute(select(Contact).where(Contact.email == email))
-            existing = res.scalar_one_or_none()
-
             contact_id = row.get("id") or None
+
+            # Check if contact already exists by ID first, then fallback to email lookup
+            existing = None
+            if contact_id:
+                res = await db.execute(select(Contact).where(Contact.id == contact_id))
+                existing = res.scalar_one_or_none()
+            if not existing:
+                res = await db.execute(select(Contact).where(Contact.email == email))
+                existing = res.scalar_one_or_none()
             user_input_id = None
             ui_id_str = row.get("user_input_id")
             if ui_id_str and ui_id_str.strip():

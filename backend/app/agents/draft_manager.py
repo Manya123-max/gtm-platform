@@ -79,7 +79,7 @@ class DraftManager:
 
         draft.approval_state = "approved"
         
-        # Dispatch outreach using the existing send logic (via Instantly)
+        # Dispatch outreach using the existing send logic (via Instantly or Resend)
         provider_id = None
         success = False
         if settings.ENABLE_INSTANTLY:
@@ -94,9 +94,18 @@ class DraftManager:
                 body=draft.body,
             )
             success = bool(provider_id)
+        elif settings.ENABLE_EMAIL_SENDING and settings.RESEND_API_KEY:
+            from app.services.resend_service import ResendService
+            resend = ResendService()
+            provider_id = await resend.send_email(
+                to=contact.email,
+                subject=draft.subject,
+                html=draft.body.replace("\n", "<br>"),
+            )
+            success = bool(provider_id)
         else:
             # Safe default fallback for development/staging
-            logger.info("Instantly not enabled; mock-sending draft", email=contact.email)
+            logger.info("Outreach sending not enabled (ENABLE_INSTANTLY and ENABLE_EMAIL_SENDING are False); mock-sending draft", email=contact.email)
             success = True
 
         if success:

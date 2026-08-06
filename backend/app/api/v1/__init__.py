@@ -400,7 +400,7 @@ async def list_content(
         ui_result = await db.execute(select(UserInput).where(UserInput.id == user_input_id))
         ui = ui_result.scalar_one_or_none()
         if ui:
-            q = q.where(GeneratedContent.icp_segment.ilike(f"%{ui.company_name}%"))
+            q = q.where(GeneratedContent.icp_segment.ilike(f"%{ui.our_company_name}%"))
     q = q.order_by(desc(GeneratedContent.created_at)).limit(limit)
     result = await db.execute(q)
     return result.scalars().all()

@@ -1018,8 +1018,8 @@ async def approve_draft_route(draft_id: str, db: AsyncSession = Depends(get_db))
             PendingAction.status == ActionStatus.PENDING
         ))
     )
-    action = action_res.scalar_one_or_none()
-    if action:
+    actions = action_res.scalars().all()
+    for action in actions:
         action.status = ActionStatus.APPROVED
         action.approved_at = datetime.utcnow()
             

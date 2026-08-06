@@ -242,7 +242,7 @@ def run_a4_test(config: Optional[Dict] = None):
     """
     test_payload = {
         "event_type": "reply_received",
-        "from_address": "test.prospect@example.com",
+        "from_address": "suriya.krishnan@forcecloudlabs.com",
         "reply_text": "Thanks for reaching out! Yes, we are actually evaluating tools right now. Can you tell me more about what you offer?",
         "campaign_id": "test-campaign",
     }

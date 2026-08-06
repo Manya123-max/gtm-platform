@@ -984,28 +984,56 @@ async def preview_draft(draft_id: str, db: AsyncSession = Depends(get_db)):
 async def approve_draft_route(draft_id: str, db: AsyncSession = Depends(get_db)):
     from app.agents.draft_manager import DraftManager
     draft_manager = DraftManager(db)
-    success = await draft_manager.approve_draft(draft_id)
-    if not success:
-        raise HTTPException(status_code=400, detail="Approval failed or draft not pending")
     
+    # Fetch draft details
     draft_res = await db.execute(select(OutreachDraft).where(OutreachDraft.id == draft_id))
     draft = draft_res.scalar_one_or_none()
-    if draft:
-        action_res = await db.execute(
-            select(PendingAction)
-            .where(and_(
-                PendingAction.entity_id == draft.contact_id,
-                PendingAction.action_type == "approve_outreach",
-                PendingAction.status == ActionStatus.PENDING
-            ))
-        )
-        action = action_res.scalar_one_or_none()
-        if action:
-            action.status = ActionStatus.APPROVED
-            action.approved_at = datetime.utcnow()
+    if not draft:
+        raise HTTPException(status_code=404, detail="Draft not found")
+        
+    contact_id = draft.contact_id
+    subject = draft.subject
+    body = draft.body
+    
+    # Perform approval and try sending
+    res = await draft_manager.approve_draft(draft_id)
+    success = res.get("success", False) if isinstance(res, dict) else bool(res)
+    sent_directly = res.get("sent_directly", False) if isinstance(res, dict) else False
+    error_msg = res.get("error") if isinstance(res, dict) else None
+
+    if not success:
+        raise HTTPException(status_code=400, detail=error_msg or "Approval failed or draft not pending")
+    
+    # Fetch contact info for Gmail fallback compose link
+    from app.models.models import Contact
+    contact_res = await db.execute(select(Contact).where(Contact.id == contact_id))
+    contact = contact_res.scalar_one_or_none()
+    
+    # Find and resolve associated pending action
+    action_res = await db.execute(
+        select(PendingAction)
+        .where(and_(
+            PendingAction.entity_id == contact_id,
+            PendingAction.action_type == "approve_outreach",
+            PendingAction.status == ActionStatus.PENDING
+        ))
+    )
+    action = action_res.scalar_one_or_none()
+    if action:
+        action.status = ActionStatus.APPROVED
+        action.approved_at = datetime.utcnow()
             
     await db.commit()
-    return {"status": "approved"}
+    return {
+        "status": "approved",
+        "sent_directly": sent_directly,
+        "error": error_msg,
+        "draft": {
+            "to": contact.email if contact else "",
+            "subject": subject,
+            "body": body,
+        }
+    }
 
 @router.post("/drafts/{draft_id}/reject")
 async def reject_draft_route(draft_id: str, db: AsyncSession = Depends(get_db)):

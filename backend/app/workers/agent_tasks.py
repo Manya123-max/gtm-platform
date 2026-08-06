@@ -256,16 +256,19 @@ def run_a4_test(config: Optional[Dict] = None):
         from app.models.models import Contact
         from sqlalchemy import select
         async with AsyncSessionLocal() as db:
-            # Fallback to the first available contact in the database if default test email is missing
-            if test_payload["from_address"] == "test.prospect@example.com":
-                res = await db.execute(select(Contact).where(Contact.email == "test.prospect@example.com"))
-                if not res.scalar_one_or_none():
-                    res_any = await db.execute(select(Contact).limit(1))
-                    any_contact = res_any.scalar_one_or_none()
-                    if any_contact:
-                        test_payload["from_address"] = any_contact.email
-                        logger.info("A4 test falling back to existing contact", email=any_contact.email)
+            email_to_use = test_payload["from_address"]
+            res = await db.execute(select(Contact).where(Contact.email == email_to_use))
+            contact = res.scalar_one_or_none()
+            if not contact:
+                res_first = await db.execute(select(Contact).limit(1))
+                first_contact = res_first.scalar_one_or_none()
+                if first_contact:
+                    email_to_use = first_contact.email
+                    logger.info("run_a4_test: falling back to contact", email=email_to_use)
+                else:
+                    logger.warning("run_a4_test: no contacts found in database to simulate reply")
             
+            test_payload["from_address"] = email_to_use
             agent = InboundAgent(db)
             result = await agent.handle_reply(test_payload)
             logger.info("A4 test run complete", **result)

@@ -174,7 +174,7 @@ async def _call_with_fallback(
             try:
                 result = await caller(system, user, max_tokens)
                 logger.info("LLM success", provider=name, tokens=max_tokens)
-                await asyncio.sleep(2.0)  # Spacing delay to respect 30 RPM limits on free tiers
+                await asyncio.sleep(0.1)  # Spacing delay to respect 30 RPM limits on free tiers
                 return result
             except httpx.HTTPStatusError as e:
                 status = e.response.status_code
@@ -209,7 +209,24 @@ def _clean_json(content: str) -> Dict[str, Any]:
     try:
         return json.loads(content)
     except json.JSONDecodeError:
-        logger.warning("JSON parse failed", preview=content[:200])
+        logger.warning("JSON parse failed, attempting regex extraction fallback", preview=content[:200])
+        subject_match = re.search(r'"subject"\s*:\s*"(.*?)"', content, re.DOTALL)
+        body_match = re.search(r'"body"\s*:\s*"(.*?)"', content, re.DOTALL)
+        if subject_match or body_match:
+            res = {}
+            if subject_match:
+                val = subject_match.group(1)
+                val = val.replace('\\n', '\n').replace('\\t', '\t').replace('\\"', '"')
+                res["subject"] = val
+            else:
+                res["subject"] = ""
+            if body_match:
+                val = body_match.group(1)
+                val = val.replace('\\n', '\n').replace('\\t', '\t').replace('\\"', '"')
+                res["body"] = val
+            else:
+                res["body"] = ""
+            return res
         return {"raw": content}
 
 

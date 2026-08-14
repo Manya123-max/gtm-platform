@@ -138,6 +138,11 @@ class Settings(BaseSettings):
     CONTENT_AGENT_SCHEDULE:  str = "0 9 * * 2"
     REVENUE_AGENT_SCHEDULE:  str = "0 2 * * *"
 
+    # ── Content Agent Settings ────────────────────────────────────────────
+    A6_CONTENT_FORMATS:      str = "linkedin_post,email_sequence,case_study,blog_article,sales_deck_outline"
+    A6_MAX_BRIEFS:           int = 3
+
+
 
 @lru_cache()
 def get_settings() -> Settings:

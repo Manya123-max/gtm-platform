@@ -3,7 +3,7 @@ import { useQuery } from '@tanstack/react-query'
 import { fetchContacts } from '../api'
 import { useState } from 'react'
 import { useNavigate } from 'react-router-dom'
-import { Search, ArrowUpDown, Sparkles, ArrowDown, ArrowUp } from 'lucide-react'
+import { Search, ArrowUpDown, Sparkles, ArrowDown, ArrowUp, Link } from 'lucide-react'
 import { useSession } from '../context/SessionContext'
 
 function ScorePill({ score }) {
@@ -147,7 +147,21 @@ export default function Contacts() {
                           </span>
                         )}
                       </div>
-                      <div className="text-xs text-gray-500">{c.email}</div>
+                      <div className="text-xs text-gray-500 flex items-center gap-1.5">
+                        {c.email}
+                        {c.linkedin_url && (
+                          <a 
+                            href={c.linkedin_url} 
+                            target="_blank" 
+                            rel="noopener noreferrer" 
+                            onClick={(e) => e.stopPropagation()}
+                            className="text-blue-400 hover:text-blue-300 transition-colors inline-flex items-center"
+                            title="View LinkedIn Profile"
+                          >
+                            <Link size={10} />
+                          </a>
+                        )}
+                      </div>
                       {c.title && <div className="text-xs text-gray-600 mt-0.5">{c.title}</div>}
                     </div>
                   </div>

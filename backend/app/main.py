@@ -215,7 +215,7 @@ async def slack_actions(request: Request, background_tasks: BackgroundTasks):
     for action in actions:
         action_id = action.get("action_id")
         value = action.get("value")
-
+ 
         if action_id == "approve_reply":
             background_tasks.add_task(_approve_reply, value, user)
         elif action_id == "reject_reply":
@@ -225,7 +225,7 @@ async def slack_actions(request: Request, background_tasks: BackgroundTasks):
             background_tasks.add_task(_open_edit_modal, value, trigger_id)
         elif action_id == "approve_crm_action":
             background_tasks.add_task(_approve_crm_action, value, user)
-
+ 
     return JSONResponse({"text": "✓ Action received"})
  
  

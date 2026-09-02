@@ -1,9 +1,10 @@
-import httpx
+import os
 import asyncio
+import httpx
 
 async def test_currents():
     url = "https://api.currentsapi.services/v1/search"
-    api_key = "B_ITHw9JPrQJyY7BOhSdA7lqJ1jikK31zXWQv4bkiYoJmzYU"
+    api_key = os.environ.get("CURRENTS_API_KEY", "")
     
     print("Testing Currents API for keyword 'Galvin'...")
     try:

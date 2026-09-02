@@ -181,6 +181,7 @@ async def slack_actions(request: Request, background_tasks: BackgroundTasks):
     from urllib.parse import parse_qs
     parsed = parse_qs(body.decode())
     payload = json.loads(parsed.get("payload", ["{}"])[0])
+
     payload_type = payload.get("type")
     user = payload.get("user", {}).get("email") or payload.get("user", {}).get("username") or payload.get("user", {}).get("id", "unknown")
     # Modal submission (rep clicked "Save & Send" in the edit modal)

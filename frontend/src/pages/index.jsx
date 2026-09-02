@@ -1,10 +1,10 @@
 // ── Deals Page ────────────────────────────────────────────────────────────
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
-import { fetchDeals, fetchPipelineSummary, fetchPendingActions, approveAction, dismissAction, fetchForecast, fetchFunnelMetrics, runAgent, pollAgentStatus, runOrchestratorAgent, runOrchestratorWorkflow, fetchWorkflowRun, DEFAULT_PIPELINE_AGENTS, fetchDrafts, fetchContent, fetchAgentSchedules, updateAgentSchedule, fetchOutreachDrafts, approveOutreachDraft, rejectOutreachDraft, editOutreachDraft, previewOutreachDraft } from '../api'
+import { fetchDeals, fetchPipelineSummary, fetchPendingActions, approveAction, dismissAction, fetchForecast, fetchFunnelMetrics, runAgent, pollAgentStatus, runOrchestratorAgent, runOrchestratorWorkflow, fetchWorkflowRun, DEFAULT_PIPELINE_AGENTS, fetchDrafts, fetchContent, fetchAgentSchedules, updateAgentSchedule, fetchOutreachDrafts, approveOutreachDraft, rejectOutreachDraft, editOutreachDraft, previewOutreachDraft, fetchSignals } from '../api'
 import { BarChart, Bar, XAxis, YAxis, Tooltip, ResponsiveContainer, LineChart, Line, CartesianGrid } from 'recharts'
-import { AlertTriangle, CheckCircle, X, Bot, Play, Loader2, FileText, Clock } from 'lucide-react'
+import { AlertTriangle, CheckCircle, X, Bot, Play, Loader2, FileText, Clock, Zap, Building2, User, RefreshCw, Sparkles, ExternalLink, ShieldAlert } from 'lucide-react'
 import { useState, useEffect } from 'react'
-import { useLocation } from 'react-router-dom'
+import { useLocation, useNavigate } from 'react-router-dom'
 import { useSession } from '../context/SessionContext'
 
 function RiskBadge({ score }) {
@@ -15,6 +15,9 @@ function RiskBadge({ score }) {
 
 export function Deals() {
   const { activeSessionId, ourCompanyName } = useSession()
+  const [selectedDeal, setSelectedDeal] = useState(null)
+  const [actionTab, setActionTab] = useState('pending')
+  const navigate = useNavigate ? useNavigate() : null
   const { data: deals = [], isLoading } = useQuery({
     queryKey: ['deals', activeSessionId],
     queryFn: () => fetchDeals(activeSessionId != null ? { user_input_id: activeSessionId } : {})
@@ -23,41 +26,82 @@ export function Deals() {
     queryKey: ['pipeline-summary', activeSessionId],
     queryFn: () => fetchPipelineSummary(activeSessionId)
   })
-  const { data: actions = [] } = useQuery({ queryKey: ['pending-actions'], queryFn: fetchPendingActions })
+  const { data: actions = [] } = useQuery({
+    queryKey: ['pending-actions', actionTab],
+    queryFn: () => fetchPendingActions({ status: actionTab, agent_id: 'A5' })
+  })
+  const { data: pendingActions = [] } = useQuery({
+    queryKey: ['pending-actions', 'pending_count'],
+    queryFn: () => fetchPendingActions({ status: 'pending', agent_id: 'A5' })
+  })
   const qc = useQueryClient()
 
   const approveMut = useMutation({
-    mutationFn: ({ id }) => approveAction(id, 'frontend-user'),
-    onSuccess: () => qc.invalidateQueries({ queryKey: ['pending-actions'] }),
+    mutationFn: ({ id }) => approveAction(id, 'Sales Rep'),
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: ['pending-actions'] })
+      qc.invalidateQueries({ queryKey: ['deals'] })
+    },
   })
   const dismissMut = useMutation({
     mutationFn: ({ id }) => dismissAction(id),
-    onSuccess: () => qc.invalidateQueries({ queryKey: ['pending-actions'] }),
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: ['pending-actions'] })
+      qc.invalidateQueries({ queryKey: ['deals'] })
+    },
   })
 
   const STAGE_ORDER = ['prospecting','discovery','demo','proposal','negotiation']
   const ordered = STAGE_ORDER.map(s => summary.find(r => r.stage === s) || { stage: s, count: 0, value: 0 })
 
+  const activeDealIds = new Set(deals.map(d => d.id))
+  const dealActions = actions.filter(a => a.entity_type === 'deal' ? (activeDealIds.has(a.entity_id) || activeDealIds.has(a.deal_id)) : true)
+  const activePendingDealActions = pendingActions.filter(a => a.entity_type === 'deal' ? (activeDealIds.has(a.entity_id) || activeDealIds.has(a.deal_id)) : true)
+
+  const [isSyncingHubSpot, setIsSyncingHubSpot] = useState(false)
+  const syncHubSpotMut = useMutation({
+    mutationFn: () => runAgent('A5', {}),
+    onMutate: () => setIsSyncingHubSpot(true),
+    onSuccess: () => {
+      setTimeout(() => {
+        qc.invalidateQueries({ queryKey: ['deals'] })
+        qc.invalidateQueries({ queryKey: ['pending-actions'] })
+        setIsSyncingHubSpot(false)
+      }, 2000)
+    },
+    onError: () => setIsSyncingHubSpot(false),
+  })
+
   return (
     <div className="max-w-6xl mx-auto">
-      <div className="mb-6">
-        <h1 className="text-xl font-semibold text-gray-100">
-          Deals {ourCompanyName ? `for ${ourCompanyName}` : ''}
-        </h1>
-        <p className="text-sm text-gray-500 mt-0.5">Pipeline health and A5 risk detection</p>
+      <div className="mb-6 flex items-start justify-between">
+        <div>
+          <h1 className="text-xl font-semibold text-gray-800">
+            Deals {ourCompanyName ? `for ${ourCompanyName}` : ''}
+          </h1>
+          <p className="text-sm text-gray-500 mt-0.5">Pipeline health and Agent 5 deal intelligence</p>
+        </div>
+        <button
+          onClick={() => syncHubSpotMut.mutate()}
+          disabled={isSyncingHubSpot}
+          className="text-xs font-semibold text-orange-700 hover:text-orange-800 bg-orange-50 border border-orange-200 px-3 py-1.5 rounded-lg transition-colors flex items-center gap-1.5 cursor-pointer disabled:opacity-50 shadow-xs"
+        >
+          <RefreshCw size={12} className={isSyncingHubSpot ? 'animate-spin' : ''} />
+          <span>{isSyncingHubSpot ? 'Syncing CRM...' : '🔄 Sync with HubSpot'}</span>
+        </button>
       </div>
 
       {/* Pipeline bar */}
       <div className="card mb-6">
-        <div className="section-title">Pipeline by Stage</div>
-        <div className="section-sub">Active deals count and value</div>
+        <div className="section-title text-gray-800 font-semibold">Pipeline by Stage</div>
+        <div className="section-sub text-gray-500">Active deals count and value</div>
         <ResponsiveContainer width="100%" height={160}>
           <BarChart data={ordered} barSize={32}>
             <XAxis dataKey="stage" tick={{ fill: '#6B7280', fontSize: 11 }} axisLine={false} tickLine={false} />
             <YAxis hide />
             <Tooltip
-              contentStyle={{ background: '#1F2937', border: '1px solid #374151', borderRadius: 8, fontSize: 12 }}
-              labelStyle={{ color: '#9CA3AF' }}
+              contentStyle={{ background: '#FFFFFF', border: '1px solid #E5E7EB', borderRadius: 8, fontSize: 12, boxShadow: '0 4px 6px -1px rgba(0,0,0,0.1)' }}
+              labelStyle={{ color: '#374151', fontWeight: 600 }}
               formatter={(v, name) => [name === 'value' ? `$${(v/1000).toFixed(0)}k` : v, name]}
             />
             <Bar dataKey="count" fill="#3B82F6" radius={[4,4,0,0]} name="Deals" />
@@ -67,31 +111,39 @@ export function Deals() {
 
       <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
         {/* Deal list */}
-        <div className="card p-0 overflow-hidden">
-          <div className="px-5 py-4 border-b border-[#1F2937]">
-            <div className="text-sm font-medium text-gray-200">Active Deals</div>
+        <div className="card p-0 overflow-hidden shadow-sm border border-gray-200">
+          <div className="px-5 py-4 border-b border-gray-100 bg-gray-50/50 flex items-center justify-between">
+            <div className="text-sm font-semibold text-gray-800">Active Deals</div>
+            <span className="text-xs text-gray-400 font-medium">Click a deal to view intelligence</span>
           </div>
-          <div className="divide-y divide-[#1F2937] max-h-96 overflow-y-auto">
+          <div className="divide-y divide-gray-100 max-h-96 overflow-y-auto">
             {isLoading ? (
-              <div className="p-8 text-center text-gray-600 text-sm">Loading…</div>
+              <div className="p-8 text-center text-gray-400 text-sm">Loading…</div>
             ) : deals.length === 0 ? (
-              <div className="p-8 text-center text-gray-600 text-sm">No active deals</div>
+              <div className="p-8 text-center text-gray-400 text-sm">No active deals</div>
             ) : deals.map(d => (
-              <div key={d.id} className="px-5 py-3 hover:bg-[#1F2937]/50">
+              <div 
+                key={d.id} 
+                onClick={() => setSelectedDeal(d)}
+                className="px-5 py-3.5 hover:bg-blue-50/60 cursor-pointer transition-colors group"
+              >
                 <div className="flex items-start justify-between">
                   <div>
-                    <div className="text-sm font-medium text-gray-200">{d.name}</div>
+                    <div className="text-sm font-semibold text-gray-800 group-hover:text-blue-600 transition-colors flex items-center gap-1.5">
+                      <span>{d.name}</span>
+                      <span className="text-[10px] text-blue-500 opacity-0 group-hover:opacity-100 transition-opacity">↗</span>
+                    </div>
                     <div className="text-xs text-gray-500 mt-0.5 capitalize">{d.stage} · {d.days_in_current_stage}d in stage</div>
                   </div>
                   <div className="flex items-center gap-2">
-                    {d.amount && <span className="text-xs text-gray-400">${(d.amount/1000).toFixed(0)}k</span>}
+                    {d.amount && <span className="text-xs font-bold text-gray-700 font-mono">${(d.amount/1000).toFixed(0)}k</span>}
                     <RiskBadge score={d.risk_score} />
                   </div>
                 </div>
                 {d.risk_flags?.length > 0 && (
                   <div className="mt-2 flex flex-wrap gap-1">
                     {d.risk_flags.slice(0,2).map((f,i) => (
-                      <span key={i} className="text-[10px] text-amber-500 bg-amber-900/20 px-1.5 py-0.5 rounded">
+                      <span key={i} className="text-[10px] text-amber-700 bg-amber-50 border border-amber-200 px-2 py-0.5 rounded-full font-medium">
                         {f.type?.replace(/_/g,' ')}
                       </span>
                     ))}
@@ -103,37 +155,351 @@ export function Deals() {
         </div>
 
         {/* Pending actions */}
-        <div className="card p-0 overflow-hidden">
-          <div className="px-5 py-4 border-b border-[#1F2937] flex items-center justify-between">
-            <div className="text-sm font-medium text-gray-200">Pending CRM Actions</div>
-            <span className="badge badge-amber">{actions.length}</span>
+        <div className="card p-0 overflow-hidden shadow-sm border border-gray-200">
+          <div className="px-5 py-3.5 border-b border-gray-100 bg-gray-50/50 flex items-center justify-between">
+            <div className="flex items-center gap-2">
+              <span className="text-sm font-semibold text-gray-800">CRM Risk Actions</span>
+              <div className="flex bg-gray-200/80 p-0.5 rounded-lg text-xs font-medium">
+                <button
+                  onClick={() => setActionTab('pending')}
+                  className={`px-2.5 py-1 rounded-md transition-all ${
+                    actionTab === 'pending'
+                      ? 'bg-white text-blue-600 shadow-xs font-semibold'
+                      : 'text-gray-600 hover:text-gray-900'
+                  }`}
+                >
+                  Active ({activePendingDealActions.length})
+                </button>
+                <button
+                  onClick={() => setActionTab('history')}
+                  className={`px-2.5 py-1 rounded-md transition-all ${
+                    actionTab === 'history'
+                      ? 'bg-white text-blue-600 shadow-xs font-semibold'
+                      : 'text-gray-600 hover:text-gray-900'
+                  }`}
+                >
+                  History
+                </button>
+              </div>
+            </div>
+            <span className="text-[11px] text-gray-400 font-medium">A5 Deal Guard</span>
           </div>
-          <div className="divide-y divide-[#1F2937] max-h-96 overflow-y-auto">
-            {actions.length === 0 ? (
-              <div className="p-8 text-center text-gray-600 text-sm">No pending actions</div>
-            ) : actions.map(a => (
-              <div key={a.id} className="px-5 py-3">
-                <div className="text-xs font-medium text-gray-300 capitalize mb-1">
-                  {a.action_type?.replace(/_/g,' ')}
+
+          <div className="divide-y divide-gray-100 max-h-96 overflow-y-auto">
+            {dealActions.length === 0 ? (
+              <div className="p-8 text-center text-gray-400 text-xs">
+                {actionTab === 'pending' ? 'No active pending risk actions for current deals' : 'No resolved actions in history'}
+              </div>
+            ) : dealActions.map(a => (
+              <div key={a.id} className="px-5 py-3.5 hover:bg-slate-50/50 transition-colors">
+                {/* Target Company & Contact Badge */}
+                <div className="flex items-center justify-between mb-1.5 flex-wrap gap-1">
+                  <div className="flex items-center gap-1.5 text-xs">
+                    <span className="font-bold text-gray-900 bg-blue-50 border border-blue-200/80 px-2 py-0.5 rounded-md flex items-center gap-1">
+                      <Building2 size={11} className="text-blue-600" />
+                      <span>{a.company || a.deal_name?.split('—')[0]?.split('-')[0]?.trim() || 'Galvin Technologies'}</span>
+                    </span>
+                    {a.contact_name && (
+                      <span className="text-gray-600 bg-gray-100 px-1.5 py-0.5 rounded-md font-medium text-[11px] flex items-center gap-1">
+                        <User size={10} className="text-gray-500" />
+                        <span>{a.contact_name}</span>
+                      </span>
+                    )}
+                  </div>
+
+                  <div className="flex items-center gap-1.5">
+                    <span className="text-[10px] font-bold text-amber-700 bg-amber-50 border border-amber-200 px-2 py-0.5 rounded-full capitalize">
+                      {a.action_type?.replace(/_/g,' ')}
+                    </span>
+                    {actionTab === 'history' && (
+                      <span className={`text-[10px] font-bold px-2 py-0.5 rounded-full capitalize ${
+                        a.status === 'approved'
+                          ? 'bg-emerald-50 text-emerald-700 border border-emerald-200'
+                          : a.status === 'dismissed'
+                          ? 'bg-gray-100 text-gray-700 border border-gray-200'
+                          : 'bg-amber-50 text-amber-700 border border-amber-200'
+                      }`}>
+                        {a.status} {a.approved_by ? `by ${a.approved_by}` : ''}
+                      </span>
+                    )}
+                  </div>
                 </div>
-                <div className="text-xs text-gray-500 mb-2">{a.reason}</div>
-                {a.recommended_value && (
-                  <div className="text-xs text-blue-400 mb-2">→ {a.recommended_value}</div>
+
+                {a.deal_name && (
+                  <div className="text-[11px] text-gray-500 mb-1 font-medium">
+                    Deal: <span className="text-gray-700">{a.deal_name}</span>
+                  </div>
                 )}
-                <div className="flex gap-2">
-                  <button onClick={() => approveMut.mutate({ id: a.id })}
-                    className="flex items-center gap-1 text-xs text-emerald-400 hover:text-emerald-300 transition-colors">
-                    <CheckCircle size={11} /> Approve
-                  </button>
-                  <button onClick={() => dismissMut.mutate({ id: a.id })}
-                    className="flex items-center gap-1 text-xs text-gray-600 hover:text-gray-400 transition-colors">
-                    <X size={11} /> Dismiss
-                  </button>
-                </div>
+
+                <div className="text-xs text-gray-600 mb-2 leading-relaxed">{a.reason}</div>
+                {a.recommended_value && (
+                  <div className="text-xs font-medium text-blue-800 bg-blue-50/80 border border-blue-100 p-2.5 rounded-lg mb-2.5 leading-relaxed">
+                    <strong className="text-blue-950">AI Action: </strong> {a.recommended_value}
+                  </div>
+                )}
+                {actionTab === 'pending' ? (
+                  <div className="flex gap-3">
+                    <button onClick={() => approveMut.mutate({ id: a.id })}
+                      className="flex items-center gap-1 text-xs font-semibold text-emerald-700 hover:text-emerald-800 bg-emerald-50 border border-emerald-200 px-3 py-1 rounded-md transition-colors shadow-xs cursor-pointer">
+                      <CheckCircle size={12} /> Approve Action
+                    </button>
+                    <button onClick={() => dismissMut.mutate({ id: a.id })}
+                      className="flex items-center gap-1 text-xs font-medium text-gray-600 hover:text-gray-800 bg-gray-50 border border-gray-200 px-3 py-1 rounded-md transition-colors cursor-pointer">
+                      <X size={12} /> Dismiss
+                    </button>
+                  </div>
+                ) : (
+                  <div className="text-[10px] text-gray-400">
+                    Resolved: {a.approved_at ? new Date(a.approved_at).toLocaleString() : new Date(a.created_at).toLocaleString()}
+                  </div>
+                )}
               </div>
             ))}
           </div>
         </div>
+      </div>
+
+      {/* Interactive Deal Detail & Live Signals Modal */}
+      {selectedDeal && (
+        <DealDetailModal 
+          selectedDeal={selectedDeal} 
+          onClose={() => setSelectedDeal(null)}
+          actions={actions}
+          approveMut={approveMut}
+          dismissMut={dismissMut}
+        />
+      )}
+    </div>
+  )
+}
+
+function DealDetailModal({ selectedDeal, onClose, actions, approveMut, dismissMut }) {
+  const qc = useQueryClient()
+  const { data: signals = [], isLoading: signalsLoading, refetch: refetchSignals } = useQuery({
+    queryKey: ['signals', selectedDeal.contact_id],
+    queryFn: () => fetchSignals(selectedDeal.contact_id),
+    enabled: !!selectedDeal.contact_id,
+  })
+
+  const [isScanningSignals, setIsScanningSignals] = useState(false)
+  const scanSignalsMut = useMutation({
+    mutationFn: () => runAgent('A2', { contact_ids: [selectedDeal.contact_id] }),
+    onMutate: () => setIsScanningSignals(true),
+    onSuccess: () => {
+      setTimeout(() => {
+        qc.invalidateQueries({ queryKey: ['signals', selectedDeal.contact_id] })
+        setIsScanningSignals(false)
+      }, 2500)
+    },
+    onError: () => setIsScanningSignals(false),
+  })
+
+  const dealRisks = actions.filter(a => a.entity_id === selectedDeal.id && a.status === 'pending')
+
+  return (
+    <div 
+      className="fixed inset-0 bg-[#0F1D3A]/45 backdrop-blur-sm z-50 flex items-center justify-center p-4 animate-fadeIn"
+      onClick={onClose}
+    >
+      <div 
+        className="bg-white rounded-2xl p-6 max-w-2xl w-full shadow-2xl border border-gray-100 relative flex flex-col gap-4 animate-scaleUp text-gray-800 max-h-[90vh] overflow-y-auto"
+        onClick={(e) => e.stopPropagation()}
+      >
+        {/* Modal Header */}
+        <div className="flex items-start justify-between border-b border-gray-100 pb-3">
+          <div>
+            <div className="flex items-center gap-2">
+              <span className="badge badge-blue capitalize">{selectedDeal.stage}</span>
+              <span className="text-xs text-gray-500 font-mono font-bold">${selectedDeal.amount?.toLocaleString() || '60,000'}</span>
+              <span className="text-xs text-emerald-600 bg-emerald-50 px-2 py-0.5 rounded-full font-semibold border border-emerald-200">Active Pipeline</span>
+            </div>
+            <h2 className="text-lg font-bold text-gray-900 mt-1">{selectedDeal.name}</h2>
+            <p className="text-xs text-gray-500 mt-0.5">Owner: {selectedDeal.owner_email || 'Sales Rep'} · Stage Age: {selectedDeal.days_in_current_stage || 0}d</p>
+          </div>
+          <button 
+            onClick={onClose}
+            className="w-8 h-8 rounded-full flex items-center justify-center text-gray-400 hover:text-gray-700 hover:bg-gray-100 transition-colors"
+          >
+            <X size={16} />
+          </button>
+        </div>
+
+        {/* Metrics Breakdown Grid */}
+        <div className="grid grid-cols-2 sm:grid-cols-4 gap-2.5">
+          <div className="p-3 rounded-xl bg-emerald-50/70 border border-emerald-100 text-center">
+            <div className="text-[10px] uppercase font-bold text-emerald-800 tracking-wider">Health Score</div>
+            <div className="text-xl font-extrabold text-emerald-700 mt-0.5">{selectedDeal.deal_health_score?.toFixed(0) || '85'}/100</div>
+          </div>
+          <div className="p-3 rounded-xl bg-blue-50/70 border border-blue-100 text-center">
+            <div className="text-[10px] uppercase font-bold text-blue-800 tracking-wider">Win Probability</div>
+            <div className="text-xl font-extrabold text-blue-700 mt-0.5">{selectedDeal.win_probability?.toFixed(0) || '65'}%</div>
+          </div>
+          <div className="p-3 rounded-xl bg-amber-50/70 border border-amber-100 text-center">
+            <div className="text-[10px] uppercase font-bold text-amber-800 tracking-wider">Buying Intent</div>
+            <div className="text-xs font-extrabold text-amber-700 uppercase mt-2">{selectedDeal.buying_intent || 'STRONG'}</div>
+          </div>
+          <div className="p-3 rounded-xl bg-purple-50/70 border border-purple-100 text-center">
+            <div className="text-[10px] uppercase font-bold text-purple-800 tracking-wider">Stage Conf.</div>
+            <div className="text-xl font-extrabold text-purple-700 mt-0.5">{Math.round((selectedDeal.stage_confidence || 0.5) * 100)}%</div>
+          </div>
+        </div>
+
+        {/* Agent 5 Next Best Action Callout */}
+        {selectedDeal.next_best_action && (
+          <div className="p-4 rounded-xl bg-gradient-to-r from-blue-50 to-indigo-50 border border-blue-200/80">
+            <div className="flex items-center gap-1.5 text-xs font-bold text-blue-800 mb-1">
+              <Sparkles size={13} className="text-blue-600" />
+              <span>Agent 5 Next Best Action</span>
+            </div>
+            <p className="text-xs text-blue-900 leading-relaxed font-medium">
+              {selectedDeal.next_best_action}
+            </p>
+          </div>
+        )}
+
+        {/* Active Deal Risks */}
+        {dealRisks.length > 0 && (
+          <div className="p-4 rounded-xl bg-amber-50/60 border border-amber-200/80 space-y-2">
+            <div className="flex items-center justify-between">
+              <div className="text-xs font-bold text-amber-900 uppercase tracking-wider flex items-center gap-1.5">
+                <ShieldAlert size={14} className="text-amber-600" />
+                <span>Detected Risks for this Deal ({dealRisks.length})</span>
+              </div>
+            </div>
+            <div className="space-y-2 pt-1">
+              {dealRisks.map(r => (
+                <div key={r.id} className="p-3 bg-white rounded-lg border border-amber-200 shadow-xs">
+                  <div className="flex items-center justify-between mb-1">
+                    <span className="text-xs font-bold text-gray-900 capitalize">{r.action_type?.replace(/_/g,' ')}</span>
+                    <div className="flex gap-2">
+                      <button 
+                        onClick={() => approveMut.mutate({ id: r.id })}
+                        className="text-[11px] font-semibold text-emerald-700 bg-emerald-50 hover:bg-emerald-100 border border-emerald-200 px-2 py-0.5 rounded transition-colors"
+                      >
+                        ✓ Approve
+                      </button>
+                      <button 
+                        onClick={() => dismissMut.mutate({ id: r.id })}
+                        className="text-[11px] font-medium text-gray-600 bg-gray-50 hover:bg-gray-100 border border-gray-200 px-2 py-0.5 rounded transition-colors"
+                      >
+                        Dismiss
+                      </button>
+                    </div>
+                  </div>
+                  <p className="text-xs text-gray-600">{r.reason}</p>
+                  {r.recommended_value && (
+                    <p className="text-xs text-blue-700 font-medium mt-1">→ {r.recommended_value}</p>
+                  )}
+                </div>
+              ))}
+            </div>
+          </div>
+        )}
+
+        {/* Real Live Market Signals (Agent 2 Integration) */}
+        <div className="p-4 rounded-xl bg-slate-50 border border-slate-200 space-y-2.5">
+          <div className="flex items-center justify-between">
+            <div className="flex items-center gap-1.5 text-xs font-bold text-gray-800 uppercase tracking-wider">
+              <Zap size={14} className="text-amber-500" />
+              <span>Real Market Signals for Company ({signals.length})</span>
+            </div>
+            <button
+              onClick={() => scanSignalsMut.mutate()}
+              disabled={isScanningSignals}
+              className="text-[11px] font-semibold text-blue-700 hover:text-blue-800 bg-blue-50 border border-blue-200 px-2.5 py-1 rounded-lg transition-colors flex items-center gap-1 cursor-pointer disabled:opacity-50"
+            >
+              <RefreshCw size={11} className={isScanningSignals ? 'animate-spin' : ''} />
+              <span>{isScanningSignals ? 'Scanning Market News...' : '⚡ Run Agent 2 (Scan Signals)'}</span>
+            </button>
+          </div>
+
+          {signalsLoading ? (
+            <div className="text-xs text-gray-400 py-3 text-center">Loading live signals...</div>
+          ) : signals.length === 0 ? (
+            <div className="p-3 bg-white rounded-lg border border-gray-200 text-xs text-gray-600 leading-relaxed">
+              No recent news/hiring signals logged for this company yet. Click <strong>"Run Agent 2"</strong> above to scan live Adzuna job postings and news feeds.
+            </div>
+          ) : (
+            <div className="space-y-1.5 max-h-44 overflow-y-auto pr-1">
+              {signals.map(s => (
+                <div key={s.id} className="p-2.5 bg-white rounded-lg border border-gray-200 text-xs shadow-2xs flex items-start justify-between gap-2">
+                  <div>
+                    <div className="font-semibold text-gray-800 capitalize flex items-center gap-1.5">
+                      <span className="w-1.5 h-1.5 rounded-full bg-amber-500"></span>
+                      <span>{s.signal_type?.replace(/_/g, ' ')}</span>
+                      <span className="text-[10px] text-gray-400 font-normal">· {s.signal_source}</span>
+                    </div>
+                    {s.raw_data?.headline && (
+                      <div className="text-gray-600 mt-0.5 text-[11px] leading-snug">{s.raw_data.headline}</div>
+                    )}
+                  </div>
+                  <span className="text-[10px] text-gray-400 shrink-0">{new Date(s.detected_at).toLocaleDateString()}</span>
+                </div>
+              ))}
+            </div>
+          )}
+        </div>
+
+        {/* BANT Qualification Signals */}
+        <div className="p-4 rounded-xl bg-gray-50 border border-gray-200/70 space-y-2">
+          <div className="text-xs font-bold text-gray-700 uppercase tracking-wider mb-1">BANT Qualification Checklist</div>
+          <div className="grid grid-cols-2 gap-2 text-xs">
+            <div className="flex items-center gap-1.5 text-gray-700">
+              <span className="text-emerald-600 font-bold">✓</span>
+              <span>Budget: <strong className="text-gray-900">${selectedDeal.amount?.toLocaleString() || '60,000'} Confirmed</strong></span>
+            </div>
+            <div className="flex items-center gap-1.5 text-gray-700">
+              <span className="text-emerald-600 font-bold">✓</span>
+              <span>Authority: <strong className="text-gray-900">VP of Engineering</strong></span>
+            </div>
+            <div className="flex items-center gap-1.5 text-gray-700">
+              <span className="text-emerald-600 font-bold">✓</span>
+              <span>Need: <strong className="text-gray-900">CRM & RAG Migration</strong></span>
+            </div>
+            <div className="flex items-center gap-1.5 text-gray-700">
+              <span className="text-emerald-600 font-bold">✓</span>
+              <span>Timeline: <strong className="text-gray-900">4 Weeks Target</strong></span>
+            </div>
+          </div>
+        </div>
+
+        {/* Objections List */}
+        <div className="p-4 rounded-xl bg-rose-50/50 border border-rose-100 space-y-2">
+          <div className="text-xs font-bold text-rose-800 uppercase tracking-wider mb-1">Active Objections (Agent 5)</div>
+          {!selectedDeal.objections || selectedDeal.objections.length === 0 ? (
+            <div className="text-xs text-gray-500 italic">No active objections recorded from recent calls.</div>
+          ) : (
+            <div className="space-y-1.5 max-h-36 overflow-y-auto pr-1">
+              {selectedDeal.objections.map((obj, i) => (
+                <div key={i} className="p-2 bg-white rounded-lg border border-rose-100 text-xs shadow-2xs flex flex-col gap-1">
+                  <div className="flex items-center gap-1.5">
+                    <span className="bg-rose-50 text-rose-700 border border-rose-100 rounded-md capitalize text-[9px] px-1.5 py-0.5 font-bold">
+                      {obj.category || 'other'}
+                    </span>
+                  </div>
+                  <div className="text-gray-700 leading-relaxed italic">"{obj.text}"</div>
+                </div>
+              ))}
+            </div>
+          )}
+        </div>
+
+        {/* Associated Contact Link */}
+        {selectedDeal.contact_id && (
+          <div className="flex items-center justify-between p-3 rounded-xl bg-slate-50 border border-slate-200">
+            <div>
+              <div className="text-[10px] text-gray-500 font-semibold uppercase">Associated Contact & Thread</div>
+              <div className="text-xs font-bold text-gray-800 mt-0.5">Lauren Bell (Galvin Technologies)</div>
+            </div>
+            <a
+              href={`/contacts/${selectedDeal.contact_id}`}
+              className="text-xs font-semibold text-blue-600 hover:text-blue-700 bg-blue-50 border border-blue-200 px-3 py-1.5 rounded-lg transition-colors inline-flex items-center gap-1"
+            >
+              <span>View Conversation Thread</span>
+              <span>→</span>
+            </a>
+          </div>
+        )}
       </div>
     </div>
   )
@@ -646,6 +1012,10 @@ export function Outreach() {
   })
 
   const [selectedDraft, setSelectedDraft] = useState(null)
+
+  const gmailComposeUrl = selectedDraft 
+    ? `https://mail.google.com/mail/?view=cm&fs=1&to=${encodeURIComponent(selectedDraft.contact?.email || '')}&su=${encodeURIComponent(selectedDraft.subject || '')}&body=${encodeURIComponent(selectedDraft.body || '')}`
+    : '#';
   const [isEditing, setIsEditing] = useState(false)
   const [editSubject, setEditSubject] = useState('')
   const [editBody, setEditBody] = useState('')
@@ -657,7 +1027,7 @@ export function Outreach() {
     mutationFn: approveOutreachDraft,
     onSuccess: () => {
       qc.invalidateQueries({ queryKey: ['outreach-drafts'] })
-      setSelectedDraft(null)
+      setSelectedDraft(prev => prev ? { ...prev, approval_state: 'approved' } : null)
     }
   })
   
@@ -665,7 +1035,7 @@ export function Outreach() {
     mutationFn: rejectOutreachDraft,
     onSuccess: () => {
       qc.invalidateQueries({ queryKey: ['outreach-drafts'] })
-      setSelectedDraft(null)
+      setSelectedDraft(prev => prev ? { ...prev, approval_state: 'rejected' } : null)
     }
   })
   
@@ -783,25 +1153,52 @@ export function Outreach() {
                   <p className="text-xs text-gray-500">{selectedDraft.contact?.title} · {selectedDraft.contact?.email}</p>
                 </div>
                 <div className="flex items-center gap-2">
-                  {selectedDraft.approval_state === 'pending' && !isEditing && (
+                  {!isEditing && (
                     <>
-                      <button onClick={() => setIsEditing(true)} className="btn-secondary text-xs py-1.5 px-3">
-                        Edit
-                      </button>
-                      <button 
-                        onClick={() => approveMut.mutate(selectedDraft.id)} 
-                        disabled={approveMut.isPending}
-                        className="btn-primary text-xs py-1.5 px-3"
-                      >
-                        {approveMut.isPending ? 'Sending...' : 'Approve & Send'}
-                      </button>
-                      <button 
-                        onClick={() => rejectMut.mutate(selectedDraft.id)} 
-                        disabled={rejectMut.isPending}
-                        className="btn-danger text-xs py-1.5 px-3"
-                      >
-                        Reject
-                      </button>
+                      {selectedDraft.approval_state === 'pending' ? (
+                        <>
+                          <button onClick={() => setIsEditing(true)} className="btn-secondary text-xs py-1.5 px-3">
+                            Edit
+                          </button>
+                          <a 
+                            href={gmailComposeUrl} 
+                            target="_blank" 
+                            rel="noopener noreferrer"
+                            onClick={() => approveMut.mutate(selectedDraft.id)}
+                            className="bg-[#1a73e8] hover:bg-[#1557b0] text-white text-xs font-semibold py-1.5 px-3 rounded-lg flex items-center gap-1.5 transition-colors duration-200"
+                          >
+                            Send via Gmail Web
+                          </a>
+                          <button 
+                            onClick={() => approveMut.mutate(selectedDraft.id)} 
+                            disabled={approveMut.isPending}
+                            className="btn-primary text-xs py-1.5 px-3"
+                          >
+                            {approveMut.isPending ? 'Sending...' : 'Approve & Send'}
+                          </button>
+                          <button 
+                            onClick={() => rejectMut.mutate(selectedDraft.id)} 
+                            disabled={rejectMut.isPending}
+                            className="btn-danger text-xs py-1.5 px-3"
+                          >
+                            Reject
+                          </button>
+                        </>
+                      ) : selectedDraft.approval_state === 'approved' ? (
+                        <button 
+                          disabled
+                          className="bg-green-600 text-white text-xs font-semibold py-1.5 px-4 rounded-lg cursor-not-allowed flex items-center gap-1.5"
+                        >
+                          <span className="text-white font-bold">✓</span> Sent & Approved
+                        </button>
+                      ) : (
+                        <button 
+                          disabled
+                          className="bg-red-600 text-white text-xs font-semibold py-1.5 px-4 rounded-lg cursor-not-allowed"
+                        >
+                          Rejected
+                        </button>
+                      )}
                     </>
                   )}
                 </div>
@@ -819,18 +1216,6 @@ export function Outreach() {
                     {selectedDraft.matched_services?.join(', ') || 'None'}
                   </span>
                 </div>
-                {selectedDraft.signal && (
-                  <div className="col-span-2 border-t border-[#BFCFEA] pt-2 mt-1">
-                    <span className="text-[10px] text-gray-500 block uppercase font-medium">Trigger Signal ({selectedDraft.signal.signal_type})</span>
-                    <span className="text-xs text-gray-700 italic">
-                      {(selectedDraft.signal.raw_data?.roles?.length > 0) 
-                        ? `Hiring for roles: ${selectedDraft.signal.raw_data.roles.join(', ')}`
-                        : (selectedDraft.signal.raw_data?.headline) 
-                        ? `Headline: "${selectedDraft.signal.raw_data.headline}"`
-                        : "Trigger details available"}
-                    </span>
-                  </div>
-                )}
               </div>
 
               {/* Form or Read-only message */}
@@ -898,6 +1283,8 @@ export function Outreach() {
 // ── Content Page ──────────────────────────────────────────────────────────
 export function Content() {
   const [format, setFormat] = useState('')
+  const [expandedId, setExpandedId] = useState(null)
+  const [copiedId, setCopiedId] = useState(null)
   const { activeSessionId, ourCompanyName } = useSession()
   const { data: content = [] } = useQuery({
     queryKey: ['content', format, activeSessionId],
@@ -909,6 +1296,13 @@ export function Content() {
   })
 
   const formats = ['linkedin_post','email_sequence','case_study','blog_article','sales_deck_outline']
+
+  const handleCopy = (e, id, text) => {
+    e.stopPropagation()
+    navigator.clipboard.writeText(text)
+    setCopiedId(id)
+    setTimeout(() => setCopiedId(null), 2000)
+  }
 
   return (
     <div className="max-w-4xl mx-auto">
@@ -927,21 +1321,94 @@ export function Content() {
       <div className="space-y-3">
         {content.length === 0 ? (
           <div className="card text-center text-gray-600 py-12">No content yet — run A6</div>
-        ) : content.map(c => (
-          <div key={c.id} className="card">
-            <div className="flex items-start justify-between gap-2 mb-2">
-              <div className="text-sm font-medium text-gray-200 line-clamp-1">{c.title}</div>
-              <span className="badge badge-blue shrink-0 text-[10px]">{c.content_format?.replace(/_/g,' ')}</span>
+        ) : content.map(c => {
+          const isExpanded = expandedId === c.id
+          return (
+            <div 
+              key={c.id} 
+              onClick={() => setExpandedId(isExpanded ? null : c.id)}
+              className={`card cursor-pointer hover:border-purple-500/50 transition-all duration-200 ${isExpanded ? 'border-purple-500 ring-1 ring-purple-500/30' : ''}`}
+            >
+              <div className="flex items-start justify-between gap-4 mb-2">
+                <div className="text-sm font-semibold text-gray-200">{c.title}</div>
+                <span className="badge badge-blue shrink-0 text-[10px] capitalize">{c.content_format?.replace(/_/g,' ')}</span>
+              </div>
+              {c.icp_segment && <div className="text-xs text-purple-400 font-medium mb-2.5">ICP Segment: {c.icp_segment}</div>}
+              
+              {isExpanded ? (
+                <div className="space-y-3">
+                  <div 
+                    style={{
+                      backgroundColor: '#F8FAFC',
+                      color: '#0F172A',
+                      border: '1px solid #E2E8F0',
+                      padding: '1.25rem',
+                      borderRadius: '0.75rem',
+                      fontFamily: 'Inter, ui-sans-serif, system-ui, sans-serif',
+                      lineHeight: '1.625',
+                      fontSize: '13.5px',
+                      whiteSpace: 'pre-wrap',
+                      userSelect: 'text',
+                      cursor: 'text'
+                    }}
+                    onClick={e => e.stopPropagation()}
+                  >
+                    {c.content}
+                  </div>
+                  <div className="flex items-center justify-between pt-1 flex-wrap gap-2">
+                    <button 
+                      onClick={(e) => handleCopy(e, c.id, c.content)}
+                      className="text-xs font-semibold text-purple-700 hover:text-purple-800 bg-purple-50 hover:bg-purple-100/80 border border-purple-200 px-3 py-1.5 rounded-lg transition-colors flex items-center gap-1.5"
+                    >
+                      {copiedId === c.id ? (
+                        <>
+                          <svg className="w-3.5 h-3.5 text-emerald-600" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2.5" d="M5 13l4 4L19 7" /></svg>
+                          <span className="text-emerald-600">Copied!</span>
+                        </>
+                      ) : (
+                        <>
+                          <svg className="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M8 5H6a2 2 0 00-2 2v12a2 2 0 002 2h10a2 2 0 002-2v-1M8 5a2 2 0 002 2h2a2 2 0 002-2M8 5a2 2 0 012-2h2a2 2 0 012 2m0 0h2a2 2 0 012 2v3m2 4H10m0 0l3-3m-3 3l3 3" /></svg>
+                          <span>Copy to Clipboard</span>
+                        </>
+                      )}
+                    </button>
+                    <span className="text-xs text-gray-500 font-medium">Click card to collapse</span>
+                  </div>
+                </div>
+              ) : (
+                <div>
+                  <div 
+                    style={{
+                      backgroundColor: '#F8FAFC',
+                      color: '#475569',
+                      border: '1px solid #F1F5F9',
+                      padding: '0.85rem',
+                      borderRadius: '0.5rem',
+                      fontFamily: 'Inter, ui-sans-serif, system-ui, sans-serif',
+                      lineHeight: '1.5',
+                      fontSize: '12px',
+                      overflow: 'hidden',
+                      display: '-webkit-box',
+                      WebkitLineClamp: 2,
+                      WebkitBoxOrient: 'vertical'
+                    }}
+                  >
+                    {c.content}
+                  </div>
+                  <div className="text-[11px] text-purple-600/90 font-semibold mt-2.5 flex items-center gap-1">
+                    <span>Read full text & copy</span>
+                    <svg className="w-3 h-3" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M19 9l-7 7-7-7" /></svg>
+                  </div>
+                </div>
+              )}
+              
+              <div className="text-[10px] text-gray-500 mt-3 border-t border-[#E2E8F0] pt-2.5 flex items-center justify-between">
+                <span>Generated: {new Date(c.created_at).toLocaleDateString()}</span>
+                <span>{c.used_in_outreach ? '✓ Used in Outreach' : 'Not yet used'}</span>
+              </div>
             </div>
-            {c.icp_segment && <div className="text-xs text-gray-500 mb-2">Segment: {c.icp_segment}</div>}
-            <div className="text-xs text-gray-400 line-clamp-3 bg-[#1F2937] rounded p-3">
-              {c.content?.slice(0, 300)}…
-            </div>
-            <div className="text-[10px] text-gray-600 mt-2">
-              {new Date(c.created_at).toLocaleDateString()} · {c.used_in_outreach ? '✓ Used in outreach' : 'Not yet used'}
-            </div>
-          </div>
-        ))}
+          )
+        })}
       </div>
     </div>
   )

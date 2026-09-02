@@ -33,6 +33,7 @@ class ContactOut(BaseModel):
     title: Optional[str] = None
     company: Optional[str] = None
     industry: Optional[str] = None
+    linkedin_url: Optional[str] = None
     icp_score: Optional[float] = None
     signal_score: Optional[float] = None
     readiness_score: float = 0.0
@@ -53,6 +54,13 @@ class DealOut(BaseModel):
     risk_score: float = 0.0
     days_in_current_stage: int = 0
     risk_flags: Optional[list] = None
+    objections: Optional[List[dict]] = None
+    deal_health_score: Optional[float] = None
+    win_probability: Optional[float] = None
+    buying_intent: Optional[str] = None
+    next_best_action: Optional[str] = None
+    stage_confidence: Optional[float] = None
+    contact_id: Optional[str] = None
     budget_confirmed: Optional[bool] = None
     authority_confirmed: Optional[bool] = None
     need_confirmed: Optional[bool] = None
@@ -228,7 +236,6 @@ async def list_contacts(
         q = q.where(Contact.icp_score >= min_score)
     if has_signal:
         q = q.where(Contact.signal_score.isnot(None))
-
     order_func = desc if sort_order == "desc" else asc
     if sort_by == "score":
         q = q.order_by(order_func(Contact.icp_score), desc(Contact.created_at))
@@ -277,9 +284,12 @@ async def get_contact_signals(contact_id: UUID, db: AsyncSession = Depends(get_d
 async def list_deals(
     stage: Optional[str] = None, min_risk: Optional[float] = None,
     user_input_id: Optional[int] = None,
+    contact_id: Optional[UUID] = None,
     db: AsyncSession = Depends(get_db),
 ):
     q = select(Deal).where(Deal.outcome.is_(None))
+    if contact_id is not None:
+        q = q.where(Deal.contact_id == contact_id)
     if user_input_id is not None:
         contact_ids_q = select(Contact.id).where(Contact.user_input_id == user_input_id)
         q = q.where(Deal.contact_id.in_(contact_ids_q))
@@ -318,12 +328,76 @@ async def get_pipeline_summary(
 # ── Pending Actions ────────────────────────────────────────────────────────
 
 @router.get("/pending-actions")
-async def list_pending_actions(db: AsyncSession = Depends(get_db)):
-    result = await db.execute(
-        select(PendingAction).where(PendingAction.status == ActionStatus.PENDING)
-        .order_by(desc(PendingAction.created_at)).limit(50)
-    )
-    return result.scalars().all()
+async def list_pending_actions(
+    status: Optional[str] = "pending",
+    agent_id: Optional[str] = None,
+    entity_type: Optional[str] = None,
+    limit: int = 50,
+    db: AsyncSession = Depends(get_db)
+):
+    q = select(PendingAction)
+    if status == "pending":
+        q = q.where(PendingAction.status == ActionStatus.PENDING)
+    elif status == "history":
+        q = q.where(PendingAction.status.in_([ActionStatus.APPROVED, ActionStatus.DISMISSED, ActionStatus.EXPIRED]))
+    elif status and status != "all":
+        q = q.where(PendingAction.status == status)
+
+    if agent_id:
+        q = q.where(PendingAction.agent_id == agent_id)
+    if entity_type:
+        q = q.where(PendingAction.entity_type == entity_type)
+
+    q = q.order_by(desc(PendingAction.created_at)).limit(limit)
+    result = await db.execute(q)
+    actions = result.scalars().all()
+
+    enriched = []
+    for a in actions:
+        item = {
+            "id": a.id,
+            "action_type": a.action_type,
+            "entity_type": a.entity_type,
+            "entity_id": a.entity_id,
+            "recommended_value": a.recommended_value,
+            "current_value": a.current_value,
+            "reason": a.reason,
+            "agent_id": a.agent_id,
+            "status": a.status,
+            "created_at": a.created_at.isoformat() if a.created_at else None,
+            "approved_at": a.approved_at.isoformat() if a.approved_at else None,
+            "approved_by": a.approved_by,
+            "deal_name": None,
+            "company": None,
+            "contact_name": None,
+            "contact_id": None,
+            "deal_id": None,
+        }
+
+        if a.entity_type == "deal":
+            deal_res = await db.execute(select(Deal).where(Deal.id == a.entity_id))
+            deal = deal_res.scalar_one_or_none()
+            if deal:
+                item["deal_id"] = deal.id
+                item["deal_name"] = deal.name
+                if deal.contact_id:
+                    contact_res = await db.execute(select(Contact).where(Contact.id == deal.contact_id))
+                    contact = contact_res.scalar_one_or_none()
+                    if contact:
+                        item["contact_id"] = contact.id
+                        item["company"] = contact.company
+                        item["contact_name"] = f"{contact.first_name or ''} {contact.last_name or ''}".strip()
+        elif a.entity_type == "contact":
+            contact_res = await db.execute(select(Contact).where(Contact.id == a.entity_id))
+            contact = contact_res.scalar_one_or_none()
+            if contact:
+                item["contact_id"] = contact.id
+                item["company"] = contact.company
+                item["contact_name"] = f"{contact.first_name or ''} {contact.last_name or ''}".strip()
+
+        enriched.append(item)
+
+    return enriched
 
 
 @router.post("/pending-actions/{action_id}/approve")
@@ -338,7 +412,7 @@ async def approve_action(
     action.approved_at = datetime.utcnow()
     
     if action.action_type == "approve_outreach":
-        from app.agents.draft_manager import DraftManager
+        from app.agents.a3_outreach import DraftManager
         draft_manager = DraftManager(db)
         await draft_manager.approve_pending_draft(action.entity_id)
 
@@ -353,6 +427,7 @@ async def dismiss_action(action_id: str, db: AsyncSession = Depends(get_db)):
     if not action:
         raise HTTPException(status_code=404)
     action.status = ActionStatus.DISMISSED
+    action.approved_at = datetime.utcnow()  # timestamp of resolution/dismissal
     await db.commit()
     return {"status": "dismissed"}
 
@@ -395,11 +470,51 @@ async def list_content(
     if icp_segment:
         q = q.where(GeneratedContent.icp_segment == icp_segment)
     elif user_input_id is not None:
-        # Filter by icp_segment matching company_name of that input
+        from app.models.models import Contact, UserInput
+        from sqlalchemy import or_
+        
+        # 1. Fetch UserInput to get target industries
         ui_result = await db.execute(select(UserInput).where(UserInput.id == user_input_id))
         ui = ui_result.scalar_one_or_none()
-        if ui:
-            q = q.where(GeneratedContent.icp_segment.ilike(f"%{ui.our_company_name}%"))
+        industries = set()
+        if ui and ui.target_industries:
+            # target_industries is a comma-separated string, e.g. "SaaS, Healthcare"
+            for ind in ui.target_industries.split(","):
+                val = ind.strip()
+                if val:
+                    industries.add(val.lower())
+                    
+        # 2. Fetch distinct industries from active contacts associated with this user_input_id
+        contact_res = await db.execute(
+            select(Contact.industry)
+            .where(
+                and_(
+                    Contact.user_input_id == user_input_id,
+                    Contact.industry.isnot(None),
+                    Contact.industry != ""
+                )
+            )
+            .distinct()
+        )
+        for row in contact_res.all():
+            val = row[0].strip()
+            if val:
+                industries.add(val.lower())
+                
+        # 3. Apply matching filter if any industries are found, otherwise fallback to SaaS/B2B technology
+        if not industries:
+            industries = {"saas", "b2b technology", "b2b saas"}
+            
+        conditions = []
+        for ind in industries:
+            conditions.append(GeneratedContent.icp_segment.ilike(f"%{ind}%"))
+            # Also handle reverse / sub-word matching for compound industry names (e.g. "financial services" matches "finance")
+            if len(ind) > 3:
+                for sub in ind.replace("/", " ").replace("&", " ").split():
+                    if len(sub) > 4:
+                        conditions.append(GeneratedContent.icp_segment.ilike(f"%{sub}%"))
+                        
+        q = q.where(or_(*conditions))
     q = q.order_by(desc(GeneratedContent.created_at)).limit(limit)
     result = await db.execute(q)
     return result.scalars().all()
@@ -990,7 +1105,7 @@ async def preview_draft(draft_id: str, db: AsyncSession = Depends(get_db)):
 
 @router.post("/drafts/{draft_id}/approve")
 async def approve_draft_route(draft_id: str, db: AsyncSession = Depends(get_db)):
-    from app.agents.draft_manager import DraftManager
+    from app.agents.a3_outreach import DraftManager
     draft_manager = DraftManager(db)
     # Fetch draft details
     draft_res = await db.execute(select(OutreachDraft).where(OutreachDraft.id == draft_id))

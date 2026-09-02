@@ -19,9 +19,14 @@ depends_on: Union[str, Sequence[str], None] = None
 
 
 def upgrade() -> None:
-    op.add_column('contacts', sa.Column('user_input_id', sa.Integer(), nullable=True))
-    op.create_foreign_key('fk_contacts_user_input_id', 'contacts', 'user_inputs', ['user_input_id'], ['id'])
-    op.create_index('ix_contacts_user_input_id', 'contacts', ['user_input_id'])
+    bind = op.get_bind()
+    inspector = sa.inspect(bind)
+    columns = [col['name'] for col in inspector.get_columns('contacts')]
+    
+    if 'user_input_id' not in columns:
+        op.add_column('contacts', sa.Column('user_input_id', sa.Integer(), nullable=True))
+        op.create_foreign_key('fk_contacts_user_input_id', 'contacts', 'user_inputs', ['user_input_id'], ['id'])
+        op.create_index('ix_contacts_user_input_id', 'contacts', ['user_input_id'])
 
 
 def downgrade() -> None:

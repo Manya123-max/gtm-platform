@@ -19,7 +19,7 @@ from typing import Any, Dict, List, Optional
 
 import httpx
 import structlog
-from sqlalchemy import and_, func, select
+from sqlalchemy import and_, or_, func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.config import settings
@@ -54,6 +54,7 @@ class SignalAgent:
     def __init__(self, db: AsyncSession):
         self.db = db
         self._registry_cache: Optional[Dict[SignalType, float]] = None
+        self._predictleads_disabled = False
 
     async def run(self, contact_ids: Optional[List[str]] = None) -> Dict[str, Any]:
         logger.info("A2 starting")
@@ -171,28 +172,48 @@ class SignalAgent:
     def _clean_company_name(self, name: Optional[str]) -> str:
         if not name:
             return ""
-        # Remove parenthetical details e.g., Proximus Media House (PMH) -> Proximus Media House
         import re
+        # Remove parenthetical details e.g., Proximus Media House (PMH) -> Proximus Media House
         name = re.sub(r"\(.*?\)", "", name)
-        # Remove suffixes after common delimiters: | , -
-        for delimiter in ["|", "-", "—"]:
+        # Remove suffixes after common delimiters with surrounding spaces or specific characters, but NOT raw hyphens inside words
+        for delimiter in [" | ", " - ", " — ", " , "]:
             if delimiter in name:
                 name = name.split(delimiter)[0]
-        # Remove common corporate suffixes
+        
+        if ", " in name:
+            name = name.split(", ")[0]
+            
         suffixes = [
-            " corporation", " corp.", " corp", 
-            " incorporated", " inc.", " inc", 
-            " limited", " ltd.", " ltd", 
-            " llc", " l.l.c.", 
-            " spa", " s.p.a.", 
-            " worldwide", " holdings", " group",
-            " tecnologia", " technology"
+            "corporation", "corp.", "corp", 
+            "incorporated", "inc.", "inc", 
+            "limited", "ltd.", "ltd", 
+            "llc", "l.l.c.", 
+            "association", "assn.",
+            "worldwide", "holdings", "group",
+            "technologies", "technology", "tech",
+            "services", "systems", "solutions",
+            "mena", "europe", "international", "intl."
         ]
+        
         name_lower = name.lower().strip()
-        for suffix in suffixes:
-            if name_lower.endswith(suffix):
-                name = name[:len(name) - len(suffix)]
-                name_lower = name.lower().strip()
+        # Clean multiple suffixes iteratively
+        cleaned = True
+        while cleaned:
+            cleaned = False
+            for suffix in suffixes:
+                # Check both space and hyphen prefixes
+                for sep in [" ", "-"]:
+                    full_suffix = sep + suffix
+                    if name_lower.endswith(full_suffix):
+                        remaining_len = len(name_lower) - len(full_suffix)
+                        if remaining_len >= 3:
+                            name = name[:remaining_len].strip()
+                            name_lower = name.lower().strip()
+                            cleaned = True
+                            break
+                if cleaned:
+                    break
+                        
         return name.strip()
 
     def _get_adzuna_country_code(self, contact: Contact) -> str:
@@ -335,6 +356,9 @@ class SignalAgent:
     }
 
     async def _check_predictleads(self, contact: Contact, weights: Dict[SignalType, float]) -> List[Dict[str, Any]]:
+        if self._predictleads_disabled:
+            return []
+
         domain = self._get_company_domain(contact)
         if not settings.PREDICTLEADS_API_KEY or not settings.PREDICTLEADS_API_TOKEN or not domain:
             return []
@@ -353,6 +377,11 @@ class SignalAgent:
                     f"https://predictleads.com/api/v3/companies/{domain}/financing_events",
                     headers=headers,
                 )
+                if fin_resp.status_code in (401, 402, 403):
+                    logger.warning("PredictLeads authentication or billing error. Disabling PredictLeads for this run.", status=fin_resp.status_code, domain=domain)
+                    self._predictleads_disabled = True
+                    return []
+
                 if fin_resp.status_code == 200:
                     events = fin_resp.json().get("data", [])
                     recent = [
@@ -475,6 +504,44 @@ class SignalAgent:
         except ValueError:
             return datetime.min
 
+    @staticmethod
+    def _is_headline_relevant(headline: str, cleaned_company: str, original_company: str) -> bool:
+        if not headline:
+            return False
+            
+        def normalize(t: str) -> str:
+            t = t.lower()
+            t = re.sub(r"[^\w\s\-]", "", t)
+            t = re.sub(r"\s+", " ", t)
+            return t.strip()
+
+        norm_headline = normalize(headline)
+        norm_cleaned = normalize(cleaned_company)
+        norm_original = normalize(original_company)
+
+        # Check if either normalized cleaned name or original name exists as a substring/word in headline
+        if norm_cleaned in norm_headline or norm_original in norm_headline:
+            return True
+            
+        # Check hyphen/space variations
+        if "-" in norm_cleaned:
+            space_cleaned = norm_cleaned.replace("-", " ")
+            if space_cleaned in norm_headline:
+                return True
+            no_space_cleaned = norm_cleaned.replace("-", "")
+            if no_space_cleaned in norm_headline:
+                return True
+
+        if "-" in norm_original:
+            space_original = norm_original.replace("-", " ")
+            if space_original in norm_headline:
+                return True
+            no_space_original = norm_original.replace("-", "")
+            if no_space_original in norm_headline:
+                return True
+
+        return False
+
     async def _check_currents(self, contact: Contact, weights: Dict[SignalType, float]) -> List[Dict[str, Any]]:
         """Supplementary keyword-matched news via Currents API (higher free-tier
         rate limit than NewsAPI, commercial use allowed). Same matching logic as
@@ -507,6 +574,8 @@ class SignalAgent:
 
             for a in articles:
                 title = a.get("title", "")
+                if not self._is_headline_relevant(title, company, contact.company):
+                    continue
                 description = a.get("description") or ""
                 article_text = f"{title} {description}".lower()
 
@@ -608,6 +677,8 @@ class SignalAgent:
 
             for article in articles:
                 title = article.get("title", "")
+                if not self._is_headline_relevant(title, company, contact.company):
+                    continue
                 description = article.get("description") or ""
                 article_text = f"{title} {description}".lower()
 
@@ -736,7 +807,8 @@ class SignalAgent:
     async def _save_signals(self, signals: List[Dict[str, Any]]) -> int:
         saved = 0
         for signal in signals:
-            existing = await self.db.execute(
+            # 1. Time-based rolling window deduplication (same type within 24h)
+            existing_time = await self.db.execute(
                 select(SignalEvent).where(
                     and_(
                         SignalEvent.contact_id == signal["contact_id"],
@@ -745,8 +817,31 @@ class SignalAgent:
                     )
                 )
             )
-            if existing.scalar_one_or_none():
+            if existing_time.scalar_one_or_none():
                 continue
+
+            # 2. Article-based deduplication (same headline or url regardless of time window)
+            raw_data = signal.get("raw_data") or {}
+            headline = raw_data.get("headline")
+            url = raw_data.get("url")
+            
+            if headline or url:
+                clauses = []
+                if headline:
+                    clauses.append(SignalEvent.raw_data["headline"].astext == headline)
+                if url:
+                    clauses.append(SignalEvent.raw_data["url"].astext == url)
+                
+                existing_article = await self.db.execute(
+                    select(SignalEvent).where(
+                        and_(
+                            SignalEvent.contact_id == signal["contact_id"],
+                            or_(*clauses)
+                        )
+                    )
+                )
+                if existing_article.scalar_one_or_none():
+                    continue
 
             self.db.add(SignalEvent(
                 contact_id=signal["contact_id"],

@@ -1,8 +1,8 @@
 import { useState } from 'react'
 import { useQuery } from '@tanstack/react-query'
 import { useParams, useNavigate } from 'react-router-dom'
-import { fetchContact, fetchThread, fetchSignals } from '../api'
-import { ArrowLeft, Mail, Building2, MapPin, Zap, MessageSquare, X } from 'lucide-react'
+import { fetchContact, fetchThread, fetchSignals, fetchDeals } from '../api'
+import { ArrowLeft, Mail, Building2, MapPin, Zap, MessageSquare, X, Link, TrendingUp, CheckCircle2, Clock, Sparkles, ExternalLink, ShieldCheck, UserCheck } from 'lucide-react'
 
 export default function ContactDetail() {
   const { id } = useParams()
@@ -12,6 +12,7 @@ export default function ContactDetail() {
   const { data: contact, isLoading } = useQuery({ queryKey: ['contact', id], queryFn: () => fetchContact(id) })
   const { data: thread = [] } = useQuery({ queryKey: ['thread', id], queryFn: () => fetchThread(id) })
   const { data: signals = [] } = useQuery({ queryKey: ['signals', id], queryFn: () => fetchSignals(id) })
+  const { data: deals = [] } = useQuery({ queryKey: ['deals', 'contact', id], queryFn: () => fetchDeals({ contact_id: id }) })
 
   if (isLoading) return <div className="text-gray-600 text-sm p-8">Loading…</div>
   if (!contact) return <div className="text-gray-600 text-sm p-8">Contact not found</div>
@@ -45,6 +46,19 @@ export default function ContactDetail() {
               <Mail size={11} className="text-gray-600" />
               {contact.email}
             </div>
+            {contact.linkedin_url && (
+              <div className="flex items-center gap-2 text-gray-400">
+                <Link size={11} className="text-gray-600" />
+                <a 
+                  href={contact.linkedin_url} 
+                  target="_blank" 
+                  rel="noopener noreferrer" 
+                  className="text-blue-400 hover:text-blue-300 transition-colors"
+                >
+                  View LinkedIn Profile
+                </a>
+              </div>
+            )}
             {contact.company && (
               <div className="flex items-center gap-2 text-gray-400">
                 <Building2 size={11} className="text-gray-600" />
@@ -126,35 +140,88 @@ export default function ContactDetail() {
             )}
           </div>
 
-          {/* Conversation thread */}
+          {/* Conversation thread (Messenger Style) */}
           <div className="card">
-            <div className="flex items-center gap-2 mb-3">
-              <MessageSquare size={13} className="text-blue-400" />
-              <span className="text-sm font-medium text-gray-200">Conversation Thread</span>
-              <span className="badge badge-blue">{thread.length}</span>
+            <div className="flex items-center justify-between mb-4 border-b border-gray-800/10 pb-2.5">
+              <div className="flex items-center gap-2">
+                <MessageSquare size={14} className="text-blue-500" />
+                <span className="text-sm font-semibold text-gray-800">Conversation Thread</span>
+                <span className="badge badge-blue">{thread.length} messages</span>
+              </div>
+              <div className="text-[11px] text-gray-500 flex items-center gap-1.5 font-medium">
+                <span className="w-2 h-2 rounded-full bg-emerald-500 animate-pulse"></span>
+                <span>Live Sync Active</span>
+              </div>
             </div>
+
             {thread.length === 0 ? (
-              <div className="text-xs text-gray-600 py-4 text-center">No interactions yet</div>
+              <div className="text-xs text-gray-400 py-8 text-center">No email interactions recorded yet</div>
             ) : (
-              <div className="space-y-2 max-h-80 overflow-y-auto">
-                {thread.map(t => (
-                  <div key={t.id} className={`flex gap-3 ${t.direction === 'outbound' ? 'flex-row-reverse' : ''}`}>
-                    <div className={`max-w-[85%] p-3 rounded-lg text-xs ${
-                      t.direction === 'outbound'
-                        ? 'bg-blue-900/30 text-blue-200 border border-blue-800/30'
-                        : 'bg-[#1F2937] text-gray-300 border border-[#374151]'
-                    }`}>
-                      <div className="line-clamp-3">{t.content || t.draft_content}</div>
-                      <div className={`text-[10px] mt-1 ${
-                        t.direction === 'outbound' ? 'text-blue-400/60' : 'text-gray-600'
-                      }`}>
-                        {t.event_type?.replace(/_/g,' ')}
-                        {t.intent && ` · ${t.intent}`}
-                        {t.readiness_score_after != null && ` · score: ${t.readiness_score_after?.toFixed(0)}`}
+              <div className="space-y-4 max-h-[560px] overflow-y-auto pr-1">
+                {thread.map((t, idx) => {
+                  const prospectName = `${contact.first_name || ''} ${contact.last_name || ''}`.trim() || 'Prospect'
+                  const prospectInitials = `${contact.first_name?.[0] || 'P'}${contact.last_name?.[0] || ''}`
+                  
+                  // Helper to generate a direct Gmail compose link for outgoing draft
+                  const gmailComposeUrl = `https://mail.google.com/mail/?view=cm&fs=1&to=${encodeURIComponent(contact.email)}&su=${encodeURIComponent(`Re: Discussion with ${contact.company || 'Galvin Technologies'}`)}&body=${encodeURIComponent(t.draft_content || '')}`
+
+                  return (
+                    <div key={t.id || idx} className="space-y-3 pt-3 border-t border-gray-200/60 first:border-0 first:pt-0">
+                      {/* Left Bubble: Prospect's Inbound Reply */}
+                      <div className="flex items-start gap-2.5 max-w-[90%]">
+                        <div className="w-8 h-8 rounded-full bg-slate-200 text-slate-700 font-bold text-xs flex items-center justify-center shrink-0 border border-slate-300 shadow-sm">
+                          {prospectInitials}
+                        </div>
+                        <div className="space-y-1">
+                          <div className="p-3.5 rounded-2xl rounded-tl-none bg-white text-slate-800 border border-slate-200 shadow-sm text-xs leading-relaxed">
+                            {t.content}
+                          </div>
+                          <div className="flex items-center gap-2 text-[10px] text-slate-500 px-1">
+                            <span className="font-semibold text-slate-700">{prospectName}</span>
+                            <span>·</span>
+                            {t.intent && <span className="text-amber-700 bg-amber-50 border border-amber-200/80 px-1.5 py-0.2 rounded capitalize font-medium">{t.intent.replace(/_/g, ' ')}</span>}
+                            <span>·</span>
+                            <span>Score: <strong className="text-blue-600 font-bold">{t.readiness_score_after?.toFixed(0) || '25'}%</strong></span>
+                            {t.occurred_at && <span>· {new Date(t.occurred_at).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}</span>}
+                          </div>
+                        </div>
                       </div>
+
+                      {/* Right Bubble: Our AI Draft / Approved Outbound Response */}
+                      {t.draft_content && (
+                        <div className="flex items-start gap-2.5 max-w-[90%] ml-auto flex-row-reverse">
+                          <div className="w-8 h-8 rounded-full bg-blue-600 text-white font-bold text-xs flex items-center justify-center shrink-0 border border-blue-500 shadow-sm">
+                            You
+                          </div>
+                          <div className="space-y-1.5 text-right">
+                            <div className="p-3.5 rounded-2xl rounded-tr-none bg-[#EEF4FF] text-[#1E3A8A] border border-[#BFDBFE] shadow-sm text-xs leading-relaxed text-left whitespace-pre-line font-normal">
+                              {t.draft_content}
+                            </div>
+                            <div className="flex items-center justify-end gap-2 text-[11px] px-1 flex-wrap">
+                              {t.approved_at ? (
+                                <span className="inline-flex items-center gap-1 text-emerald-800 font-semibold bg-emerald-50 border border-emerald-300 px-2.5 py-0.5 rounded-full shadow-xs">
+                                  <CheckCircle2 size={11} className="text-emerald-600" /> Approved by {t.approved_by || 'Rep'}
+                                </span>
+                              ) : (
+                                <span className="inline-flex items-center gap-1 text-amber-800 font-semibold bg-amber-50 border border-amber-300 px-2.5 py-0.5 rounded-full shadow-xs">
+                                  <Clock size={11} className="text-amber-600" /> Pending Slack Approval
+                                </span>
+                              )}
+                              <a
+                                href={gmailComposeUrl}
+                                target="_blank"
+                                rel="noopener noreferrer"
+                                className="inline-flex items-center gap-1 text-white font-semibold bg-blue-600 hover:bg-blue-700 active:bg-blue-800 px-3 py-0.5 rounded-full shadow-sm transition-all"
+                              >
+                                <ExternalLink size={11} /> Send via Gmail Web
+                              </a>
+                            </div>
+                          </div>
+                        </div>
+                      )}
                     </div>
-                  </div>
-                ))}
+                  )
+                })}
               </div>
             )}
           </div>

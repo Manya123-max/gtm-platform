@@ -654,20 +654,8 @@ export function Outreach() {
   
   const approveMut = useMutation({
     mutationFn: approveOutreachDraft,
-    onSuccess: (data) => {
+    onSuccess: () => {
       qc.invalidateQueries({ queryKey: ['outreach-drafts'] })
-      
-      // If the email was not sent directly by the backend, open Gmail compose window as fallback
-      if (data && !data.sent_directly) {
-        const to = data.draft?.to || ''
-        const subject = data.draft?.subject || ''
-        const body = data.draft?.body || ''
-        
-        // Construct the Gmail compose URL
-        const gmailUrl = `https://mail.google.com/mail/?view=cm&fs=1&to=${encodeURIComponent(to)}&su=${encodeURIComponent(subject)}&body=${encodeURIComponent(body)}`
-        window.open(gmailUrl, '_blank')
-      }
-      
       setSelectedDraft(null)
     }
   })

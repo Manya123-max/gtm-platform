@@ -991,24 +991,16 @@ async def approve_draft_route(draft_id: str, db: AsyncSession = Depends(get_db))
         raise HTTPException(status_code=404, detail="Draft not found")
         
     contact_id = draft.contact_id
-    subject = draft.subject
-    body = draft.body
     
-    # Perform approval and try sending
+    # Perform approval and dispatch
     res = await draft_manager.approve_draft(draft_id)
     success = res.get("success", False) if isinstance(res, dict) else bool(res)
-    sent_directly = res.get("sent_directly", False) if isinstance(res, dict) else False
     error_msg = res.get("error") if isinstance(res, dict) else None
 
     if not success:
         raise HTTPException(status_code=400, detail=error_msg or "Approval failed or draft not pending")
     
-    # Fetch contact info for Gmail fallback compose link
-    from app.models.models import Contact
-    contact_res = await db.execute(select(Contact).where(Contact.id == contact_id))
-    contact = contact_res.scalar_one_or_none()
-    
-    # Find and resolve associated pending action
+    # Find and resolve associated pending actions
     action_res = await db.execute(
         select(PendingAction)
         .where(and_(
@@ -1025,13 +1017,7 @@ async def approve_draft_route(draft_id: str, db: AsyncSession = Depends(get_db))
     await db.commit()
     return {
         "status": "approved",
-        "sent_directly": sent_directly,
-        "error": error_msg,
-        "draft": {
-            "to": contact.email if contact else "",
-            "subject": subject,
-            "body": body,
-        }
+        "sent": True
     }
 
 @router.post("/drafts/{draft_id}/reject")

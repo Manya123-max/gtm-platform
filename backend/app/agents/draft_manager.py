@@ -124,7 +124,16 @@ class DraftManager:
             sent_directly = False
             error_msg = "Direct sending not enabled in config (ENABLE_INSTANTLY and ENABLE_EMAIL_SENDING are false)"
 
-        # Mark draft as sent (since it's approved and we will either deliver it directly or via Gmail compose fallback)
+        if not sent_directly or not provider_id:
+            draft.status = "failed"
+            await self.db.flush()
+            return {
+                "success": False,
+                "sent_directly": False,
+                "error": error_msg or "Email dispatch failed or no active sending service configured"
+            }
+
+        # Mark draft as sent when successfully dispatched
         draft.status = "sent"
         
         # Log the outreach in OutreachLog
@@ -140,7 +149,7 @@ class DraftManager:
             subject=draft.subject,
             body_preview=draft.body[:500],
             signal_id=signal.id if signal else None,
-            outreach_provider_message_id=provider_id or "gmail_fallback",
+            outreach_provider_message_id=provider_id,
             sequence_step=signal.sequence_step if signal else 0,
             sent_at=datetime.utcnow(),
         )
@@ -170,8 +179,8 @@ class DraftManager:
         await self.db.flush()
         return {
             "success": True,
-            "sent_directly": sent_directly,
-            "error": error_msg
+            "sent_directly": True,
+            "error": None
         }
 
     async def approve_pending_draft(self, contact_id: str) -> bool:

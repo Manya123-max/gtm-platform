@@ -240,35 +240,31 @@ def run_a4_test(config: Optional[Dict] = None):
     Simulates an inbound reply so you can test the classification pipeline
     without needing a real inbound-reply webhook.
     """
-    test_payload = {
-        "event_type": "reply_received",
-        "from_address": "suriya.krishnan@forcecloudlabs.com",
-        "reply_text": "Thanks for reaching out! Yes, we are actually evaluating tools right now. Can you tell me more about what you offer?",
-        "campaign_id": "test-campaign",
-    }
-    if config and config.get("reply_text"):
-        test_payload["reply_text"] = config["reply_text"]
-    if config and config.get("from_address"):
-        test_payload["from_address"] = config["from_address"]
+    config = config or {}
+    reply_text = config.get("reply_text") or "Thanks for reaching out! We are currently evaluating options and would love to schedule a quick call."
+    from_address_input = config.get("from_address")
 
     async def _run():
         from app.agents.a4_inbound import InboundAgent
         from app.models.models import Contact
         from sqlalchemy import select
         async with AsyncSessionLocal() as db:
-            email_to_use = test_payload["from_address"]
-            res = await db.execute(select(Contact).where(Contact.email == email_to_use))
-            contact = res.scalar_one_or_none()
-            if not contact:
-                res_first = await db.execute(select(Contact).limit(1))
+            email_to_use = from_address_input
+            if not email_to_use:
+                res_first = await db.execute(select(Contact).where(Contact.email != None).limit(1))
                 first_contact = res_first.scalar_one_or_none()
                 if first_contact:
                     email_to_use = first_contact.email
-                    logger.info("run_a4_test: falling back to contact", email=email_to_use)
                 else:
                     logger.warning("run_a4_test: no contacts found in database to simulate reply")
+                    return {"status": "error", "message": "No contact available in database"}
             
-            test_payload["from_address"] = email_to_use
+            test_payload = {
+                "event_type": "reply_received",
+                "from_address": email_to_use,
+                "reply_text": reply_text,
+                "campaign_id": config.get("campaign_id", "test-campaign"),
+            }
             agent = InboundAgent(db)
             result = await agent.handle_reply(test_payload)
             logger.info("A4 test run complete", **result)

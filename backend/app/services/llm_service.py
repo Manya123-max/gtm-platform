@@ -202,7 +202,7 @@ async def _call_with_fallback(
 # ── JSON cleaner ──────────────────────────────────────────────────────────────
 
 def _clean_json(content: str) -> Dict[str, Any]:
->>>>>>> 61118fd4496f3da6af446dc85e20247545261954
+
     """Strip markdown fences and parse JSON."""
     if content.startswith("```"):
         content = re.sub(r"^```(?:json)?\n?", "", content)

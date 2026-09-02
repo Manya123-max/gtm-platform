@@ -14,7 +14,6 @@ import os
 # Add the parent directory of backend (where app is located) to sys.path
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from app.core.config import settings
-
 db_url = os.environ.get("DATABASE_URL")
 if db_url:
     db_url = db_url.replace("+asyncpg", "")

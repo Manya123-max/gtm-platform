@@ -92,7 +92,6 @@ async def submit_input(data: InputData):
  
     return {"message": "Input received", "id": record.id}
 
-
 # ── Webhook Routes ────────────────────────────────────────────────────────
  
 @app.post("/webhook/inbound-reply")
@@ -182,10 +181,8 @@ async def slack_actions(request: Request, background_tasks: BackgroundTasks):
     from urllib.parse import parse_qs
     parsed = parse_qs(body.decode())
     payload = json.loads(parsed.get("payload", ["{}"])[0])
-
     payload_type = payload.get("type")
     user = payload.get("user", {}).get("email") or payload.get("user", {}).get("username") or payload.get("user", {}).get("id", "unknown")
-
     # Modal submission (rep clicked "Save & Send" in the edit modal)
     if payload_type == "view_submission":
         view = payload.get("view", {})
@@ -202,20 +199,21 @@ async def slack_actions(request: Request, background_tasks: BackgroundTasks):
         return JSONResponse({})  # ack — closes the modal, no further Slack action needed
 
     actions = payload.get("actions", [])
+
     for action in actions:
         action_id = action.get("action_id")
         value = action.get("value")
- 
+
         if action_id == "approve_reply":
             background_tasks.add_task(_approve_reply, value, user)
         elif action_id == "reject_reply":
-            logger.info("Reply rejected", thread_event_id=value, by=user)
+            background_tasks.add_task(_reject_reply, value, user)
         elif action_id == "edit_reply":
             trigger_id = payload.get("trigger_id", "")
-            background_tasks.add_task(_open_edit_modal, value, trigger_id)
+            background_tasks.add_task(_open_edit_modal, trigger_id, value)
         elif action_id == "approve_crm_action":
             background_tasks.add_task(_approve_crm_action, value, user)
- 
+
     return JSONResponse({"text": "✓ Action received"})
  
  
@@ -250,7 +248,6 @@ async def _approve_reply(thread_event_id: str, approved_by: str, custom_content:
     async with AsyncSessionLocal() as db:
         agent = InboundAgent(db)
         await agent.approve_reply(thread_event_id, approved_by, custom_content)
-
 
 async def _open_edit_modal(trigger_id: str, thread_event_id: str):
     from app.core.database import AsyncSessionLocal

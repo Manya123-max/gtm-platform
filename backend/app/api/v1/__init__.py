@@ -216,6 +216,7 @@ async def list_contacts(
     min_score: Optional[float] = None,
     has_signal: Optional[bool] = None,
     do_not_contact: Optional[bool] = False,
+    sort_by: str = "newest",
     sort_order: str = "desc",
     user_input_id: Optional[int] = None,
     db: AsyncSession = Depends(get_db),
@@ -398,7 +399,7 @@ async def list_content(
         ui_result = await db.execute(select(UserInput).where(UserInput.id == user_input_id))
         ui = ui_result.scalar_one_or_none()
         if ui:
-            q = q.where(GeneratedContent.icp_segment.ilike(f"%{ui.company_name}%"))
+            q = q.where(GeneratedContent.icp_segment.ilike(f"%{ui.our_company_name}%"))
     q = q.order_by(desc(GeneratedContent.created_at)).limit(limit)
     result = await db.execute(q)
     return result.scalars().all()
@@ -991,28 +992,41 @@ async def preview_draft(draft_id: str, db: AsyncSession = Depends(get_db)):
 async def approve_draft_route(draft_id: str, db: AsyncSession = Depends(get_db)):
     from app.agents.draft_manager import DraftManager
     draft_manager = DraftManager(db)
-    success = await draft_manager.approve_draft(draft_id)
-    if not success:
-        raise HTTPException(status_code=400, detail="Approval failed or draft not pending")
-    
+    # Fetch draft details
     draft_res = await db.execute(select(OutreachDraft).where(OutreachDraft.id == draft_id))
     draft = draft_res.scalar_one_or_none()
-    if draft:
-        action_res = await db.execute(
-            select(PendingAction)
-            .where(and_(
-                PendingAction.entity_id == draft.contact_id,
-                PendingAction.action_type == "approve_outreach",
-                PendingAction.status == ActionStatus.PENDING
-            ))
-        )
-        action = action_res.scalar_one_or_none()
-        if action:
-            action.status = ActionStatus.APPROVED
-            action.approved_at = datetime.utcnow()
+    if not draft:
+        raise HTTPException(status_code=404, detail="Draft not found")
+        
+    contact_id = draft.contact_id
+    
+    # Perform approval and dispatch
+    res = await draft_manager.approve_draft(draft_id)
+    success = res.get("success", False) if isinstance(res, dict) else bool(res)
+    error_msg = res.get("error") if isinstance(res, dict) else None
+
+    if not success:
+        raise HTTPException(status_code=400, detail=error_msg or "Approval failed or draft not pending")
+    
+    # Find and resolve associated pending actions
+    action_res = await db.execute(
+        select(PendingAction)
+        .where(and_(
+            PendingAction.entity_id == contact_id,
+            PendingAction.action_type == "approve_outreach",
+            PendingAction.status == ActionStatus.PENDING
+        ))
+    )
+    actions = action_res.scalars().all()
+    for action in actions:
+        action.status = ActionStatus.APPROVED
+        action.approved_at = datetime.utcnow()
             
     await db.commit()
-    return {"status": "approved"}
+    return {
+        "status": "approved",
+        "sent": True
+    }
 
 @router.post("/drafts/{draft_id}/reject")
 async def reject_draft_route(draft_id: str, db: AsyncSession = Depends(get_db)):

@@ -250,6 +250,12 @@ class InboundAgent:
         thread_event.sent_at = datetime.utcnow()
         await self.db.commit()
 
+        # Update Slack message UI in-place if tracking ID exists
+        if thread_event.slack_message_ts:
+            from app.services import SlackService
+            slack = SlackService()
+            await slack.update_to_approved(thread_event.slack_message_ts, approved_by)
+
         if contact and booking_link:
             await self._log_funnel_event("booking_link_sent", contact.id, {"booking_link": booking_link})
 
@@ -275,6 +281,11 @@ class InboundAgent:
         thread_event.rejected_at = datetime.utcnow()
         await self.db.commit()
 
+        # Update Slack message UI in-place if tracking ID exists
+        if thread_event.slack_message_ts:
+            from app.services import SlackService
+            slack = SlackService()
+            await slack.update_to_rejected(thread_event.slack_message_ts, rejected_by)
         if thread_event.contact_id:
             await self._log_funnel_event("reply_rejected", thread_event.contact_id, {"rejected_by": rejected_by})
 

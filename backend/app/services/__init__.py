@@ -103,6 +103,49 @@ class SlackService:
             logger.error("Slack modal open failed", error=str(e))
             return False
 
+    async def update_to_approved(self, ts: str, approved_by: str) -> bool:
+        if not settings.SLACK_BOT_TOKEN or not ts:
+            return False
+        try:
+            async with httpx.AsyncClient(timeout=10) as client:
+                resp = await client.post(
+                    "https://slack.com/api/chat.update",
+                    headers={"Authorization": f"Bearer {settings.SLACK_BOT_TOKEN}"},
+                    json={
+                        "channel": settings.SLACK_APPROVAL_CHANNEL,
+                        "ts": ts,
+                        "text": f"✓ Approved by {approved_by}",
+                        "blocks": [
+                            {"type": "section", "text": {"type": "mrkdwn", "text": f"✓ *Approved and sent by {approved_by}*"}}
+                        ]
+                    },
+                )
+                return resp.json().get("ok", False)
+        except Exception as e:
+            logger.error("Slack message update approved failed", error=str(e))
+            return False
+
+    async def update_to_rejected(self, ts: str, rejected_by: str) -> bool:
+        if not settings.SLACK_BOT_TOKEN or not ts:
+            return False
+        try:
+            async with httpx.AsyncClient(timeout=10) as client:
+                resp = await client.post(
+                    "https://slack.com/api/chat.update",
+                    headers={"Authorization": f"Bearer {settings.SLACK_BOT_TOKEN}"},
+                    json={
+                        "channel": settings.SLACK_APPROVAL_CHANNEL,
+                        "ts": ts,
+                        "text": f"✗ Rejected by {rejected_by}",
+                        "blocks": [
+                            {"type": "section", "text": {"type": "mrkdwn", "text": f"✗ *Rejected by {rejected_by}*"}}
+                        ]
+                    },
+                )
+                return resp.json().get("ok", False)
+        except Exception as e:
+            logger.error("Slack message update rejected failed", error=str(e))
+            return False
 
     async def send_daily_digest(self, pending_actions: list) -> bool:
         if not settings.SLACK_BOT_TOKEN or not pending_actions:

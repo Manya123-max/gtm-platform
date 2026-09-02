@@ -236,9 +236,7 @@ async def list_contacts(
         q = q.where(Contact.icp_score >= min_score)
     if has_signal:
         q = q.where(Contact.signal_score.isnot(None))
-    
     order_func = desc if sort_order == "desc" else asc
-    
     if sort_by == "score":
         q = q.order_by(order_func(Contact.icp_score), desc(Contact.created_at))
     elif sort_by == "signal_score":
@@ -478,7 +476,6 @@ async def list_content(
         # 1. Fetch UserInput to get target industries
         ui_result = await db.execute(select(UserInput).where(UserInput.id == user_input_id))
         ui = ui_result.scalar_one_or_none()
-        
         industries = set()
         if ui and ui.target_industries:
             # target_industries is a comma-separated string, e.g. "SaaS, Healthcare"
@@ -939,8 +936,8 @@ async def submit_input(data: InputData, db: AsyncSession = Depends(get_db)):
         agent_ids.remove("A4")
 
     if agent_ids:
-        titles = [t.strip() for t in data.target_job_titles.split(",") if t.strip()]
-        geographies = [g.strip() for g in data.target_location.split(",") if g.strip()]
+        titles = [t.strip() for t in getattr(data, "target_job_titles", getattr(data, "job_title", "")).split(",") if t.strip()]
+        geographies = [g.strip() for g in getattr(data, "target_location", getattr(data, "location", "")).split(",") if g.strip()]
 
         # Map raw input to Apollo's valid employee range format
         def to_apollo_ranges(size_str: str) -> list:
@@ -957,13 +954,15 @@ async def submit_input(data: InputData, db: AsyncSession = Depends(get_db)):
             except Exception:
                 return ["51,200"]
 
-        employee_ranges = to_apollo_ranges(data.target_company_size) or ["51,200"]
+        employee_ranges = to_apollo_ranges(getattr(data, "target_company_size", getattr(data, "company_size", "51-200"))) or ["51,200"]
 
         keyword_list = []
-        if data.target_keywords:
-           keyword_list.extend([k.strip() for k in data.target_keywords.split(",") if k.strip()])
-        if data.our_services:
-           keyword_list.extend([s.strip() for s in data.our_services.split(",") if s.strip()])
+        target_kw = getattr(data, "target_keywords", getattr(data, "keywords", None))
+        our_serv = getattr(data, "our_services", getattr(data, "services", None))
+        if target_kw:
+           keyword_list.extend([k.strip() for k in target_kw.split(",") if k.strip()])
+        if our_serv:
+           keyword_list.extend([s.strip() for s in our_serv.split(",") if s.strip()])
 
         payload = {
             "icp_config": {
@@ -1108,28 +1107,41 @@ async def preview_draft(draft_id: str, db: AsyncSession = Depends(get_db)):
 async def approve_draft_route(draft_id: str, db: AsyncSession = Depends(get_db)):
     from app.agents.a3_outreach import DraftManager
     draft_manager = DraftManager(db)
-    success = await draft_manager.approve_draft(draft_id)
-    if not success:
-        raise HTTPException(status_code=400, detail="Approval failed or draft not pending")
-    
+    # Fetch draft details
     draft_res = await db.execute(select(OutreachDraft).where(OutreachDraft.id == draft_id))
     draft = draft_res.scalar_one_or_none()
-    if draft:
-        action_res = await db.execute(
-            select(PendingAction)
-            .where(and_(
-                PendingAction.entity_id == draft.contact_id,
-                PendingAction.action_type == "approve_outreach",
-                PendingAction.status == ActionStatus.PENDING
-            ))
-        )
-        action = action_res.scalar_one_or_none()
-        if action:
-            action.status = ActionStatus.APPROVED
-            action.approved_at = datetime.utcnow()
+    if not draft:
+        raise HTTPException(status_code=404, detail="Draft not found")
+        
+    contact_id = draft.contact_id
+    
+    # Perform approval and dispatch
+    res = await draft_manager.approve_draft(draft_id)
+    success = res.get("success", False) if isinstance(res, dict) else bool(res)
+    error_msg = res.get("error") if isinstance(res, dict) else None
+
+    if not success:
+        raise HTTPException(status_code=400, detail=error_msg or "Approval failed or draft not pending")
+    
+    # Find and resolve associated pending actions
+    action_res = await db.execute(
+        select(PendingAction)
+        .where(and_(
+            PendingAction.entity_id == contact_id,
+            PendingAction.action_type == "approve_outreach",
+            PendingAction.status == ActionStatus.PENDING
+        ))
+    )
+    actions = action_res.scalars().all()
+    for action in actions:
+        action.status = ActionStatus.APPROVED
+        action.approved_at = datetime.utcnow()
             
     await db.commit()
-    return {"status": "approved"}
+    return {
+        "status": "approved",
+        "sent": True
+    }
 
 @router.post("/drafts/{draft_id}/reject")
 async def reject_draft_route(draft_id: str, db: AsyncSession = Depends(get_db)):

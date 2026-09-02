@@ -768,7 +768,6 @@ class OutreachAgent:
                 "skip_reasons": {},
                 "reason": "No active session ID resolved"
             }
-
         # Get contacts with qualifying signals if not provided
         if not contact_signal_pairs:
             if settings.AGENT3_TEST_MODE:
@@ -802,6 +801,7 @@ class OutreachAgent:
                 skip_reasons["missing_contact_or_signal"] += 1
                 logger.info("Outreach skipped: missing contact or signal in pair", pair=pair)
                 continue
+
 
             # Enforce strict current-session checks
             if contact.user_input_id != active_session_id:
@@ -845,6 +845,19 @@ class OutreachAgent:
                     contact_id=contact.id,
                     signal_id=signal.id
                 )
+=======
+            # Enforce strict current-session and Signal Score threshold filtering (ignoring ICP score)
+            if active_session_id is not None and contact.user_input_id != active_session_id:
+                skip_reasons["inactive_session"] += 1
+                continue
+
+            if signal and signal.confidence < settings.SIGNAL_SCORE_THRESHOLD / 100:
+                skip_reasons["signal_score_below_threshold"] += 1
+                continue
+
+            # Skip if we already have a pending draft to prevent duplicates
+            if await self.draft_manager.has_pending_draft(contact.id, signal.id if signal else None):
+>>>>>>> origin/main
                 continue
 
             # Fetch steps from SEQUENCE_TEMPLATES
@@ -1035,6 +1048,7 @@ class OutreachAgent:
 
         if active_session_id is None:
             return []
+
         result = await self.db.execute(
             select(Contact, SignalEvent)
             .join(SignalEvent, SignalEvent.contact_id == Contact.id)
@@ -1042,7 +1056,6 @@ class OutreachAgent:
                 and_(
                     Contact.user_input_id == active_session_id,
                     Contact.do_not_contact == False,
-                    Contact.icp_score >= settings.ICP_SCORE_THRESHOLD,
                     SignalEvent.confidence >= settings.SIGNAL_SCORE_THRESHOLD / 100,
                     SignalEvent.processed == False,
                     SignalEvent.detected_at >= datetime.utcnow() - timedelta(days=30),

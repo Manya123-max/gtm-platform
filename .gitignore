@@ -39,5 +39,12 @@ frontend/.vite/
 Thumbs.db
 
 # Celery
-celerybeat-schedule
+celerybeat-schedule*
 celerybeat.pid
+*.db-shm
+*.db-wal
+*.sqlite*
+
+# Local CSV imports
+backend/prospects_export.csv
+prospects_export.csv

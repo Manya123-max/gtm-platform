@@ -1,6 +1,6 @@
 // ── Deals Page ────────────────────────────────────────────────────────────
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
-import { fetchDeals, fetchPipelineSummary, fetchPendingActions, approveAction, dismissAction, fetchForecast, fetchFunnelMetrics, runAgent, pollAgentStatus, runOrchestratorAgent, runOrchestratorWorkflow, fetchWorkflowRun, DEFAULT_PIPELINE_AGENTS, fetchDrafts, fetchContent, fetchAgentSchedules, updateAgentSchedule } from '../api'
+import { fetchDeals, fetchPipelineSummary, fetchPendingActions, approveAction, dismissAction, fetchForecast, fetchFunnelMetrics, runAgent, pollAgentStatus, runOrchestratorAgent, runOrchestratorWorkflow, fetchWorkflowRun, DEFAULT_PIPELINE_AGENTS, fetchDrafts, fetchContent, fetchAgentSchedules, updateAgentSchedule, fetchOutreachDrafts, approveOutreachDraft, rejectOutreachDraft, editOutreachDraft, previewOutreachDraft } from '../api'
 import { BarChart, Bar, XAxis, YAxis, Tooltip, ResponsiveContainer, LineChart, Line, CartesianGrid } from 'recharts'
 import { AlertTriangle, CheckCircle, X, Bot, Play, Loader2, FileText, Clock } from 'lucide-react'
 import { useState, useEffect } from 'react'
@@ -640,42 +640,255 @@ export function Agents() {
 // ── Outreach Page ─────────────────────────────────────────────────────────
 export function Outreach() {
   const { activeSessionId, ourCompanyName } = useSession()
-  const { data: drafts = [] } = useQuery({
-    queryKey: ['drafts', activeSessionId],
-    queryFn: () => fetchDrafts(activeSessionId),
+  const { data: drafts = [], isLoading, refetch } = useQuery({
+    queryKey: ['outreach-drafts'],
+    queryFn: fetchOutreachDrafts,
   })
 
+  const [selectedDraft, setSelectedDraft] = useState(null)
+  const [isEditing, setIsEditing] = useState(false)
+  const [editSubject, setEditSubject] = useState('')
+  const [editBody, setEditBody] = useState('')
+  const [activeTab, setActiveTab] = useState('active') // 'active' or 'history'
+
+  const qc = useQueryClient()
+  
+  const approveMut = useMutation({
+    mutationFn: approveOutreachDraft,
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: ['outreach-drafts'] })
+      setSelectedDraft(null)
+    }
+  })
+  
+  const rejectMut = useMutation({
+    mutationFn: rejectOutreachDraft,
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: ['outreach-drafts'] })
+      setSelectedDraft(null)
+    }
+  })
+  
+  const editMut = useMutation({
+    mutationFn: ({ id, subject, body }) => editOutreachDraft(id, subject, body),
+    onSuccess: (data) => {
+      qc.invalidateQueries({ queryKey: ['outreach-drafts'] })
+      setSelectedDraft(prev => prev ? { ...prev, subject: data.subject, body: data.body } : null)
+      setIsEditing(false)
+    }
+  })
+
+  const handleSelectDraft = (draft) => {
+    setSelectedDraft(draft)
+    setIsEditing(false)
+    setEditSubject(draft.subject)
+    setEditBody(draft.body)
+  }
+
+  const handleSave = () => {
+    editMut.mutate({
+      id: selectedDraft.id,
+      subject: editSubject,
+      body: editBody
+    })
+  }
+
+  // Filter drafts into Active vs Historical
+  const activeDrafts = drafts.filter(d => d.contact?.user_input_id === activeSessionId)
+  const historicalDrafts = drafts.filter(d => d.contact?.user_input_id !== activeSessionId)
+  const displayedDrafts = activeTab === 'active' ? activeDrafts : historicalDrafts
+
   return (
-    <div className="max-w-4xl mx-auto">
-      <div className="mb-6">
-        <h1 className="text-xl font-semibold text-gray-100">
-          Outreach {ourCompanyName ? `for ${ourCompanyName}` : ''}
-        </h1>
-        <p className="text-sm text-gray-500 mt-0.5">A3 generated drafts and sent log</p>
-      </div>
-      <div className="card p-0 overflow-hidden">
-        <div className="px-5 py-4 border-b border-[#1F2937] flex items-center justify-between">
-          <span className="text-sm font-medium text-gray-200">Email Drafts</span>
-          <span className="badge badge-blue">{drafts.length}</span>
+    <div className="max-w-6xl mx-auto">
+      <div className="mb-6 flex justify-between items-center">
+        <div>
+          <h1 className="text-xl font-semibold text-gray-100">
+            Outreach Queue {ourCompanyName ? `for ${ourCompanyName}` : ''}
+          </h1>
+          <p className="text-sm text-gray-500 mt-0.5">Approve, reject, or edit generated email campaigns before they send</p>
         </div>
-        <div className="divide-y divide-[#1F2937]">
-          {drafts.length === 0 ? (
-            <div className="p-10 text-center text-gray-600 text-sm">No drafts yet — run A3</div>
-          ) : drafts.map(d => (
-            <div key={d.id} className="px-5 py-4">
-              <div className="flex items-start justify-between gap-2">
-                <div>
-                  <div className="text-sm font-medium text-gray-200">{d.subject || '(no subject)'}</div>
-                  <div className="text-xs text-gray-500 mt-0.5">{d.body_preview?.slice(0,120)}…</div>
-                </div>
-                <span className="badge badge-amber shrink-0">Draft</span>
+        <button onClick={() => refetch()} className="btn-secondary flex items-center gap-1 text-xs">
+          <Clock size={12} /> Refresh
+        </button>
+      </div>
+
+      <div className="grid grid-cols-1 lg:grid-cols-12 gap-6">
+        {/* Left Column: Draft list */}
+        <div className="lg:col-span-5 card p-0 overflow-hidden flex flex-col max-h-[600px]">
+          {/* Tab Selection */}
+          <div className="flex border-b border-[#1F2937] bg-[#111827]">
+            <button
+              onClick={() => setActiveTab('active')}
+              className={`flex-1 py-3 text-xs font-semibold border-b-2 transition-all cursor-pointer ${
+                activeTab === 'active'
+                  ? 'border-purple-500 text-purple-400 bg-purple-950/10'
+                  : 'border-transparent text-gray-500 hover:text-gray-400 hover:bg-[#374151]/30'
+              }`}
+            >
+              Active Session ({activeDrafts.length})
+            </button>
+            <button
+              onClick={() => setActiveTab('history')}
+              className={`flex-1 py-3 text-xs font-semibold border-b-2 transition-all cursor-pointer ${
+                activeTab === 'history'
+                  ? 'border-purple-500 text-purple-400 bg-purple-950/10'
+                  : 'border-transparent text-gray-500 hover:text-gray-400 hover:bg-[#374151]/30'
+              }`}
+            >
+              History ({historicalDrafts.length})
+            </button>
+          </div>
+          
+          <div className="divide-y divide-[#1F2937] overflow-y-auto flex-1">
+            {isLoading ? (
+              <div className="p-10 text-center text-gray-500 text-sm">Loading drafts...</div>
+            ) : displayedDrafts.length === 0 ? (
+              <div className="p-10 text-center text-gray-500 text-sm">
+                No {activeTab === 'active' ? 'active session' : 'historical'} drafts.
               </div>
-              <div className="text-[10px] text-gray-600 mt-2">
-                Signal: {d.campaign_type} · Variant: {d.prompt_variant_id || '—'} ·{' '}
-                {new Date(d.sent_at).toLocaleDateString()}
+            ) : (
+              displayedDrafts.map(d => {
+                const isSelected = selectedDraft?.id === d.id
+                return (
+                  <div
+                    key={d.id}
+                    onClick={() => handleSelectDraft(d)}
+                    className={`px-5 py-4 cursor-pointer transition-colors ${isSelected ? 'bg-[#F0F5FF]/80' : 'hover:bg-[#F0F5FF]/30'}`}
+                  >
+                    <div className="flex items-start justify-between gap-2">
+                      <div className="font-medium text-gray-800 text-sm">{d.contact?.company || 'Unknown Company'}</div>
+                      <span className={`badge ${d.approval_state === 'pending' ? 'badge-amber' : d.approval_state === 'approved' ? 'badge-green' : 'badge-red'}`}>
+                        {d.approval_state}
+                      </span>
+                    </div>
+                    <div className="text-xs text-gray-500 mt-1 truncate">{d.subject || '(No subject)'}</div>
+                    <div className="flex items-center gap-2 mt-2">
+                      <span className="badge badge-gray text-[9px]">{d.channel}</span>
+                      <span className="badge badge-blue text-[9px]">{d.business_case}</span>
+                    </div>
+                  </div>
+                )
+              })
+            )}
+          </div>
+        </div>
+
+        {/* Right Column: Preview / Edit Pane */}
+        <div className="lg:col-span-7 flex flex-col">
+          {selectedDraft ? (
+            <div className="card flex-1 flex flex-col">
+              <div className="border-b border-[#1F2937] pb-4 mb-4 flex justify-between items-start">
+                <div>
+                  <h3 className="text-lg font-semibold text-gray-800">{selectedDraft.contact?.first_name} {selectedDraft.contact?.last_name}</h3>
+                  <p className="text-xs text-gray-500">{selectedDraft.contact?.title} · {selectedDraft.contact?.email}</p>
+                </div>
+                <div className="flex items-center gap-2">
+                  {selectedDraft.approval_state === 'pending' && !isEditing && (
+                    <>
+                      <button onClick={() => setIsEditing(true)} className="btn-secondary text-xs py-1.5 px-3">
+                        Edit
+                      </button>
+                      <button 
+                        onClick={() => approveMut.mutate(selectedDraft.id)} 
+                        disabled={approveMut.isPending}
+                        className="btn-primary text-xs py-1.5 px-3"
+                      >
+                        {approveMut.isPending ? 'Sending...' : 'Approve & Send'}
+                      </button>
+                      <button 
+                        onClick={() => rejectMut.mutate(selectedDraft.id)} 
+                        disabled={rejectMut.isPending}
+                        className="btn-danger text-xs py-1.5 px-3"
+                      >
+                        Reject
+                      </button>
+                    </>
+                  )}
+                </div>
+              </div>
+
+              {/* Meta details */}
+              <div className="grid grid-cols-2 gap-4 mb-4 bg-[#F5F8FF] p-3 rounded-lg border border-[#BFCFEA]">
+                <div>
+                  <span className="text-[10px] text-gray-500 block uppercase font-medium">Business Case</span>
+                  <span className="text-xs font-semibold text-gray-700">{selectedDraft.business_case}</span>
+                </div>
+                <div>
+                  <span className="text-[10px] text-gray-500 block uppercase font-medium">Matched Services</span>
+                  <span className="text-xs font-semibold text-gray-700">
+                    {selectedDraft.matched_services?.join(', ') || 'None'}
+                  </span>
+                </div>
+                {selectedDraft.signal && (
+                  <div className="col-span-2 border-t border-[#BFCFEA] pt-2 mt-1">
+                    <span className="text-[10px] text-gray-500 block uppercase font-medium">Trigger Signal ({selectedDraft.signal.signal_type})</span>
+                    <span className="text-xs text-gray-700 italic">
+                      {(selectedDraft.signal.raw_data?.roles?.length > 0) 
+                        ? `Hiring for roles: ${selectedDraft.signal.raw_data.roles.join(', ')}`
+                        : (selectedDraft.signal.raw_data?.headline) 
+                        ? `Headline: "${selectedDraft.signal.raw_data.headline}"`
+                        : "Trigger details available"}
+                    </span>
+                  </div>
+                )}
+              </div>
+
+              {/* Form or Read-only message */}
+              <div className="flex-1 flex flex-col gap-3">
+                {isEditing ? (
+                  <div className="flex-1 flex flex-col gap-3">
+                    <div>
+                      <label className="text-xs text-gray-500 font-medium block mb-1">Subject Line</label>
+                      <input
+                        type="text"
+                        className="input"
+                        value={editSubject}
+                        onChange={e => setEditSubject(e.target.value)}
+                      />
+                    </div>
+                    <div className="flex-1 flex flex-col min-h-[250px]">
+                      <label className="text-xs text-gray-500 font-medium block mb-1">Body Text</label>
+                      <textarea
+                        className="input flex-1 font-mono text-xs"
+                        style={{ resize: 'none' }}
+                        value={editBody}
+                        onChange={e => setEditBody(e.target.value)}
+                      />
+                    </div>
+                    <div className="flex justify-end gap-2 pt-2 border-t border-[#1F2937]">
+                      <button onClick={() => setIsEditing(false)} className="btn-secondary text-xs">
+                        Cancel
+                      </button>
+                      <button 
+                        onClick={handleSave} 
+                        disabled={editMut.isPending}
+                        className="btn-primary text-xs"
+                      >
+                        {editMut.isPending ? 'Save Changes' : 'Save Changes'}
+                      </button>
+                    </div>
+                  </div>
+                ) : (
+                  <div className="flex-1 flex flex-col gap-3 bg-[#F5F8FF] border border-[#BFCFEA] rounded-lg p-4 max-h-[400px] overflow-y-auto">
+                    <div>
+                      <div className="text-[10px] text-gray-500 font-medium uppercase block">Subject</div>
+                      <div className="text-sm font-semibold text-gray-800">{selectedDraft.subject}</div>
+                    </div>
+                    <hr className="border-[#BFCFEA] my-1" />
+                    <div className="flex-1 whitespace-pre-wrap text-sm text-gray-700 leading-relaxed font-sans">
+                      {selectedDraft.body}
+                    </div>
+                  </div>
+                )}
               </div>
             </div>
-          ))}
+          ) : (
+            <div className="card flex-1 flex flex-col justify-center items-center text-center p-12 text-gray-500 min-h-[400px]">
+              <FileText size={48} className="text-[#A0BBDF] mb-3" />
+              <h3 className="font-semibold text-gray-800 text-base mb-1">No Draft Selected</h3>
+              <p className="text-xs max-w-xs text-gray-500 font-medium">Select any outreach campaign from the list on the left to preview, edit, or approve it.</p>
+            </div>
+          )}
         </div>
       </div>
     </div>

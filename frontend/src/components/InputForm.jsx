@@ -27,7 +27,7 @@ function InputForm() {
         setSubmitting(true);
         setStatus({ type: '', message: '' });
 
-        // camelCase → snake_case for FastAPI
+        // Convert camelCase form state -> snake_case expected by FastAPI
         const payload = {
             our_company_name:    formData.ourCompanyName,
             our_services:        formData.ourServices,
@@ -51,7 +51,7 @@ function InputForm() {
 
             const data = await response.json();
             console.log('Saved:', data);
-            if (data.user_input_id) {
+            if (data.user_input_id && setActiveSessionId) {
                 setActiveSessionId(data.user_input_id);
             }
             setStatus({ type: 'success', message: 'Details submitted! Redirecting to Agent Control...' });
@@ -81,7 +81,7 @@ function InputForm() {
     return (
         <div className="max-w-xl mx-auto">
             <div className="mb-6">
-                <h1 className="text-xl font-semibold text-gray-100">Input</h1>
+                <h1 className="text-xl font-semibold text-gray-100">Intake Form</h1>
                 <p className="text-sm text-gray-500 mt-0.5">
                     Define your offering and ideal customer profile to feed the GTM pipeline
                 </p>

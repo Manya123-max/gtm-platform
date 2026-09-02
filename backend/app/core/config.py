@@ -46,8 +46,14 @@ class Settings(BaseSettings):
     CELERY_BROKER_URL:      str = "redis://localhost:6379/1"
     CELERY_RESULT_BACKEND:  str = "redis://redis:6379/2"
 
-    # ── LLM (Anthropic / Claude AI subscription) ──────────────────────────
+    # ── LLM providers — fallback chain: Groq → Gemini → Mistral → DeepSeek → Claude ──
     ANTHROPIC_API_KEY: str = ""
+    GROQ_API_KEY:      str = ""
+    GEMINI_API_KEY:    str = ""
+    MISTRAL_API_KEY:   str = ""
+    DEEPSEEK_API_KEY:  str = ""
+    JINA_API_KEY:      str = ""
+    USE_GROQ:          bool = False
     EMBEDDING_MODEL:   str = "hash"   # "hash" = zero deps; "miniLM" = sentence-transformers
 
     # ── Apollo.io (Organization tier) ────────────────────────────────────
@@ -55,12 +61,16 @@ class Settings(BaseSettings):
     # Increase APOLLO_SEARCH_MAX_PAGES from 10 → 25 to take advantage.
     APOLLO_API_KEY:           str = ""
     APOLLO_SEARCH_MAX_PAGES:  int = 25   # ↑ was 10 on free tier
+    APOLLO_ENRICH_LIMIT:      int = 10   # number of prospects to fetch/enrich per run (Task 6)
 
     # ── News / job signals ────────────────────────────────────────────────
-    NEWS_API_KEY:    str = ""
-    ADZUNA_APP_ID:   str = ""
-    ADZUNA_API_KEY:  str = ""
-    APIFY_API_TOKEN: str = ""
+    NEWS_API_KEY:           str = ""
+    ADZUNA_APP_ID:          str = ""
+    ADZUNA_API_KEY:         str = ""
+    APIFY_API_TOKEN:        str = ""
+    PREDICTLEADS_API_KEY:   str = ""
+    PREDICTLEADS_API_TOKEN: str = ""
+    CURRENTS_API_KEY:       str = ""
 
     # ── CRM / calendar / email ────────────────────────────────────────────
     HUBSPOT_ACCESS_TOKEN: str = ""
@@ -105,9 +115,17 @@ class Settings(BaseSettings):
     ENABLE_SLACK_APPROVALS:    bool = False   # ntfy is the default; flip for Slack
     ALLOW_DEMO_PROSPECTS:      bool = False   # production: False
 
+    AGENT3_TEST_MODE: bool = False
+    TEST_MODE_ICP_SCORE_THRESHOLD: int = 60
+
     # ── Scoring thresholds ────────────────────────────────────────────────
     ICP_SCORE_THRESHOLD:                  int  = 70
     SIGNAL_SCORE_THRESHOLD:               int  = 40
+
+    # A3 outreach tuning (previously hardcoded in a3_outreach.py)
+    SONNET_ICP_SCORE_THRESHOLD:           int  = 85    # use Sonnet instead of Haiku above this score
+    OUTREACH_GLOBAL_COOLDOWN_DAYS:        int  = 5     # min days between a contact's FIRST touch on different signals
+    OUTREACH_VARIANT_EXPLORATION_RATE:    float = 0.15 # epsilon-greedy: fraction of sends to a random active variant
     READINESS_SCORE_MEETING_THRESHOLD:    int  = 60
     EMAIL_DEDUP_DAYS:                     int  = 60
     SIGNAL_DEDUP_HOURS:                   int  = 24

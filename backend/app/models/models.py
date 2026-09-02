@@ -543,11 +543,11 @@ class UserInput(Base):
     __tablename__ = "user_inputs"
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
-    our_company_name:    Mapped[str] = mapped_column(String(300), nullable=False, server_default="")
-    our_services:        Mapped[str] = mapped_column(String(300), nullable=False)
+    our_company_name:    Mapped[str] = mapped_column(Text, nullable=False, server_default="")
+    our_services:        Mapped[str] = mapped_column(Text, nullable=False)
     target_location:     Mapped[str] = mapped_column(String(200), nullable=False)
-    target_industries:   Mapped[Optional[str]] = mapped_column(String(300), nullable=True)
+    target_industries:   Mapped[Optional[str]] = mapped_column(Text, nullable=True)
     target_company_size: Mapped[str] = mapped_column(String(50), nullable=False)
     target_keywords:     Mapped[Optional[str]] = mapped_column(Text, nullable=True)
-    target_job_titles:   Mapped[str] = mapped_column(String(200), nullable=False)
+    target_job_titles:   Mapped[str] = mapped_column(Text, nullable=False)
 

@@ -550,4 +550,4 @@ class UserInput(Base):
     target_company_size: Mapped[str] = mapped_column(String(50), nullable=False)
     target_keywords:     Mapped[Optional[str]] = mapped_column(Text, nullable=True)
     target_job_titles:   Mapped[str] = mapped_column(Text, nullable=False)
-
+    created_at:          Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)

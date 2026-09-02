@@ -286,7 +286,6 @@ class InboundAgent:
             from app.services import SlackService
             slack = SlackService()
             await slack.update_to_rejected(thread_event.slack_message_ts, rejected_by)
-
         if thread_event.contact_id:
             await self._log_funnel_event("reply_rejected", thread_event.contact_id, {"rejected_by": rejected_by})
 

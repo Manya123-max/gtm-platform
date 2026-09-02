@@ -984,7 +984,6 @@ async def preview_draft(draft_id: str, db: AsyncSession = Depends(get_db)):
 async def approve_draft_route(draft_id: str, db: AsyncSession = Depends(get_db)):
     from app.agents.draft_manager import DraftManager
     draft_manager = DraftManager(db)
-    
     # Fetch draft details
     draft_res = await db.execute(select(OutreachDraft).where(OutreachDraft.id == draft_id))
     draft = draft_res.scalar_one_or_none()

@@ -147,7 +147,6 @@ class SlackService:
             logger.error("Slack message update rejected failed", error=str(e))
             return False
 
-
     async def send_daily_digest(self, pending_actions: list) -> bool:
         if not settings.SLACK_BOT_TOKEN or not pending_actions:
             return False

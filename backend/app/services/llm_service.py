@@ -1,7 +1,7 @@
 """LLM wrapper used by all agents.
 
 Fallback chain (tried in order, skipped if key not set):
-  1. Groq      (llama-3.3-70b)     — fast & free, hits limits quickly
+  1. Groq      (compound)     — fast & free, hits limits quickly
   2. Gemini    (gemini-1.5-flash)  — Google free tier, generous quota
   3. Mistral   (mistral-small)     — fast OpenAI-compatible, good quality
   4. DeepSeek  (deepseek-chat)     — OpenAI-compatible, cheap & accurate
@@ -124,7 +124,7 @@ def _build_provider_chain(
 
     if settings.GROQ_API_KEY:
         providers.append(("Groq", lambda s, u, t: _call_openai_compat(
-            GROQ_URL, settings.GROQ_API_KEY, "llama-3.1-8b-instant",
+            GROQ_URL, settings.GROQ_API_KEY, "compound",
             s, u, t, force_json=force_json,
         )))
 

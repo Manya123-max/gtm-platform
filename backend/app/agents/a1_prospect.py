@@ -101,7 +101,7 @@ class ProspectAgent:
             }
 
         max_pages = max(1, int(icp_config.get("max_pages", settings.APOLLO_SEARCH_MAX_PAGES)))
-        enrich_limit = int(icp_config.get("enrich_limit", 10))
+        enrich_limit = int(icp_config.get("enrich_limit", getattr(settings, "APOLLO_ENRICH_LIMIT", 25)))
         threshold = icp_config.get("threshold", settings.ICP_SCORE_THRESHOLD)
 
         headers = {
@@ -495,6 +495,7 @@ class ProspectAgent:
     # ------------------------------------------------------------------
     # Save contacts
     # ------------------------------------------------------------------
+
     async def _save_contacts(
         self,
         contacts: List[Dict[str, Any]],

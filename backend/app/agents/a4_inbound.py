@@ -36,22 +36,25 @@ def _clean_json_str(content: str) -> str:
 
 # Readiness score deltas per event type
 READINESS_DELTAS = {
-    "reply_interested": 25,
-    "reply_referral": 20,
-    "reply_question_asked": 20,
-    "reply_not_interested": -20,
+    "reply_interested": 15,
+    "reply_meeting_request": 25,
+    "reply_pricing": 15,
+    "reply_technical_question": 10,
+    "reply_referral": 10,
+    "reply_not_interested": -15,
     "reply_unsubscribe": -100,
+    "reply_unknown": 0,
     "email_opened_3x": 5,
-    "meeting_booked": 90,  # jumps to 90, not delta
     "no_engagement_14d": -15,
 }
 
 REPLY_INTENT_CLASSES = [
     "interested",
-    "not_interested",
-    "out_of_office",
-    "bounce",
+    "meeting_request",
+    "pricing",
+    "technical_question",
     "referral",
+    "not_interested",
     "unsubscribe",
     "unknown",
 ]
@@ -87,33 +90,24 @@ class InboundAgent:
         reply_text = webhook_payload.get("reply_text", "")
         campaign_id = webhook_payload.get("campaign_id", "")
 
-        logger.info("A4 handling reply", email=email)
+        logger.info("A4: Received inbound reply", email=email, reply_text=reply_text[:100])
 
         # Find contact
         contact = await self._find_contact(email)
         if not contact:
-            logger.warning("Contact not found for reply", email=email)
+            logger.warning("A4: Contact not found for reply email", email=email)
             return {"status": "contact_not_found", "email": email}
 
         # Load conversation thread
+        logger.info("A4: Loading conversation history", contact_id=contact.id)
         thread = await self._load_thread(contact.id)
 
         # Classify intent using Claude Haiku (cheap — ~$0.001 per classification)
+        logger.info("A4: Classifying reply intent using Claude Haiku", contact_id=contact.id)
         intent, confidence = await self._classify_intent(reply_text, thread)
-        logger.info("Reply classified", intent=intent, confidence=confidence)
+        logger.info("A4: Reply classified", contact_id=contact.id, intent=intent, confidence=confidence)
 
         # Handle non-interested / suppression types immediately (no human loop needed)
-        if intent == "out_of_office":
-            await self._record_thread_event(contact.id, reply_text, intent, confidence, delta=0)
-            return {"status": "auto_handled", "intent": intent}
-
-        if intent == "bounce":
-            contact.email_valid = False
-            contact.do_not_contact = True
-            await self.db.commit()
-            await self._record_thread_event(contact.id, reply_text, intent, confidence, delta=0)
-            return {"status": "bounced", "email": email}
-
         if intent == "unsubscribe":
             contact.do_not_contact = True
             delta = READINESS_DELTAS["reply_unsubscribe"]
@@ -124,6 +118,7 @@ class InboundAgent:
                 contact.id, reply_text, intent, confidence,
                 delta=delta, score_after=new_score
             )
+            logger.info("A4: Unsubscribe reply auto-suppressed", contact_id=contact.id, email=email, readiness_score=new_score)
             return {"status": "unsubscribed", "email": email, "readiness_score": new_score}
 
         if intent == "not_interested":
@@ -132,24 +127,36 @@ class InboundAgent:
             contact.readiness_score = new_score
             await self.db.commit()
             await self._record_thread_event(contact.id, reply_text, intent, confidence, delta=delta, score_after=new_score)
+            logger.info("A4: Not interested reply auto-suppressed", contact_id=contact.id, email=email, readiness_score=new_score)
             return {"status": "not_interested", "readiness_score": new_score}
 
         if intent == "unknown":
-            await self._record_thread_event(contact.id, reply_text, intent, confidence, delta=0)
+            delta = READINESS_DELTAS["reply_unknown"]
+            new_score = contact.readiness_score or 0
+            await self._record_thread_event(contact.id, reply_text, intent, confidence, delta=delta, score_after=new_score)
+            logger.info("A4: Unknown reply intent, logged for manual review", contact_id=contact.id, email=email)
             return {"status": "unknown_intent", "queued_for_review": True}
 
-        # Handle interested or referral
-        delta = READINESS_DELTAS.get(f"reply_{intent}", 20)
-        if "?" in reply_text:
-            delta = max(delta, READINESS_DELTAS["reply_question_asked"])
-
-        new_score = min(100, (contact.readiness_score or 0) + delta)
+        # Handle interested, meeting_request, pricing, technical_question, referral
+        delta = READINESS_DELTAS.get(f"reply_{intent}", 10)
+        old_score = contact.readiness_score or 0
+        new_score = min(100, old_score + delta)
         contact.readiness_score = new_score
+        logger.info(
+            "A4: Gradual readiness score updated",
+            contact_id=contact.id,
+            intent=intent,
+            old_score=old_score,
+            new_score=new_score,
+            delta=delta
+        )
 
         # Generate draft response
+        logger.info("A4: Generating draft reply via Claude Haiku", contact_id=contact.id, intent=intent)
         draft = await self._generate_draft(contact, reply_text, thread, intent)
 
-        # Record thread event
+        # Record thread event (ConversationThread is the single source of truth)
+        logger.info("A4: Storing event in ConversationThread", contact_id=contact.id)
         thread_event = await self._record_thread_event(
             contact.id, reply_text, intent, confidence,
             delta=delta, score_after=new_score, draft=draft
@@ -165,7 +172,8 @@ class InboundAgent:
         should_request_meeting = new_score >= settings.READINESS_SCORE_MEETING_THRESHOLD
 
         # Notify a human — Slack (interactive) or ntfy (heads-up only)
-        if settings.ENABLE_SLACK_APPROVALS:
+        logger.info("A4: Sending draft response for manual approval", contact_id=contact.id, thread_event_id=thread_event.id)
+        if settings.ENABLE_SLACK_APPROVALS or settings.NOTIFICATION_PROVIDER == "slack":
             slack_ts = await self.slack.send_approval_request(
                 contact=contact,
                 reply_text=reply_text,
@@ -190,6 +198,7 @@ class InboundAgent:
 
         # Schedule fallback task (2-hour timeout) — ALWAYS, regardless of
         # notification provider, so a reply can never sit unanswered forever.
+        logger.info("A4: Scheduling 2-hour fallback timeout task", thread_event_id=thread_event.id)
         from app.core.celery_app import celery_app
         celery_app.send_task(
             "app.workers.agent_tasks.reply_approval_timeout",
@@ -198,6 +207,13 @@ class InboundAgent:
         )
 
         await self.db.commit()
+
+        logger.info(
+            "A4: Reply processing complete. Awaiting manual approval.",
+            contact_id=contact.id,
+            thread_event_id=thread_event.id,
+            readiness_score=new_score
+        )
 
         return {
             "agent": "A4",
@@ -366,13 +382,14 @@ Return exactly this JSON:
 {{"intent": "<class>", "confidence": <0.0-1.0>}}
 
 Intent classes:
-- interested: prospect wants to learn more, asks questions, positive engagement
+- interested: prospect wants to learn more, positive engagement, but hasn't explicitly requested a meeting yet
+- meeting_request: prospect explicitly asks to schedule a meeting, call, or demo
+- pricing: prospect asks about pricing, rates, quotes, or costs
+- technical_question: prospect asks technical questions about integration, stack, or capabilities
+- referral: prospect forwards to someone else or asks to contact another team member
 - not_interested: clearly not interested, wrong time, no fit
-- out_of_office: automated OOO reply, currently unavailable
-- bounce: delivery failure, invalid address
-- referral: forwarding to someone else, not the right contact
 - unsubscribe: prospect wants to opt-out, be removed, unsubscribe, or stop emails
-- unknown: unclear, ambiguous, or non-standard reply"""
+- unknown: unclear, ambiguous, or non-standard reply (e.g. out of office, delivery failure)"""
 
         try:
             result = await self.llm.complete_raw(prompt, use_haiku=True)

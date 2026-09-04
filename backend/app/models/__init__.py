@@ -14,4 +14,6 @@ from .models import (
     RevenueForecast,
     WorkflowRun,
     AgentExecution,
+    OutreachDraft,
+    UserInput,
 )

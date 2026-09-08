@@ -55,6 +55,9 @@ class SignalAgent:
         self.db = db
         self._registry_cache: Optional[Dict[SignalType, float]] = None
         self._predictleads_disabled = False
+        self._apify_disabled = False
+        self._currents_disabled = False
+        self._newsapi_disabled = False
 
     async def run(self, contact_ids: Optional[List[str]] = None) -> Dict[str, Any]:
         logger.info("A2 starting")
@@ -66,8 +69,8 @@ class SignalAgent:
         all_signals: List[Dict[str, Any]] = []
         for contact in contacts:
             all_signals.extend(await self._detect_signals(contact, weights))
-            # Rate limit delay to prevent Adzuna/Currents/NewsAPI 503 gateway timeouts
-            await asyncio.sleep(0.5)
+            # Paced rate limit delay
+            await asyncio.sleep(0.05)
 
         saved = await self._save_signals(all_signals)
         updated = await self._update_contact_signal_scores(all_signals)
@@ -546,12 +549,15 @@ class SignalAgent:
         """Supplementary keyword-matched news via Currents API (higher free-tier
         rate limit than NewsAPI, commercial use allowed). Same matching logic as
         the legacy _check_news so results stay comparable."""
+        if self._currents_disabled:
+            return []
+
         company = self._clean_company_name(contact.company)
         if not settings.CURRENTS_API_KEY or not company:
             return []
 
         try:
-            async with httpx.AsyncClient(timeout=15) as client:
+            async with httpx.AsyncClient(timeout=10) as client:
                 response = await client.get(
                     "https://api.currentsapi.services/v1/search",
                     params={
@@ -563,6 +569,10 @@ class SignalAgent:
                         "Authorization": settings.CURRENTS_API_KEY,
                     },
                 )
+                if response.status_code in (401, 402, 403, 429):
+                    logger.warning("Currents API rate limit or auth error. Disabling Currents for this run.", status=response.status_code)
+                    self._currents_disabled = True
+                    return []
                 response.raise_for_status()
 
             articles = response.json().get("news", [])
@@ -649,12 +659,15 @@ class SignalAgent:
             return []
 
     async def _check_news(self, contact: Contact, weights: Dict[SignalType, float]) -> List[Dict[str, Any]]:
+        if self._newsapi_disabled:
+            return []
+
         company = self._clean_company_name(contact.company)
         if not settings.NEWS_API_KEY or not company:
             return []
 
         try:
-            async with httpx.AsyncClient(timeout=15) as client:
+            async with httpx.AsyncClient(timeout=10) as client:
                 response = await client.get(
                     "https://newsapi.org/v2/everything",
                     params={
@@ -666,6 +679,10 @@ class SignalAgent:
                     },
                     headers={"X-Api-Key": settings.NEWS_API_KEY},
                 )
+                if response.status_code in (401, 402, 403, 429):
+                    logger.warning("NewsAPI rate limit or auth error. Disabling NewsAPI for this run.", status=response.status_code)
+                    self._newsapi_disabled = True
+                    return []
                 response.raise_for_status()
 
             articles = response.json().get("articles", [])
@@ -752,12 +769,15 @@ class SignalAgent:
             return []
 
     async def _check_apify(self, contact: Contact, weights: Dict[SignalType, float]) -> List[Dict[str, Any]]:
+        if self._apify_disabled:
+            return []
+
         company = self._clean_company_name(contact.company)
         if not company or not settings.APIFY_API_TOKEN:
             return []
 
         try:
-            async with httpx.AsyncClient(timeout=30) as client:
+            async with httpx.AsyncClient(timeout=10) as client:
                 # Trigger Apify Reddit Scraper actor searching for company name
                 resp = await client.post(
                     "https://api.apify.com/v2/acts/automation-lab~reddit-scraper/runs",
@@ -767,17 +787,18 @@ class SignalAgent:
                         "searchType": "posts",
                         "maxPosts": 5,
                     },
-                    timeout=15,
+                    timeout=10,
                 )
+                if resp.status_code in (401, 402, 403, 429):
+                    logger.warning("Apify auth or billing error. Disabling Apify for this run.", status=resp.status_code)
+                    self._apify_disabled = True
+                    return []
                 resp.raise_for_status()
                 run_data = resp.json().get("data", {})
                 run_id = run_data.get("id")
                 
                 if not run_id:
                     return []
-                    
-                # Poll for scraper run (simple sleep)
-                await asyncio.sleep(15)
                 
                 result_resp = await client.get(
                     f"https://api.apify.com/v2/acts/automation-lab~reddit-scraper/runs/{run_id}/dataset/items",

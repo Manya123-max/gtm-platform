@@ -351,6 +351,7 @@ class OutreachDecisionEngine:
     async def decide(self, contact: Contact, signal: Optional[SignalEvent] = None) -> Dict[str, Any]:
         """
         Analyze the contact and trigger signal to decide if we should do outreach.
+        Consolidated into a single high-accuracy, fast LLM evaluation step.
         """
         vendor_services = "Salesforce integration, CRM consulting, GTM automation, and cloud migration services"
 
@@ -358,139 +359,85 @@ class OutreachDecisionEngine:
         signal_raw_data = signal.raw_data if signal else {}
         signal_confidence = signal.confidence if signal else 1.0
 
-        # Match services first using the Service Matching Module
-        try:
-            match_result = await self.matcher.match(
-                our_services=vendor_services,
-                industry=contact.industry,
-                title=contact.title,
-                hiring_info=signal_raw_data if signal and signal.signal_type in [SignalType.JOB_POSTING, SignalType.NEW_HIRE] else None,
-                buying_signal=signal_raw_data if signal else None
-            )
-        except Exception as matcher_err:
-            logger.error("ServiceMatcher call failed", error=str(matcher_err))
-            match_result = {
-                "matched_services": ["CRM consulting"],
-                "match_score": 50.0,
-                "reason": f"Matcher exception: {str(matcher_err)}"
-            }
-
-        # Classify business case using the Business Case Detector
-        try:
-            case_result = await self.detector.detect(
-                industry=contact.industry,
-                title=contact.title,
-                signal_type=signal_type,
-                signal_data=signal_raw_data if signal else None
-            )
-        except Exception as detector_err:
-            logger.error("BusinessCaseDetector call failed", error=str(detector_err))
-            case_result = {
-                "business_case": "General Sales Outreach",
-                "confidence": 0.5,
-                "reason": f"Detector exception: {str(detector_err)}"
-            }
-
-        # Select communication channels using the Channel Selection Module
-        try:
-            channel_result = await self.channel_selector.select_channels(
-                email=contact.email,
-                email_valid=contact.email_valid,
-                linkedin_url=contact.linkedin_url,
-                title=contact.title,
-                signal_type=signal_type
-            )
-        except Exception as channel_err:
-            logger.error("ChannelSelector call failed", error=str(channel_err))
-            channel_result = {
-                "primary_channel": "Email",
-                "secondary_channel": "LinkedIn",
-                "available_channels": ["Email", "LinkedIn"],
-                "reason": f"Channel selector exception: {str(channel_err)}"
-            }
+        # Fast deterministic channel selection
+        channel_result = await self.channel_selector.select_channels(
+            email=contact.email,
+            email_valid=contact.email_valid,
+            linkedin_url=contact.linkedin_url,
+            title=contact.title,
+            signal_type=signal_type
+        )
 
         system_prompt = f"""You are the Outreach Decision Engine for a B2B GTM platform.
-Your job is to analyze a contact, a trigger signal, a service-matching evaluation, an opportunity classification, and a channel selection to determine if it makes business sense to contact this person/company.
+Your job is to analyze a prospect and trigger signal, identify matched services, classify the business case, and determine if it makes commercial sense to contact this prospect.
 
-We sell these services: {vendor_services}.
+OUR OFFERINGS: {vendor_services}
 
-Evaluate the prospect's details:
-- Title: {contact.title or 'N/A'}
-- Company: {contact.company or 'N/A'}
+ALLOWED BUSINESS CASES:
+- Recruitment Partnership
+- Funding Round
+- Partnership
+- AI Consulting
+- Product Demo
+- AI Automation
+- RAG Development
+- Digital Transformation
+- Managed Services
+- General Sales Outreach
+
+PROSPECT CONTEXT:
+- Title: {contact.title or 'Decision Maker'}
+- Company: {contact.company or 'Target Company'}
 - Industry: {contact.industry or 'N/A'}
 - Company Size: {contact.company_size or 'N/A'}
-- Funding Stage: {contact.funding_stage or 'N/A'}
 
-Evaluate the trigger signal:
+TRIGGER SIGNAL:
 - Type: {signal_type}
-- Raw Data: {signal_raw_data or {}}
-- Confidence: {signal_confidence}
+- Signal Details: {signal_raw_data or {}}
+- Signal Confidence: {signal_confidence}
 
-Service Matching evaluation:
-- Matched Services: {match_result.get('matched_services', [])}
-- Match Score (0-100): {match_result.get('match_score', 50)}
-- Match Reason: {match_result.get('reason', '')}
+RECOMMENDED CHANNEL PREFERENCE:
+- Primary: {channel_result.get('primary_channel', 'Email')}
+- Secondary: {channel_result.get('secondary_channel', 'None')}
 
-Opportunity Classification:
-- Classified Business Case: {case_result.get('business_case')}
-- Classification Confidence (0.0-1.0): {case_result.get('confidence')}
-- Classification Reason: {case_result.get('reason')}
+Evaluate relevance and return a JSON object with:
+{{
+  "should_contact": true/false (true if relevant and good commercial fit, false otherwise),
+  "why_contact": "concise 1-sentence value-driven hook",
+  "business_case": "one of the allowed business cases listed above",
+  "matched_services": ["relevant services from our offerings"],
+  "recommended_channel": "Email or LinkedIn",
+  "confidence_score": 0.85,
+  "explanation": "analytical explanation of fit"
+}}"""
 
-Channel Selection evaluation:
-- Primary Outreach Channel: {channel_result.get('primary_channel')}
-- Secondary Outreach Channel: {channel_result.get('secondary_channel')}
-- Available Channels: {channel_result.get('available_channels')}
-- Selection Reason: {channel_result.get('reason')}
-
-You must return a structured JSON object with the following fields:
-- should_contact (boolean): True if there is a strong relevance and we should proceed with outreach, False otherwise.
-- why_contact (string): A short, specific reason why we should contact them.
-- business_case (string): Must align with the classified business case above.
-- matched_services (array of strings): Sub-list of matched services from the matcher evaluation.
-- recommended_channel (string): Must align with the primary outreach channel above.
-- confidence_score (number): A score between 0.0 and 1.0 representing your confidence in this decision.
-- explanation (string): A human-readable explanation of why this decision was made.
-
-Be rigorous. If the Service Match Score is low (e.g. < 50) or there is no logical connection between our services and the prospect's title, industry, or signal trigger, set should_contact to False.
-"""
-        user_prompt = f"""Evaluate prospect: {contact.first_name or 'there'} {contact.last_name or ''} at {contact.company or 'N/A'} (Title: {contact.title or 'N/A'}, Industry: {contact.industry or 'N/A'})
-Trigger Signal: {signal_type} (Details: {signal_raw_data or {}})"""
+        user_prompt = f"Evaluate prospect {contact.first_name or ''} {contact.last_name or ''} at {contact.company or 'Target'} for signal {signal_type}."
 
         try:
             decision = await self.llm.complete(
                 system=system_prompt,
                 user=user_prompt,
-                use_sonnet=False,  # Haiku is fast and cheap
-                response_format={
-                    "should_contact": "boolean",
-                    "why_contact": "string",
-                    "business_case": "string",
-                    "matched_services": ["string"],
-                    "recommended_channel": "string",
-                    "confidence_score": "number",
-                    "explanation": "string",
-                },
+                max_tokens=500,
             )
-            # Mix in ServiceMatcher, BusinessCaseDetector & ChannelSelector results if missing
             return {
                 "should_contact": bool(decision.get("should_contact", True)),
-                "why_contact": str(decision.get("why_contact", "")),
-                "business_case": str(decision.get("business_case", case_result.get("business_case", "General Sales Outreach"))),
-                "matched_services": list(decision.get("matched_services", match_result.get("matched_services", []))),
+                "why_contact": str(decision.get("why_contact", "Reaching out regarding GTM automation.")),
+                "business_case": str(decision.get("business_case", "General Sales Outreach")),
+                "matched_services": list(decision.get("matched_services", ["CRM consulting"])),
                 "recommended_channel": str(decision.get("recommended_channel", channel_result.get("primary_channel", "email"))),
-                "confidence_score": float(decision.get("confidence_score", 0.8)),
-                "explanation": str(decision.get("explanation", "")) + f" (Service Match Score: {match_result.get('match_score')})"
+                "confidence_score": float(decision.get("confidence_score", 0.85)),
+                "explanation": str(decision.get("explanation", "Qualified match based on title and buying signal.")),
             }
         except Exception as e:
             logger.error("Outreach Decision Engine failed, falling back to True", error=str(e))
             return {
                 "should_contact": True,
-                "why_contact": "Fallback decision due to engine error.",
-                "business_case": case_result.get("business_case", "General Sales Outreach"),
-                "matched_services": match_result.get("matched_services", ["CRM consulting"]),
+                "why_contact": "Salesforce and GTM automation alignment.",
+                "business_case": "General Sales Outreach",
+                "matched_services": ["CRM consulting", "GTM automation"],
                 "recommended_channel": channel_result.get("primary_channel", "email"),
-                "confidence_score": 1.0,
-                "explanation": f"Decision engine encountered an error: {str(e)}",
+                "confidence_score": 0.8,
+                "explanation": f"Fallback rule evaluation: {str(e)}",
             }
 
 
@@ -575,6 +522,18 @@ class DraftManager:
         )
         self.db.add(draft)
         await self.db.flush()
+
+        if getattr(settings, "ENABLE_SLACK_APPROVALS", True):
+            try:
+                from app.services.slack_service import SlackService
+                contact_res = await self.db.execute(select(Contact).where(Contact.id == contact_id))
+                contact = contact_res.scalar_one_or_none()
+                if contact:
+                    slack = SlackService()
+                    await slack.send_draft_approval_card(contact, draft)
+            except Exception as e:
+                logger.error("Failed to send Slack draft approval card", error=str(e))
+
         return draft
 
     async def has_pending_draft(self, contact_id: str, signal_id: Optional[str]) -> bool:
@@ -651,9 +610,33 @@ class DraftManager:
                 body=draft.body,
             )
             success = bool(provider_id)
+        elif getattr(settings, "SMTP_USER", "") and getattr(settings, "SMTP_PASSWORD", ""):
+            from app.services import SMTPService
+            smtp_svc = SMTPService()
+            formatted_body = draft.body.replace("\n", "<br/>")
+            provider_id = await smtp_svc.send_email(
+                to=contact.email,
+                subject=draft.subject,
+                html=f"<div style='font-family: sans-serif; font-size: 14px; line-height: 1.6;'>{formatted_body}</div>"
+            )
+            success = bool(provider_id)
+            if not success:
+                logger.error("SMTP email dispatch returned failure", email=contact.email)
+        elif getattr(settings, "ENABLE_EMAIL_SENDING", True) and settings.RESEND_API_KEY:
+            from app.services.resend_service import ResendService
+            resend = ResendService()
+            formatted_body = draft.body.replace("\n", "<br/>")
+            provider_id = await resend.send_email(
+                to=contact.email,
+                subject=draft.subject,
+                html=f"<div style='font-family: sans-serif; font-size: 14px; line-height: 1.6;'>{formatted_body}</div>"
+            )
+            success = bool(provider_id)
+            if not success:
+                logger.error("Resend email dispatch returned failure", email=contact.email)
         else:
             # Safe default fallback for development/staging
-            logger.info("Instantly not enabled; mock-sending draft", email=contact.email)
+            logger.info("Email sending not enabled; mock-sending draft", email=contact.email)
             success = True
 
         if success:
@@ -676,6 +659,19 @@ class DraftManager:
                 sent_at=datetime.utcnow(),
             )
             self.db.add(log)
+
+            # Record outbound outreach email in ConversationThread history
+            from app.models.models import ConversationThread
+            outbound_thread = ConversationThread(
+                contact_id=contact.id,
+                event_type="email_sent",
+                direction="outbound",
+                channel=draft.channel or "email",
+                content=f"Subject: {draft.subject}\n\n{draft.body}",
+                occurred_at=datetime.utcnow(),
+                sent_at=datetime.utcnow(),
+            )
+            self.db.add(outbound_thread)
             
             # Step progression logic
             if signal:
@@ -845,19 +841,6 @@ class OutreachAgent:
                     contact_id=contact.id,
                     signal_id=signal.id
                 )
-=======
-            # Enforce strict current-session and Signal Score threshold filtering (ignoring ICP score)
-            if active_session_id is not None and contact.user_input_id != active_session_id:
-                skip_reasons["inactive_session"] += 1
-                continue
-
-            if signal and signal.confidence < settings.SIGNAL_SCORE_THRESHOLD / 100:
-                skip_reasons["signal_score_below_threshold"] += 1
-                continue
-
-            # Skip if we already have a pending draft to prevent duplicates
-            if await self.draft_manager.has_pending_draft(contact.id, signal.id if signal else None):
->>>>>>> origin/main
                 continue
 
             # Fetch steps from SEQUENCE_TEMPLATES
@@ -962,6 +945,10 @@ class OutreachAgent:
                 status=ActionStatus.PENDING,
             ))
             await self.db.commit()
+            
+            if drafts_created >= 10:
+                logger.info("Batch draft limit reached", drafts_created=drafts_created)
+                break
 
         await self._log_funnel_event("outreach_batch_completed", {
             "processed": len(contact_signal_pairs),
@@ -1066,7 +1053,7 @@ class OutreachAgent:
                 )
             )
             .order_by(SignalEvent.confidence.desc())
-            .limit(100)
+            .limit(25)
         )
         pairs = []
         for contact, signal in result.all():

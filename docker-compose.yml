@@ -116,8 +116,8 @@ services:
         condition: service_healthy
     volumes:
       - ./backend:/app
-    # concurrency=2 saves RAM vs default 4
-    command: celery -A app.core.celery_app worker --pool=solo --loglevel=info -Q default,agents,webhooks
+    # threads pool with concurrency=8 allows parallel agent runs and webhooks without queue starvation
+    command: celery -A app.core.celery_app worker --pool=threads -c 8 --loglevel=info -Q default,agents,webhooks
     mem_limit: 512m
 
   # ── Celery Beat ───────────────────────────────────────────────────────

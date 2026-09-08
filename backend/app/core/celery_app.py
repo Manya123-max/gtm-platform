@@ -59,5 +59,9 @@ celery_app.conf.update(
             "task": "app.workers.scheduler_tasks.dispatch_agent_schedules",
             "schedule": crontab(minute="*"),
         },
+        "poll-gmail-inbox-every-minute": {
+            "task": "app.workers.scheduler_tasks.poll_gmail_inbox",
+            "schedule": crontab(minute="*"),
+        },
     },
 )

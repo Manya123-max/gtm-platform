@@ -91,6 +91,7 @@ async def submit_input(data: InputData):
         await db.refresh(record)
  
     return {"message": "Input received", "id": record.id}
+
 # ── Webhook Routes ────────────────────────────────────────────────────────
  
 @app.post("/webhook/inbound-reply")
@@ -180,12 +181,11 @@ async def slack_actions(request: Request, background_tasks: BackgroundTasks):
     from urllib.parse import parse_qs
     parsed = parse_qs(body.decode())
     payload = json.loads(parsed.get("payload", ["{}"])[0])
- 
+
     payload_type = payload.get("type")
     user = payload.get("user", {}).get("email") or payload.get("user", {}).get("username") or payload.get("user", {}).get("id", "unknown")
- 
     # Modal submission (rep clicked "Save & Send" in the edit modal)
-    if payload.get("type") == "view_submission":
+    if payload_type == "view_submission":
         view = payload.get("view", {})
         if view.get("callback_id") == "edit_reply_modal":
             thread_event_id = view.get("private_metadata", "")
@@ -245,34 +245,33 @@ async def _handle_unsubscribe(email: str):
 async def _approve_reply(thread_event_id: str, approved_by: str, custom_content: Optional[str] = None):
     from app.core.database import AsyncSessionLocal
     from app.agents.a4_inbound import InboundAgent
- 
+
     async with AsyncSessionLocal() as db:
         agent = InboundAgent(db)
         await agent.approve_reply(thread_event_id, approved_by, custom_content)
- 
- 
+
 async def _open_edit_modal(trigger_id: str, thread_event_id: str):
     from app.core.database import AsyncSessionLocal
     from app.models.models import ConversationThread
     from app.services import SlackService
     from sqlalchemy import select
- 
+
     async with AsyncSessionLocal() as db:
         result = await db.execute(select(ConversationThread).where(ConversationThread.id == thread_event_id))
         thread_event = result.scalar_one_or_none()
         current_draft = thread_event.draft_content if thread_event else ""
- 
+
     slack = SlackService()
     await slack.open_edit_modal(trigger_id, thread_event_id, current_draft)
- 
- 
-async def _reject_reply(thread_event_id: str, rejected_by: str):
+
+
+async def _save_edited_reply(thread_event_id: str, edited_text: str, approved_by: str):
     from app.core.database import AsyncSessionLocal
     from app.agents.a4_inbound import InboundAgent
- 
+
     async with AsyncSessionLocal() as db:
         agent = InboundAgent(db)
-        await agent.reject_reply(thread_event_id, rejected_by)
+        await agent.approve_reply(thread_event_id, approved_by, edited_text)
  
  
 async def _approve_crm_action(action_id: str, approved_by: str):

@@ -61,6 +61,7 @@ class Settings(BaseSettings):
     # Increase APOLLO_SEARCH_MAX_PAGES from 10 → 25 to take advantage.
     APOLLO_API_KEY:           str = ""
     APOLLO_SEARCH_MAX_PAGES:  int = 25   # ↑ was 10 on free tier
+    APOLLO_ENRICH_LIMIT:      int = 10   # number of prospects to fetch/enrich per run (Task 6)
 
     # ── News / job signals ────────────────────────────────────────────────
     NEWS_API_KEY:           str = ""
@@ -136,6 +137,11 @@ class Settings(BaseSettings):
     SIGNAL_AGENT_SCHEDULE:   str = "0 * * * *"
     CONTENT_AGENT_SCHEDULE:  str = "0 9 * * 2"
     REVENUE_AGENT_SCHEDULE:  str = "0 2 * * *"
+
+    # ── Content Agent Settings ────────────────────────────────────────────
+    A6_CONTENT_FORMATS:      str = "linkedin_post,email_sequence,case_study,blog_article,sales_deck_outline"
+    A6_MAX_BRIEFS:           int = 3
+
 
 
 @lru_cache()

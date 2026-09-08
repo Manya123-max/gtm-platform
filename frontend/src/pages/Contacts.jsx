@@ -3,7 +3,7 @@ import { useQuery } from '@tanstack/react-query'
 import { fetchContacts } from '../api'
 import { useState } from 'react'
 import { useNavigate } from 'react-router-dom'
-import { Search, ArrowUpDown, Sparkles, ArrowDown, ArrowUp } from 'lucide-react'
+import { Search, ArrowUpDown, Sparkles, ArrowDown, ArrowUp, Link } from 'lucide-react'
 import { useSession } from '../context/SessionContext'
 
 function ScorePill({ score }) {
@@ -95,9 +95,9 @@ export default function Contacts() {
             <option value="80">Score ≥ 80</option>
           </select>
           <div className="relative">
-            <select 
-              className="input pl-8 w-40 appearance-none bg-[#1F2937] hover:bg-[#374151] border border-[#374151] text-xs text-gray-400 cursor-pointer pr-8" 
-              value={sortBy} 
+            <select
+              className="input pl-8 w-40 appearance-none bg-[#1F2937] hover:bg-[#374151] border border-[#374151] text-xs text-gray-400 cursor-pointer pr-8"
+              value={sortBy}
               onChange={e => setSortBy(e.target.value)}
             >
               <option value="newest">Sort: Newest</option>
@@ -147,7 +147,21 @@ export default function Contacts() {
                           </span>
                         )}
                       </div>
-                      <div className="text-xs text-gray-500">{c.email}</div>
+                      <div className="text-xs text-gray-500 flex items-center gap-1.5">
+                        {c.email}
+                        {c.linkedin_url && (
+                          <a 
+                            href={c.linkedin_url} 
+                            target="_blank" 
+                            rel="noopener noreferrer" 
+                            onClick={(e) => e.stopPropagation()}
+                            className="text-blue-400 hover:text-blue-300 transition-colors inline-flex items-center"
+                            title="View LinkedIn Profile"
+                          >
+                            <Link size={10} />
+                          </a>
+                        )}
+                      </div>
                       {c.title && <div className="text-xs text-gray-600 mt-0.5">{c.title}</div>}
                     </div>
                   </div>
@@ -193,8 +207,8 @@ export default function Contacts() {
                   {c.do_not_contact
                     ? <span className="badge badge-red">DNC</span>
                     : c.email_valid === false
-                    ? <span className="badge badge-amber">Invalid</span>
-                    : <span className="badge badge-green">Active</span>}
+                      ? <span className="badge badge-amber">Invalid</span>
+                      : <span className="badge badge-green">Active</span>}
                 </td>
               </tr>
             ))}

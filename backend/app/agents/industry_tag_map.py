@@ -79,21 +79,8 @@ INDUSTRY_TAG_MAP: dict[str, str] = {
 
 def resolve_industries(industry_str: str) -> Tuple[List[str], List[str]]:
     """
-    Resolve a comma-separated industry string into Apollo tag IDs + keyword fallback.
-
-    Returns:
-        (tag_ids, keyword_fallback)
-        - tag_ids:          List of Apollo organization_industry_tag_ids for matched terms.
-                            Empty list if no matches or industry_str is blank.
-        - keyword_fallback: List of unmatched terms to fold into q_organization_keyword_tags
-                            instead of being silently dropped.
-
-    Examples:
-        resolve_industries("SaaS, Fintech, quantum")
-        → (["<saas_id>", "<fintech_id>"], ["quantum"])
-
-        resolve_industries("")
-        → ([], [])    # no filter applied at all
+    Resolve a comma-separated industry string into keyword fallback terms for Apollo search.
+    Using keyword tags ensures reliable matching without relying on hardcoded internal UI tag IDs.
     """
     if not industry_str or not industry_str.strip():
         return [], []
@@ -102,13 +89,13 @@ def resolve_industries(industry_str: str) -> Tuple[List[str], List[str]]:
     fallback_keywords: List[str] = []
 
     for term in industry_str.split(","):
-        normalized = term.strip().lower()
-        if not normalized:
+        clean_term = term.strip()
+        if not clean_term:
             continue
-        if normalized in INDUSTRY_TAG_MAP:
+        normalized = clean_term.lower()
+        if normalized in INDUSTRY_TAG_MAP and not INDUSTRY_TAG_MAP[normalized].startswith("5567cd"):
             tag_ids.append(INDUSTRY_TAG_MAP[normalized])
         else:
-            # Don't drop silently — fold into keyword search
-            fallback_keywords.append(normalized)
+            fallback_keywords.append(clean_term)
 
     return tag_ids, fallback_keywords

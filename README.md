@@ -63,10 +63,7 @@ Services started:
 ```bash
 docker compose exec backend alembic upgrade head
 ```
-6. (Optional) Seed demo data
-```bash
-docker compose exec backend python scripts/seed.py
-```
+
 7. Open the platform
 ```
 http://localhost:3000

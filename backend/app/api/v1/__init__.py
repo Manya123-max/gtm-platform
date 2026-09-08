@@ -7,7 +7,7 @@ from uuid import UUID
 
 from fastapi import APIRouter, Depends, HTTPException, Query, BackgroundTasks
 from sqlalchemy.ext.asyncio import AsyncSession
-from sqlalchemy import select, and_, func, desc
+from sqlalchemy import select, and_, func, desc, asc
 from pydantic import BaseModel
 
 from app.core.config import settings
@@ -17,7 +17,7 @@ from app.models.models import (
     Contact, SignalEvent, OutreachLog, ConversationThread,
     Deal, FunnelEvent, GeneratedContent, RevenueForecast,
     PendingAction, ActionStatus, SignalConversionRegistry,
-    PromptVariant, WorkflowRun, AgentSchedule
+    PromptVariant, WorkflowRun, AgentSchedule, OutreachDraft
 )
 
 router = APIRouter()
@@ -33,6 +33,7 @@ class ContactOut(BaseModel):
     title: Optional[str] = None
     company: Optional[str] = None
     industry: Optional[str] = None
+    linkedin_url: Optional[str] = None
     icp_score: Optional[float] = None
     signal_score: Optional[float] = None
     readiness_score: float = 0.0
@@ -53,6 +54,13 @@ class DealOut(BaseModel):
     risk_score: float = 0.0
     days_in_current_stage: int = 0
     risk_flags: Optional[list] = None
+    objections: Optional[List[dict]] = None
+    deal_health_score: Optional[float] = None
+    win_probability: Optional[float] = None
+    buying_intent: Optional[str] = None
+    next_best_action: Optional[str] = None
+    stage_confidence: Optional[float] = None
+    contact_id: Optional[str] = None
     budget_confirmed: Optional[bool] = None
     authority_confirmed: Optional[bool] = None
     need_confirmed: Optional[bool] = None
@@ -217,6 +225,7 @@ async def list_contacts(
     has_signal: Optional[bool] = None,
     do_not_contact: Optional[bool] = False,
     sort_by: str = "newest",
+    sort_order: str = "desc",
     user_input_id: Optional[int] = None,
     db: AsyncSession = Depends(get_db),
 ):
@@ -227,10 +236,13 @@ async def list_contacts(
         q = q.where(Contact.icp_score >= min_score)
     if has_signal:
         q = q.where(Contact.signal_score.isnot(None))
+    order_func = desc if sort_order == "desc" else asc
     if sort_by == "score":
-        q = q.order_by(desc(Contact.icp_score), desc(Contact.created_at))
+        q = q.order_by(order_func(Contact.icp_score), desc(Contact.created_at))
+    elif sort_by == "signal_score":
+        q = q.order_by(order_func(Contact.signal_score), desc(Contact.created_at))
     else:
-        q = q.order_by(desc(Contact.created_at), desc(Contact.icp_score))
+        q = q.order_by(order_func(Contact.created_at), desc(Contact.icp_score))
     q = q.offset(skip).limit(limit)
     result = await db.execute(q)
     return result.scalars().all()
@@ -272,9 +284,12 @@ async def get_contact_signals(contact_id: UUID, db: AsyncSession = Depends(get_d
 async def list_deals(
     stage: Optional[str] = None, min_risk: Optional[float] = None,
     user_input_id: Optional[int] = None,
+    contact_id: Optional[UUID] = None,
     db: AsyncSession = Depends(get_db),
 ):
     q = select(Deal).where(Deal.outcome.is_(None))
+    if contact_id is not None:
+        q = q.where(Deal.contact_id == contact_id)
     if user_input_id is not None:
         contact_ids_q = select(Contact.id).where(Contact.user_input_id == user_input_id)
         q = q.where(Deal.contact_id.in_(contact_ids_q))
@@ -313,12 +328,76 @@ async def get_pipeline_summary(
 # ── Pending Actions ────────────────────────────────────────────────────────
 
 @router.get("/pending-actions")
-async def list_pending_actions(db: AsyncSession = Depends(get_db)):
-    result = await db.execute(
-        select(PendingAction).where(PendingAction.status == ActionStatus.PENDING)
-        .order_by(desc(PendingAction.created_at)).limit(50)
-    )
-    return result.scalars().all()
+async def list_pending_actions(
+    status: Optional[str] = "pending",
+    agent_id: Optional[str] = None,
+    entity_type: Optional[str] = None,
+    limit: int = 50,
+    db: AsyncSession = Depends(get_db)
+):
+    q = select(PendingAction)
+    if status == "pending":
+        q = q.where(PendingAction.status == ActionStatus.PENDING)
+    elif status == "history":
+        q = q.where(PendingAction.status.in_([ActionStatus.APPROVED, ActionStatus.DISMISSED, ActionStatus.EXPIRED]))
+    elif status and status != "all":
+        q = q.where(PendingAction.status == status)
+
+    if agent_id:
+        q = q.where(PendingAction.agent_id == agent_id)
+    if entity_type:
+        q = q.where(PendingAction.entity_type == entity_type)
+
+    q = q.order_by(desc(PendingAction.created_at)).limit(limit)
+    result = await db.execute(q)
+    actions = result.scalars().all()
+
+    enriched = []
+    for a in actions:
+        item = {
+            "id": a.id,
+            "action_type": a.action_type,
+            "entity_type": a.entity_type,
+            "entity_id": a.entity_id,
+            "recommended_value": a.recommended_value,
+            "current_value": a.current_value,
+            "reason": a.reason,
+            "agent_id": a.agent_id,
+            "status": a.status,
+            "created_at": a.created_at.isoformat() if a.created_at else None,
+            "approved_at": a.approved_at.isoformat() if a.approved_at else None,
+            "approved_by": a.approved_by,
+            "deal_name": None,
+            "company": None,
+            "contact_name": None,
+            "contact_id": None,
+            "deal_id": None,
+        }
+
+        if a.entity_type == "deal":
+            deal_res = await db.execute(select(Deal).where(Deal.id == a.entity_id))
+            deal = deal_res.scalar_one_or_none()
+            if deal:
+                item["deal_id"] = deal.id
+                item["deal_name"] = deal.name
+                if deal.contact_id:
+                    contact_res = await db.execute(select(Contact).where(Contact.id == deal.contact_id))
+                    contact = contact_res.scalar_one_or_none()
+                    if contact:
+                        item["contact_id"] = contact.id
+                        item["company"] = contact.company
+                        item["contact_name"] = f"{contact.first_name or ''} {contact.last_name or ''}".strip()
+        elif a.entity_type == "contact":
+            contact_res = await db.execute(select(Contact).where(Contact.id == a.entity_id))
+            contact = contact_res.scalar_one_or_none()
+            if contact:
+                item["contact_id"] = contact.id
+                item["company"] = contact.company
+                item["contact_name"] = f"{contact.first_name or ''} {contact.last_name or ''}".strip()
+
+        enriched.append(item)
+
+    return enriched
 
 
 @router.post("/pending-actions/{action_id}/approve")
@@ -331,6 +410,12 @@ async def approve_action(
     action.status = ActionStatus.APPROVED
     action.approved_by = body.approved_by
     action.approved_at = datetime.utcnow()
+    
+    if action.action_type == "approve_outreach":
+        from app.agents.a3_outreach import DraftManager
+        draft_manager = DraftManager(db)
+        await draft_manager.approve_pending_draft(action.entity_id)
+
     await db.commit()
     return {"status": "approved"}
 
@@ -342,6 +427,7 @@ async def dismiss_action(action_id: str, db: AsyncSession = Depends(get_db)):
     if not action:
         raise HTTPException(status_code=404)
     action.status = ActionStatus.DISMISSED
+    action.approved_at = datetime.utcnow()  # timestamp of resolution/dismissal
     await db.commit()
     return {"status": "dismissed"}
 
@@ -384,11 +470,51 @@ async def list_content(
     if icp_segment:
         q = q.where(GeneratedContent.icp_segment == icp_segment)
     elif user_input_id is not None:
-        # Filter by icp_segment matching company_name of that input
+        from app.models.models import Contact, UserInput
+        from sqlalchemy import or_
+        
+        # 1. Fetch UserInput to get target industries
         ui_result = await db.execute(select(UserInput).where(UserInput.id == user_input_id))
         ui = ui_result.scalar_one_or_none()
-        if ui:
-            q = q.where(GeneratedContent.icp_segment.ilike(f"%{ui.company_name}%"))
+        industries = set()
+        if ui and ui.target_industries:
+            # target_industries is a comma-separated string, e.g. "SaaS, Healthcare"
+            for ind in ui.target_industries.split(","):
+                val = ind.strip()
+                if val:
+                    industries.add(val.lower())
+                    
+        # 2. Fetch distinct industries from active contacts associated with this user_input_id
+        contact_res = await db.execute(
+            select(Contact.industry)
+            .where(
+                and_(
+                    Contact.user_input_id == user_input_id,
+                    Contact.industry.isnot(None),
+                    Contact.industry != ""
+                )
+            )
+            .distinct()
+        )
+        for row in contact_res.all():
+            val = row[0].strip()
+            if val:
+                industries.add(val.lower())
+                
+        # 3. Apply matching filter if any industries are found, otherwise fallback to SaaS/B2B technology
+        if not industries:
+            industries = {"saas", "b2b technology", "b2b saas"}
+            
+        conditions = []
+        for ind in industries:
+            conditions.append(GeneratedContent.icp_segment.ilike(f"%{ind}%"))
+            # Also handle reverse / sub-word matching for compound industry names (e.g. "financial services" matches "finance")
+            if len(ind) > 3:
+                for sub in ind.replace("/", " ").replace("&", " ").split():
+                    if len(sub) > 4:
+                        conditions.append(GeneratedContent.icp_segment.ilike(f"%{sub}%"))
+                        
+        q = q.where(or_(*conditions))
     q = q.order_by(desc(GeneratedContent.created_at)).limit(limit)
     result = await db.execute(q)
     return result.scalars().all()
@@ -809,10 +935,9 @@ async def submit_input(data: InputData, db: AsyncSession = Depends(get_db)):
     if "A4" in agent_ids:
         agent_ids.remove("A4")
 
-    workflow = None  # initialise so workflow_id_str is safe even if agent_ids is empty
     if agent_ids:
-        titles = [t.strip() for t in data.target_job_titles.split(",") if t.strip()]
-        geographies = [g.strip() for g in data.target_location.split(",") if g.strip()]
+        titles = [t.strip() for t in getattr(data, "target_job_titles", getattr(data, "job_title", "")).split(",") if t.strip()]
+        geographies = [g.strip() for g in getattr(data, "target_location", getattr(data, "location", "")).split(",") if g.strip()]
 
         # Map raw input to Apollo's valid employee range format
         def to_apollo_ranges(size_str: str) -> list:
@@ -829,13 +954,15 @@ async def submit_input(data: InputData, db: AsyncSession = Depends(get_db)):
             except Exception:
                 return ["51,200"]
 
-        employee_ranges = to_apollo_ranges(data.target_company_size) or ["51,200"]
+        employee_ranges = to_apollo_ranges(getattr(data, "target_company_size", getattr(data, "company_size", "51-200"))) or ["51,200"]
 
         keyword_list = []
-        if data.target_keywords:
-           keyword_list.extend([k.strip() for k in data.target_keywords.split(",") if k.strip()])
-        if data.our_services:
-           keyword_list.extend([s.strip() for s in data.our_services.split(",") if s.strip()])
+        target_kw = getattr(data, "target_keywords", getattr(data, "keywords", None))
+        our_serv = getattr(data, "our_services", getattr(data, "services", None))
+        if target_kw:
+           keyword_list.extend([k.strip() for k in target_kw.split(",") if k.strip()])
+        if our_serv:
+           keyword_list.extend([s.strip() for s in our_serv.split(",") if s.strip()])
 
         payload = {
             "icp_config": {
@@ -880,4 +1007,269 @@ async def submit_input(data: InputData, db: AsyncSession = Depends(get_db)):
         "message": "Input saved and GTM pipeline triggered successfully",
         "workflow_run_id": workflow_id_str,
         "user_input_id": record.id,
+    }
+
+
+# ── Draft Manager Endpoints ───────────────────────────────────────────────
+
+class EditDraftRequest(BaseModel):
+    subject: str
+    body: str
+
+@router.get("/drafts")
+async def get_drafts(
+    user_input_id: Optional[int] = None,
+    db: AsyncSession = Depends(get_db)
+):
+    q = select(OutreachDraft)
+    if user_input_id is not None:
+        q = q.join(Contact).where(Contact.user_input_id == user_input_id)
+    result = await db.execute(
+        q.order_by(OutreachDraft.created_at.desc())
+    )
+    drafts = result.scalars().all()
+    
+    serialized = []
+    for d in drafts:
+        contact_res = await db.execute(select(Contact).where(Contact.id == d.contact_id))
+        contact = contact_res.scalar_one_or_none()
+        signal_res = await db.execute(select(SignalEvent).where(SignalEvent.id == d.signal_id))
+        signal = signal_res.scalar_one_or_none()
+        
+        serialized.append({
+            "id": d.id,
+            "contact_id": d.contact_id,
+            "signal_id": d.signal_id,
+            "subject": d.subject,
+            "body": d.body,
+            "business_case": d.business_case,
+            "matched_services": d.matched_services,
+            "channel": d.channel,
+            "status": d.status,
+            "approval_state": d.approval_state,
+            "created_at": d.created_at.isoformat() if d.created_at else None,
+            "contact": {
+                "first_name": contact.first_name if contact else "",
+                "last_name": contact.last_name if contact else "",
+                "email": contact.email if contact else "",
+                "company": contact.company if contact else "",
+                "title": contact.title if contact else "",
+                "user_input_id": contact.user_input_id if contact else None
+            } if contact else None,
+            "signal": {
+                "signal_type": signal.signal_type if signal else "",
+                "confidence": signal.confidence if signal else 0.0,
+                "raw_data": signal.raw_data if signal else {}
+            } if signal else None
+        })
+    return serialized
+
+@router.get("/drafts/{draft_id}/preview")
+async def preview_draft(draft_id: str, db: AsyncSession = Depends(get_db)):
+    result = await db.execute(select(OutreachDraft).where(OutreachDraft.id == draft_id))
+    d = result.scalar_one_or_none()
+    if not d:
+        raise HTTPException(status_code=404, detail="Draft not found")
+        
+    contact_res = await db.execute(select(Contact).where(Contact.id == d.contact_id))
+    contact = contact_res.scalar_one_or_none()
+    signal_res = await db.execute(select(SignalEvent).where(SignalEvent.id == d.signal_id))
+    signal = signal_res.scalar_one_or_none()
+    
+    return {
+        "id": d.id,
+        "contact_id": d.contact_id,
+        "signal_id": d.signal_id,
+        "subject": d.subject,
+        "body": d.body,
+        "business_case": d.business_case,
+        "matched_services": d.matched_services,
+        "channel": d.channel,
+        "status": d.status,
+        "approval_state": d.approval_state,
+        "created_at": d.created_at.isoformat() if d.created_at else None,
+        "contact": {
+            "first_name": contact.first_name if contact else "",
+            "last_name": contact.last_name if contact else "",
+            "email": contact.email if contact else "",
+            "company": contact.company if contact else "",
+            "title": contact.title if contact else "",
+            "user_input_id": contact.user_input_id if contact else None
+        } if contact else None,
+        "signal": {
+            "signal_type": signal.signal_type if signal else "",
+            "confidence": signal.confidence if signal else 0.0,
+            "raw_data": signal.raw_data if signal else {}
+        } if signal else None
+    }
+
+@router.post("/drafts/{draft_id}/approve")
+async def approve_draft_route(draft_id: str, db: AsyncSession = Depends(get_db)):
+    from app.agents.a3_outreach import DraftManager
+    draft_manager = DraftManager(db)
+    # Fetch draft details
+    draft_res = await db.execute(select(OutreachDraft).where(OutreachDraft.id == draft_id))
+    draft = draft_res.scalar_one_or_none()
+    if not draft:
+        raise HTTPException(status_code=404, detail="Draft not found")
+        
+    contact_id = draft.contact_id
+    
+    # Perform approval and dispatch
+    res = await draft_manager.approve_draft(draft_id)
+    success = res.get("success", False) if isinstance(res, dict) else bool(res)
+    error_msg = res.get("error") if isinstance(res, dict) else None
+
+    if not success:
+        raise HTTPException(status_code=400, detail=error_msg or "Approval failed or draft not pending")
+    
+    # Find and resolve associated pending actions
+    action_res = await db.execute(
+        select(PendingAction)
+        .where(and_(
+            PendingAction.entity_id == contact_id,
+            PendingAction.action_type == "approve_outreach",
+            PendingAction.status == ActionStatus.PENDING
+        ))
+    )
+    actions = action_res.scalars().all()
+    for action in actions:
+        action.status = ActionStatus.APPROVED
+        action.approved_at = datetime.utcnow()
+            
+    await db.commit()
+    return {
+        "status": "approved",
+        "sent": True
+    }
+
+@router.post("/drafts/{draft_id}/reject")
+async def reject_draft_route(draft_id: str, db: AsyncSession = Depends(get_db)):
+    result = await db.execute(select(OutreachDraft).where(OutreachDraft.id == draft_id))
+    d = result.scalar_one_or_none()
+    if not d:
+        raise HTTPException(status_code=404, detail="Draft not found")
+    if d.approval_state != "pending":
+        raise HTTPException(status_code=400, detail="Draft not in pending state")
+        
+    d.approval_state = "rejected"
+    d.status = "failed"
+    
+    action_res = await db.execute(
+        select(PendingAction)
+        .where(and_(
+            PendingAction.entity_id == d.contact_id,
+            PendingAction.action_type == "approve_outreach",
+            PendingAction.status == ActionStatus.PENDING
+        ))
+    )
+    action = action_res.scalar_one_or_none()
+    if action:
+        action.status = ActionStatus.DISMISSED
+
+    await db.commit()
+    return {"status": "rejected"}
+
+@router.post("/drafts/{draft_id}/edit")
+async def edit_draft_route(draft_id: str, body: EditDraftRequest, db: AsyncSession = Depends(get_db)):
+    result = await db.execute(select(OutreachDraft).where(OutreachDraft.id == draft_id))
+    d = result.scalar_one_or_none()
+    if not d:
+        raise HTTPException(status_code=404, detail="Draft not found")
+    if d.approval_state != "pending":
+        raise HTTPException(status_code=400, detail="Cannot edit approved/rejected draft")
+        
+    d.subject = body.subject
+    d.body = body.body
+    await db.commit()
+    return {"status": "updated", "subject": d.subject, "body": d.body}
+
+
+@router.get("/dashboard/outreach-analytics")
+async def get_outreach_analytics(db: AsyncSession = Depends(get_db)):
+    # 1. Draft counts
+    draft_pending = await db.scalar(select(func.count(OutreachDraft.id)).where(OutreachDraft.approval_state == "pending")) or 0
+    draft_approved = await db.scalar(select(func.count(OutreachDraft.id)).where(OutreachDraft.approval_state == "approved")) or 0
+    draft_rejected = await db.scalar(select(func.count(OutreachDraft.id)).where(OutreachDraft.approval_state == "rejected")) or 0
+    total_drafts = draft_pending + draft_approved + draft_rejected
+
+    # 2. Sent logs, replies, meetings
+    total_sent = await db.scalar(select(func.count(OutreachLog.id))) or 0
+    total_replies = await db.scalar(select(func.count(OutreachLog.id)).where(OutreachLog.replied == True)) or 0
+    total_meetings = await db.scalar(select(func.count(OutreachLog.id)).where(OutreachLog.meeting_booked == True)) or 0
+
+    # 3. Channel performance
+    channel_perf_res = await db.execute(
+        select(
+            OutreachLog.channel,
+            func.count(OutreachLog.id),
+            func.count(func.nullif(OutreachLog.replied, False)),
+            func.count(func.nullif(OutreachLog.meeting_booked, False))
+        ).group_by(OutreachLog.channel)
+    )
+    channel_performance = []
+    for chan, sent, replies, meetings in channel_perf_res.all():
+        channel_performance.append({
+            "channel": chan or "email",
+            "sent": sent,
+            "replies": replies,
+            "meetings": meetings,
+            "reply_rate": round(replies / max(sent, 1) * 100, 1),
+            "meeting_rate": round(meetings / max(sent, 1) * 100, 1)
+        })
+
+    # 4. Business Case performance (Draft breakdown)
+    bc_perf_res = await db.execute(
+        select(
+            OutreachDraft.business_case,
+            func.count(OutreachDraft.id),
+            func.count(func.nullif(OutreachDraft.approval_state == "approved", False)),
+            func.count(func.nullif(OutreachDraft.approval_state == "rejected", False))
+        ).group_by(OutreachDraft.business_case)
+    )
+    business_case_performance = []
+    for bc, total, approved, rejected in bc_perf_res.all():
+        business_case_performance.append({
+            "business_case": bc or "General Sales Outreach",
+            "total_drafts": total,
+            "approved": approved,
+            "rejected": rejected,
+            "approval_rate": round(approved / max(total, 1) * 100, 1)
+        })
+
+    # 5. Template (Prompt Variant) performance
+    variant_res = await db.execute(
+        select(
+            PromptVariant.id,
+            PromptVariant.signal_type,
+            PromptVariant.send_count,
+            PromptVariant.reply_count,
+            PromptVariant.meeting_count,
+            PromptVariant.reply_rate
+        ).where(PromptVariant.is_active == True)
+    )
+    template_performance = []
+    for vid, sig, sent, replies, meetings, rate in variant_res.all():
+        template_performance.append({
+            "variant_id": vid,
+            "signal_type": sig,
+            "sent": sent,
+            "replies": replies,
+            "meetings": meetings,
+            "reply_rate": round(rate * 100, 1) if rate else 0.0
+        })
+
+    return {
+        "summary": {
+            "total_drafts": total_drafts,
+            "draft_pending": draft_pending,
+            "draft_approved": draft_approved,
+            "draft_rejected": draft_rejected,
+            "total_sent": total_sent,
+            "total_replies": total_replies,
+            "total_meetings": total_meetings,
+        },
+        "channel_performance": channel_performance,
+        "business_case_performance": business_case_performance,
+        "template_performance": template_performance
     }

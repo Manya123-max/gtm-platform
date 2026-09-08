@@ -12,10 +12,11 @@ import json
 import structlog
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select, and_
+from sqlalchemy.orm import selectinload
 
 from app.core.config import settings
 from app.models.models import (
-    BrandAsset, GeneratedContent, FunnelEvent, Contact
+    BrandAsset, GeneratedContent, FunnelEvent, Contact, ConversationThread, Deal
 )
 from app.services.llm_service import LLMService
 from app.services.embedding_service import EmbeddingService
@@ -31,20 +32,49 @@ CONTENT_FORMATS = [
 ]
 
 FORMAT_SYSTEM_PROMPTS = {
-    "linkedin_post": """You write LinkedIn posts for B2B SaaS audiences.
-Rules: 150-300 words. Hook in first line. No hashtags unless < 3. Conversational tone. Data point or insight in every post. End with a question or observation, not a call to action.""",
+    "linkedin_post": """You are an elite B2B SaaS executive copywriter and thought leader. 
+Write a highly professional, engaging LinkedIn post.
+Rules:
+- Length: 150-250 words.
+- Formatting: Use short, punchy paragraphs with double returns. Avoid single-sentence lines (no cringe "broetry"). Use clean bullet points.
+- Tone: Consultative, analytical, and authoritative. Start with a direct, data-driven or observation-driven hook.
+- Emojis: No emojis, or maximum 1 subtle/professional emoji.
+- Hashtags: No hashtags at all.
+- Output: Return only the final post content, ready to publish.""",
 
-    "email_sequence": """You write B2B email nurture sequences (3 emails).
-Rules: Each email under 200 words. Subject lines under 50 chars. Value-first structure. Progressive commitment — each email asks for something slightly bigger.""",
+    "email_sequence": """You are a professional B2B Sales Development Copywriter.
+Write a single, high-converting cold outreach email targeting decision-makers.
+Rules:
+- Formatting: Start with the subject line formatted exactly as: "### Subject: [Subject Line]".
+- Template Tags: Use exactly `{first_name}`, `{company}`, and `{sender}` for template variables. Do NOT use bracketed placeholders like "[First Name]", "[Company]", or "[Your Name]".
+- Length: Under 150 words.
+- Subject line: Under 50 characters, conversational, and lowercase (e.g. "quick question re: {company}'s gtm").
+- Tone: Direct, respectful, value-first. Focus on how we can address their specific objections or industry paint points.""",
 
-    "case_study": """You write B2B case study outlines.
-Rules: Use the Problem → Solution → Result → Proof structure. Quantify results where possible. Focus on the before/after transformation. Written for the prospect, not the vendor.""",
+    "case_study": """You are a professional B2B Case Study writer.
+Write a detailed B2B customer success story/case study outline.
+Rules:
+- Structure: Create clear headings for "### 1. Executive Summary", "### 2. The Challenge", "### 3. The Solution", and "### 4. The Results & ROI".
+- Metrics: Use realistic, highly specific performance figures and commercial metrics based on the target ICP.
+- Tone: Authoritative, narrative-driven, focusing on before/after transformation. Written for the prospect, not as a vendor sales pitch.""",
 
-    "blog_article": """You write B2B SaaS blog articles.
-Rules: 600-900 words. SEO-aware but not keyword-stuffed. Practical and specific. Structure: Hook → Problem framing → Analysis → Specific recommendations → Takeaway.""",
+    "blog_article": """You are a senior industry editor writing thought leadership pieces.
+Write a high-caliber, actionable B2B SaaS blog article.
+Rules:
+- Length: 600-900 words.
+- Structure: Use a compelling intro hook, clear H2/H3 subheadings, bullet points for recommendations, and a strong summary takeaway.
+- Tone: Deeply analytical, practical, and specific. Avoid fluffy B2B platitudes ("in today's digital landscape", "revolutionary transformation"). Talk about concrete go-to-market strategies, metrics, and workflows.
+- Formatting: Use markdown formatting (bold text, blockquotes) for readability.""",
 
-    "sales_deck_outline": """You write B2B sales deck slide outlines.
-Rules: 8-12 slides maximum. Each slide gets: title, 1-line subtext, 2-3 bullet points. Sequence: Problem → Market context → Solution → How it works → Proof → ROI → Next steps.""",
+    "sales_deck_outline": """You are a B2B sales narrative designer.
+Write a highly persuasive 8-slide sales deck outline.
+Rules:
+- Structure: Slide-by-slide sequence (Problem -> Market Context -> Solution -> How it Works -> Proof -> ROI -> Next Steps).
+- Slide details: For each slide, write:
+  - "Slide Title"
+  - "Visual Layout Suggestion" (1-line directive describing the slide's visual layout, chart, or graphic)
+  - "Key Talking Points" (2-3 professional, bulleted talking points)
+- Tone: Clear, customer-centric, and outcome-oriented.""",
 }
 
 
@@ -78,15 +108,30 @@ class ContentAgent:
         if not icp_segments:
             icp_segments = await self._get_active_icp_segments()
 
-        # Step 3: Generate content briefs
-        briefs = await self._generate_content_briefs(demand_signals, icp_segments)
+        # Step 3: Fetch active prospect insights and generate content briefs
+        conv_insights = await self._get_conversation_insights()
+        deal_insights = await self._get_deal_insights()
+        logger.info("Direct insights fetched", conv_insights=len(conv_insights), deal_insights=len(deal_insights))
+
+        briefs = await self._generate_content_briefs(demand_signals, icp_segments, conv_insights, deal_insights)
         logger.info("Briefs generated", count=len(briefs))
 
-        # Step 4: Generate content for each brief (all 5 formats)
+        # Step 4: Generate content for each brief (all active formats)
         generated_count = 0
         skipped_existing = 0
         generation_errors: List[str] = []
-        for brief in briefs[:3]:
+
+        # Query all existing topics to prevent duplicates
+        existing_res = await self.db.execute(select(GeneratedContent.topic).distinct())
+        existing_topics = [row[0] for row in existing_res.all() if row[0]]
+
+        for brief in briefs[:settings.A6_MAX_BRIEFS]:
+            if self._is_duplicate_topic(brief.get("topic"), existing_topics):
+                logger.info("Skipping duplicate brief topic", topic=brief.get("topic"))
+                active_formats = [f.strip() for f in settings.A6_CONTENT_FORMATS.split(",")] if hasattr(settings, "A6_CONTENT_FORMATS") else CONTENT_FORMATS
+                skipped_existing += len(active_formats)
+                continue
+
             pieces, errors = await self._generate_all_formats(brief)
             generation_errors.extend(errors)
             saved, skipped = await self._save_content(pieces, brief)
@@ -214,87 +259,121 @@ class ContentAgent:
         return industries or ["SaaS", "B2B Technology"]
 
     async def _generate_content_briefs(
-        self, signals: List[Dict], icp_segments: List[str]
+        self,
+        signals: List[Dict],
+        icp_segments: List[str],
+        conv_insights: Optional[List[Dict]] = None,
+        deal_insights: Optional[List[Dict]] = None
     ) -> List[Dict]:
         """Use Claude Haiku to cluster signals and generate content briefs."""
-        if not signals:
-            return self._default_briefs(icp_segments)
+        conv_insights = conv_insights or []
+        deal_insights = deal_insights or []
+
+        if not signals and not conv_insights and not deal_insights:
+            logger.info("No active signals or insights available to generate briefs. Skipping content generation.")
+            return []
 
         signals_text = "\n".join([
             f"- {s['topic']} (source: {s['source']})"
             for s in signals[:30]
-        ])
+        ]) if signals else "No external demand signals available."
+
+        # Format A4 and A5 direct insights
+        insights_sections = []
+        a4_items = [ins for ins in conv_insights if ins.get("source") == "A4"]
+        if a4_items:
+            insights_sections.append("Inbound Email Objections/Questions (A4):")
+            for item in a4_items:
+                insights_sections.append(f"  - Company: {item.get('company')} | Text: {item.get('text')}")
+                
+        a5_items = [ins for ins in deal_insights if ins.get("source") == "A5"]
+        if a5_items:
+            if insights_sections:
+                insights_sections.append("")
+            insights_sections.append("Deal Blockers and Risk Flags (A5):")
+            for item in a5_items:
+                category_str = f" [{item.get('category')}]" if item.get('category') else ""
+                insights_sections.append(f"  - Company: {item.get('company')}{category_str} | Text: {item.get('text')}")
+            
+        insights_text = "\n".join(insights_sections) if insights_sections else "No direct prospect/deal insights available."
         segments_text = ", ".join(icp_segments)
 
-        prompt = f"""Analyse these content demand signals from ICP forums and competitor content.
-Generate 3 content briefs for a B2B SaaS GTM platform.
+        prompt = f"""Analyse these inputs to generate 3 content briefs for a B2B SaaS GTM platform:
+
+1. REAL PROSPECT & DEAL INSIGHTS:
+These are real objections and pain points from actual prospect conversations and deals.
+IMPORTANT: Prioritize topics that address these objections and pain points over the external NewsAPI/Reddit signals, since these are direct signals from active accounts.
+
+{insights_text}
+
+2. EXTERNAL DEMAND SIGNALS (SUPPLEMENTARY CONTEXT):
+{signals_text}
 
 ICP segments being targeted: {segments_text}
 
-Demand signals:
-{signals_text}
-
-Return JSON array of exactly 3 briefs:
-[
-  {{
-    "topic": "specific topic title",
-    "icp_segment": "which ICP segment this targets",
-    "angle": "unique angle not covered by competitors",
-    "key_messages": ["3 key points to make"],
-    "proof_points": ["data or examples to include"],
-    "competitor_gap": "what competitors have not said about this"
-  }}
-]"""
+Return a JSON object with a single key "briefs" containing a list of exactly 3 briefs:
+{{
+  "briefs": [
+    {{
+      "topic": "specific topic title addressing prospect needs/objections",
+      "icp_segment": "which ICP segment this targets",
+      "angle": "unique angle helping overcome the objection or educating the market",
+      "key_messages": ["3 key points to make"],
+      "proof_points": ["data or examples to include"],
+      "competitor_gap": "how this specific angle stands out or differs from standard blog advice"
+    }}
+  ]
+}}"""
 
         try:
-            result = await self.llm.complete_raw(prompt, use_haiku=True)
-            briefs = json.loads(result)
-            return briefs if isinstance(briefs, list) else self._default_briefs(icp_segments)
+            res = await self.llm.complete(system=prompt, user="Generate the briefs now.")
+            briefs = res.get("briefs", [])
+            return briefs if isinstance(briefs, list) else []
         except Exception as e:
             logger.error("Brief generation failed", error=str(e))
-            return self._default_briefs(icp_segments)
-
-    def _default_briefs(self, icp_segments: List[str]) -> List[Dict]:
-        segment = icp_segments[0] if icp_segments else "B2B SaaS"
-        return [
-            {
-                "topic": f"How {segment} companies are using AI to scale GTM without scaling headcount",
-                "icp_segment": segment,
-                "angle": "Practical implementation, not vendor pitch",
-                "key_messages": ["Agents handle volume", "Humans handle judgment", "Data compounds over time"],
-                "proof_points": [],
-                "competitor_gap": "Most content focuses on tools, not on how agents share context",
-            }
-        ]
+            return []
 
     async def _generate_all_formats(self, brief: Dict) -> tuple[List[Dict], List[str]]:
         """
-        Generate all 5 formats. Separate Claude Sonnet call per format.
+        Generate active formats from settings. Separate Claude Sonnet call per format.
         One call for all formats produces lower quality — this is intentional.
         """
         # Retrieve brand voice examples from PIG (pgvector similarity)
         brand_examples = await self._get_brand_voice_examples(brief["topic"])
 
+        # Parse formats from settings.A6_CONTENT_FORMATS
+        active_formats = [f.strip() for f in settings.A6_CONTENT_FORMATS.split(",")] if hasattr(settings, "A6_CONTENT_FORMATS") else CONTENT_FORMATS
+        valid_formats = []
+        for fmt in active_formats:
+            if fmt in FORMAT_SYSTEM_PROMPTS:
+                valid_formats.append(fmt)
+            else:
+                logger.warning("Unsupported content format in settings, skipping", format=fmt)
+
+        if not valid_formats:
+            valid_formats = CONTENT_FORMATS
+
         pieces: List[Dict] = []
         errors: List[str] = []
         tasks = []
-        for fmt in CONTENT_FORMATS:
+        for fmt in valid_formats:
             tasks.append(self._generate_single_format(brief, fmt, brand_examples))
 
         results = await asyncio.gather(*tasks, return_exceptions=True)
         for i, result in enumerate(results):
+            fmt = valid_formats[i]
             if isinstance(result, str):
                 pieces.append({
-                    "format": CONTENT_FORMATS[i],
+                    "format": fmt,
                     "content": result,
                     "brief": brief,
                     "icp_segment": brief.get("icp_segment"),
                     "topic": brief.get("topic"),
                 })
             else:
-                error = f"{CONTENT_FORMATS[i]}: {result}"
+                error = f"{fmt}: {result}"
                 errors.append(error)
-                logger.warning("Format generation failed", format=CONTENT_FORMATS[i], error=str(result))
+                logger.warning("Format generation failed", format=fmt, error=str(result))
 
         return pieces, errors
 
@@ -304,8 +383,12 @@ Return JSON array of exactly 3 briefs:
         """Single Claude Sonnet call for one content format."""
         brand_context = ""
         if brand_examples:
-            brand_context = "\n\nBrand voice reference examples (match this style):\n" + \
-                            "\n---\n".join(brand_examples[:2])
+            brand_context = (
+                "\n\nVERIFIED COMPANY EVIDENCE & BRAND ASSETS:\n"
+                "The following retrieved brand assets serve as the ONLY source of factual company evidence and proof points. "
+                "Use them stylistically as brand voice references, but treat their contents as the absolute limit of factual company claims:\n"
+                + "\n---\n".join(brand_examples[:2])
+            )
 
         user_prompt = f"""Create {fmt.replace('_', ' ')} content for this brief:
 
@@ -316,6 +399,12 @@ Key messages: {', '.join(brief.get('key_messages', []))}
 Include: {', '.join(brief.get('proof_points', []))}
 Avoid: {brief.get('competitor_gap', '')} (this is what competitors say — say something different)
 {brand_context}
+
+CRITICAL INSTRUCTIONS FOR PROOF POINTS & FACTUAL CLAIM CONSTRAINTS:
+1. Treat all retrieved assets in the "VERIFIED COMPANY EVIDENCE & BRAND ASSETS" section above as the ONLY source of factual company evidence, customer names, certifications, project outcomes, and metrics.
+2. You must NOT invent or hallucinate any metrics, customer names, statistics, project results, certifications, or case-study details. You may only use facts explicitly supported by the retrieved assets.
+3. If the retrieved assets do not contain a relevant proof point, do NOT fabricate one; instead, omit the proof point or clearly state that no verified proof point is available.
+4. Clearly distinguish 'brand voice reference' from 'verified proof point'. Just because an asset is provided as style/voice reference does not mean it can be treated as verified proof unless it contains explicit factual claims. Do not write generic success stories unless they are supported by these verified assets.
 
 Return only the content, no meta-commentary."""
 
@@ -345,21 +434,18 @@ Return only the content, no meta-commentary."""
     async def _save_content(self, pieces: List[Dict], brief: Dict) -> tuple[int, int]:
         saved = 0
         skipped = 0
-        cutoff = datetime.utcnow() - timedelta(hours=settings.CONTENT_DEDUP_HOURS)
         for piece in pieces:
-            if settings.CONTENT_DEDUP_HOURS > 0:
-                existing = await self.db.execute(
-                    select(GeneratedContent.id).where(
-                        and_(
-                            GeneratedContent.topic == piece.get("topic"),
-                            GeneratedContent.content_format == piece["format"],
-                            GeneratedContent.created_at >= cutoff,
-                        )
-                    ).limit(1)
-                )
-                if existing.scalar_one_or_none():
-                    skipped += 1
-                    continue
+            existing = await self.db.execute(
+                select(GeneratedContent.id).where(
+                    and_(
+                        GeneratedContent.topic == piece.get("topic"),
+                        GeneratedContent.content_format == piece["format"],
+                    )
+                ).limit(1)
+            )
+            if existing.scalar_one_or_none():
+                skipped += 1
+                continue
             self.db.add(GeneratedContent(
                 title=f"{brief['topic']} — {piece['format'].replace('_', ' ').title()}",
                 content_format=piece["format"],
@@ -372,7 +458,172 @@ Return only the content, no meta-commentary."""
         await self.db.commit()
         return saved, skipped
 
+    def _is_duplicate_topic(self, new_topic: Optional[str], existing_topics: List[str], threshold: float = 0.5) -> bool:
+        if not new_topic or not existing_topics:
+            return False
+        
+        def get_words(text: str):
+            import re
+            return set(re.findall(r'\b[a-z]{3,}\b', text.lower()))
+            
+        new_words = get_words(new_topic)
+        if not new_words:
+            return False
+            
+        for existing in existing_topics:
+            if not existing:
+                continue
+            existing_words = get_words(existing)
+            if not existing_words:
+                continue
+            intersection = new_words.intersection(existing_words)
+            union = new_words.union(existing_words)
+            overlap = len(intersection) / len(union) if union else 0.0
+            if overlap >= threshold:
+                return True
+        return False
+
     async def _log_funnel_event(self, event_type: str, metadata: Dict):
         event = FunnelEvent(event_type=event_type, agent_id="A6", event_metadata=metadata)
         self.db.add(event)
         await self.db.commit()
+
+    async def _get_conversation_insights(self) -> List[Dict[str, Any]]:
+        """
+        Query interested/not_interested conversation threads from the last 30 days,
+        and use Claude Haiku to extract distinct objections, pain points, or questions.
+        """
+        cutoff = datetime.utcnow() - timedelta(days=30)
+        
+        # Query threads joined with Contact
+        query = (
+            select(
+                ConversationThread.content,
+                ConversationThread.contact_id,
+                Contact.company
+            )
+            .join(Contact, ConversationThread.contact_id == Contact.id)
+            .where(
+                and_(
+                    ConversationThread.intent.in_(["interested", "not_interested"]),
+                    ConversationThread.occurred_at >= cutoff,
+                    ConversationThread.content.isnot(None),
+                    ConversationThread.content != ""
+                )
+            )
+            .order_by(ConversationThread.occurred_at.desc())
+            .limit(20)
+        )
+        
+        result = await self.db.execute(query)
+        rows = result.all()
+        
+        if not rows:
+            return []
+            
+        # Format the threads for the LLM prompt
+        threads_data = []
+        for i, row in enumerate(rows):
+            threads_data.append({
+                "index": i,
+                "contact_id": row.contact_id,
+                "company": row.company or "unknown",
+                "text": row.content.strip()
+            })
+            
+        threads_json = json.dumps(threads_data, indent=2)
+        
+        prompt = f"""You are a B2B sales analysis AI.
+Analyze these raw conversation thread replies from prospects. Extract a list of distinct objections, pain points, or questions mentioned.
+
+Raw Threads (tagged with contact_id and company):
+{threads_json}
+
+Return ONLY a valid JSON array of objects. Do NOT wrap in markdown or write explanation text.
+Format:
+[
+  {{
+    "text": "Extracted objection, pain point, or question (e.g. pricing concern, timeline pressure)",
+    "contact_id": "<associated contact_id from raw threads>",
+    "company": "<associated company from raw threads>"
+  }}
+]
+"""
+        try:
+            raw_res = await self.llm.complete_raw(prompt, use_haiku=True)
+            cleaned = _clean_json_str(raw_res)
+            parsed = json.loads(cleaned)
+            
+            insights = []
+            if isinstance(parsed, list):
+                for item in parsed:
+                    insights.append({
+                        "text": (item.get("text") or "").strip(),
+                        "contact_id": item.get("contact_id"),
+                        "company": item.get("company", ""),
+                        "source": "A4"
+                    })
+            return insights
+        except Exception as e:
+            logger.error("A6: Failed to extract conversation insights", error=str(e))
+            return []
+
+    async def _get_deal_insights(self) -> List[Dict[str, Any]]:
+        """
+        Query open deals, extract persisted objections and risk flags,
+        and assemble a flat list of deal-related insights with source='A5'.
+        """
+        query = (
+            select(Deal)
+            .options(selectinload(Deal.contact))
+            .where(Deal.outcome.is_(None))
+        )
+        result = await self.db.execute(query)
+        deals = result.scalars().all()
+        
+        insights = []
+        for deal in deals:
+            company_name = "unknown"
+            if deal.contact:
+                company_name = deal.contact.company or "unknown"
+            elif deal.name:
+                if " - " in deal.name:
+                    company_name = deal.name.split(" - ")[0].strip()
+                elif " — " in deal.name:
+                    company_name = deal.name.split(" — ")[0].strip()
+
+            # 1. Extract objections (categorized objections from A5 Call Transcripts)
+            if deal.objections:
+                for obj in deal.objections:
+                    if isinstance(obj, dict):
+                        insights.append({
+                            "text": (obj.get("text") or "").strip(),
+                            "category": obj.get("category", "objection"),
+                            "deal_id": deal.id,
+                            "company": company_name,
+                            "source": "A5"
+                        })
+            
+            # 2. Extract risk_flags (A5 Deal Guard alerts)
+            if deal.risk_flags:
+                for risk in deal.risk_flags:
+                    if isinstance(risk, dict):
+                        insights.append({
+                            "text": (risk.get("description") or "").strip(),
+                            "category": risk.get("type", "risk"),
+                            "deal_id": deal.id,
+                            "company": company_name,
+                            "source": "A5"
+                        })
+                        
+        return insights
+
+
+def _clean_json_str(s: str) -> str:
+    """Clean markdown code block wrappers from JSON string if present."""
+    s = s.strip()
+    if s.startswith("```"):
+        s = s.split("\n", 1)[1]
+    if s.endswith("```"):
+        s = s.rsplit("\n", 1)[0]
+    return s.strip()

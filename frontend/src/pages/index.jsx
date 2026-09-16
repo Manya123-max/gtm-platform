@@ -2,10 +2,11 @@
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
 import { fetchDeals, fetchPipelineSummary, fetchPendingActions, approveAction, dismissAction, fetchForecast, fetchFunnelMetrics, runAgent, pollAgentStatus, runOrchestratorAgent, runOrchestratorWorkflow, fetchWorkflowRun, DEFAULT_PIPELINE_AGENTS, fetchDrafts, fetchContent, fetchAgentSchedules, updateAgentSchedule, fetchOutreachDrafts, approveOutreachDraft, rejectOutreachDraft, editOutreachDraft, previewOutreachDraft, fetchSignals } from '../api'
 import { BarChart, Bar, XAxis, YAxis, Tooltip, ResponsiveContainer, LineChart, Line, CartesianGrid } from 'recharts'
-import { AlertTriangle, CheckCircle, X, Bot, Play, Loader2, FileText, Clock, Zap, Building2, User, RefreshCw, Sparkles, ExternalLink, ShieldAlert } from 'lucide-react'
+import { AlertTriangle, CheckCircle, X, Bot, Play, Loader2, FileText, Clock, Zap, Building2, User, RefreshCw, Sparkles, ExternalLink, ShieldAlert, ArrowRight, Target, Activity } from 'lucide-react'
 import { useState, useEffect } from 'react'
 import { useLocation, useNavigate } from 'react-router-dom'
 import { useSession } from '../context/SessionContext'
+import DealDetailModal from '../components/DealDetailModal'
 
 function RiskBadge({ score }) {
   if (score >= 0.6) return <span className="badge badge-red">High Risk</span>
@@ -17,6 +18,7 @@ export function Deals() {
   const { activeSessionId, ourCompanyName } = useSession()
   const [selectedDeal, setSelectedDeal] = useState(null)
   const [actionTab, setActionTab] = useState('pending')
+  const [stageFilter, setStageFilter] = useState('all')
   const navigate = useNavigate ? useNavigate() : null
   const { data: deals = [], isLoading } = useQuery({
     queryKey: ['deals', activeSessionId],
@@ -72,29 +74,56 @@ export function Deals() {
     onError: () => setIsSyncingHubSpot(false),
   })
 
+  // Filter deals based on selected stage
+  const filteredDeals = stageFilter === 'all' 
+    ? deals 
+    : deals.filter(d => (d.stage?.toLowerCase() || '') === stageFilter)
+
+  // Handle clicking a deal from CRM action
+  const handleActionDealClick = (action) => {
+    const matchedDeal = deals.find(d => d.id === action.deal_id || d.id === action.entity_id || d.name === action.deal_name)
+    if (matchedDeal) {
+      setSelectedDeal(matchedDeal)
+    } else if (action.deal_name) {
+      setSelectedDeal({
+        id: action.deal_id || action.entity_id,
+        name: action.deal_name,
+        stage: 'discovery',
+        days_in_current_stage: 0,
+      })
+    }
+  }
+
   return (
-    <div className="max-w-6xl mx-auto">
-      <div className="mb-6 flex items-start justify-between">
+    <div className="max-w-6xl mx-auto space-y-6">
+      <div className="flex items-start justify-between flex-wrap gap-3">
         <div>
-          <h1 className="text-xl font-semibold text-gray-800">
+          <h1 className="text-xl font-bold text-gray-900">
             Deals {ourCompanyName ? `for ${ourCompanyName}` : ''}
           </h1>
-          <p className="text-sm text-gray-500 mt-0.5">Pipeline health and Agent 5 deal intelligence</p>
+          <p className="text-sm text-gray-500 mt-0.5">Live CRM pipeline health, Agent 5 deal intelligence & BANT qualification</p>
         </div>
         <button
           onClick={() => syncHubSpotMut.mutate()}
           disabled={isSyncingHubSpot}
-          className="text-xs font-semibold text-orange-700 hover:text-orange-800 bg-orange-50 border border-orange-200 px-3 py-1.5 rounded-lg transition-colors flex items-center gap-1.5 cursor-pointer disabled:opacity-50 shadow-xs"
+          className="text-xs font-semibold text-orange-700 hover:text-orange-800 bg-orange-50 border border-orange-200 px-3.5 py-2 rounded-xl transition-all flex items-center gap-1.5 cursor-pointer disabled:opacity-50 shadow-xs hover:shadow-sm"
         >
-          <RefreshCw size={12} className={isSyncingHubSpot ? 'animate-spin' : ''} />
-          <span>{isSyncingHubSpot ? 'Syncing CRM...' : '🔄 Sync with HubSpot'}</span>
+          <RefreshCw size={13} className={isSyncingHubSpot ? 'animate-spin' : ''} />
+          <span>{isSyncingHubSpot ? 'Syncing CRM Deals...' : '🔄 Sync with HubSpot'}</span>
         </button>
       </div>
 
       {/* Pipeline bar */}
-      <div className="card mb-6">
-        <div className="section-title text-gray-800 font-semibold">Pipeline by Stage</div>
-        <div className="section-sub text-gray-500">Active deals count and value</div>
+      <div className="card shadow-xs border border-gray-200">
+        <div className="flex items-center justify-between mb-2">
+          <div>
+            <div className="section-title text-gray-900 font-bold">Pipeline by Stage</div>
+            <div className="section-sub text-gray-500">Active deal volume and value distribution</div>
+          </div>
+          <div className="text-xs font-bold text-gray-600 font-mono bg-gray-50 px-2.5 py-1 rounded-lg border border-gray-200">
+            Total Pipeline: ${deals.reduce((sum, d) => sum + (d.amount || 0), 0).toLocaleString()}
+          </div>
+        </div>
         <ResponsiveContainer width="100%" height={160}>
           <BarChart data={ordered} barSize={32}>
             <XAxis dataKey="stage" tick={{ fill: '#6B7280', fontSize: 11 }} axisLine={false} tickLine={false} />
@@ -109,60 +138,137 @@ export function Deals() {
         </ResponsiveContainer>
       </div>
 
-      <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
+      <div className="grid grid-cols-1 lg:grid-cols-2 gap-5">
         {/* Deal list */}
-        <div className="card p-0 overflow-hidden shadow-sm border border-gray-200">
-          <div className="px-5 py-4 border-b border-gray-100 bg-gray-50/50 flex items-center justify-between">
-            <div className="text-sm font-semibold text-gray-800">Active Deals</div>
-            <span className="text-xs text-gray-400 font-medium">Click a deal to view intelligence</span>
+        <div className="card p-0 overflow-hidden shadow-xs border border-gray-200 flex flex-col">
+          <div className="px-5 py-3.5 border-b border-gray-100 bg-gray-50/70 flex items-center justify-between flex-wrap gap-2">
+            <div className="flex items-center gap-2">
+              <span className="text-sm font-bold text-gray-900">Active Deals</span>
+              <span className="badge badge-blue">{filteredDeals.length}</span>
+            </div>
+            <span className="text-xs text-blue-600 font-medium bg-blue-50 px-2 py-0.5 rounded-full border border-blue-100">
+              Click any deal to view full details
+            </span>
           </div>
-          <div className="divide-y divide-gray-100 max-h-96 overflow-y-auto">
+
+          {/* Stage Filter Tabs */}
+          <div className="px-5 py-2.5 bg-white border-b border-gray-100 flex items-center gap-1.5 overflow-x-auto text-xs">
+            <button
+              onClick={() => setStageFilter('all')}
+              className={`px-2.5 py-1 rounded-lg font-semibold transition-all cursor-pointer ${
+                stageFilter === 'all'
+                  ? 'bg-blue-600 text-white shadow-xs'
+                  : 'text-gray-600 hover:bg-gray-100'
+              }`}
+            >
+              All ({deals.length})
+            </button>
+            {STAGE_ORDER.map(stage => {
+              const count = deals.filter(d => (d.stage?.toLowerCase() || '') === stage).length
+              if (count === 0 && stageFilter !== stage) return null
+              return (
+                <button
+                  key={stage}
+                  onClick={() => setStageFilter(stage)}
+                  className={`px-2.5 py-1 rounded-lg font-semibold capitalize transition-all cursor-pointer ${
+                    stageFilter === stage
+                      ? 'bg-blue-600 text-white shadow-xs'
+                      : 'text-gray-600 hover:bg-gray-100'
+                  }`}
+                >
+                  {stage} ({count})
+                </button>
+              )
+            })}
+          </div>
+
+          <div className="divide-y divide-gray-100 max-h-[440px] overflow-y-auto">
             {isLoading ? (
-              <div className="p-8 text-center text-gray-400 text-sm">Loading…</div>
-            ) : deals.length === 0 ? (
-              <div className="p-8 text-center text-gray-400 text-sm">No active deals</div>
-            ) : deals.map(d => (
-              <div 
-                key={d.id} 
-                onClick={() => setSelectedDeal(d)}
-                className="px-5 py-3.5 hover:bg-blue-50/60 cursor-pointer transition-colors group"
-              >
-                <div className="flex items-start justify-between">
-                  <div>
-                    <div className="text-sm font-semibold text-gray-800 group-hover:text-blue-600 transition-colors flex items-center gap-1.5">
-                      <span>{d.name}</span>
-                      <span className="text-[10px] text-blue-500 opacity-0 group-hover:opacity-100 transition-opacity">↗</span>
-                    </div>
-                    <div className="text-xs text-gray-500 mt-0.5 capitalize">{d.stage} · {d.days_in_current_stage}d in stage</div>
-                  </div>
-                  <div className="flex items-center gap-2">
-                    {d.amount && <span className="text-xs font-bold text-gray-700 font-mono">${(d.amount/1000).toFixed(0)}k</span>}
-                    <RiskBadge score={d.risk_score} />
-                  </div>
-                </div>
-                {d.risk_flags?.length > 0 && (
-                  <div className="mt-2 flex flex-wrap gap-1">
-                    {d.risk_flags.slice(0,2).map((f,i) => (
-                      <span key={i} className="text-[10px] text-amber-700 bg-amber-50 border border-amber-200 px-2 py-0.5 rounded-full font-medium">
-                        {f.type?.replace(/_/g,' ')}
-                      </span>
-                    ))}
-                  </div>
-                )}
+              <div className="p-10 text-center text-gray-400 text-sm flex items-center justify-center gap-2">
+                <Loader2 size={16} className="animate-spin text-blue-600" />
+                <span>Loading active deals…</span>
               </div>
-            ))}
+            ) : filteredDeals.length === 0 ? (
+              <div className="p-10 text-center text-gray-400 text-sm space-y-1">
+                <div className="font-semibold text-gray-600">No active deals found</div>
+                <div className="text-xs">Try selecting a different stage filter or click Sync with HubSpot.</div>
+              </div>
+            ) : filteredDeals.map(d => {
+              const contactObj = d.contact || {}
+              const cName = [contactObj.first_name, contactObj.last_name].filter(Boolean).join(' ')
+              return (
+                <div 
+                  key={d.id} 
+                  onClick={() => setSelectedDeal(d)}
+                  className="px-5 py-4 hover:bg-blue-50/60 cursor-pointer transition-all group relative border-l-3 border-transparent hover:border-blue-600"
+                >
+                  <div className="flex items-start justify-between gap-3">
+                    <div className="flex-1 min-w-0">
+                      <div className="text-sm font-bold text-gray-900 group-hover:text-blue-600 transition-colors flex items-center gap-1.5 truncate">
+                        <span>{d.name}</span>
+                        <ArrowRight size={12} className="text-blue-500 opacity-0 group-hover:opacity-100 transition-opacity shrink-0" />
+                      </div>
+                      
+                      <div className="flex items-center gap-2 text-xs text-gray-500 mt-1 flex-wrap">
+                        <span className="capitalize font-semibold text-blue-700 bg-blue-50 border border-blue-200/60 px-2 py-0.2 rounded-md text-[11px]">
+                          {d.stage}
+                        </span>
+                        <span>·</span>
+                        <span>{d.days_in_current_stage ?? 0}d in stage</span>
+                        {cName && (
+                          <>
+                            <span>·</span>
+                            <span className="text-gray-700 font-medium flex items-center gap-1">
+                              <User size={10} className="text-gray-400" />
+                              <span>{cName}</span>
+                            </span>
+                          </>
+                        )}
+                      </div>
+                    </div>
+
+                    <div className="flex flex-col items-end gap-1.5 shrink-0">
+                      {d.amount != null && (
+                        <span className="text-xs font-extrabold text-gray-900 font-mono bg-gray-50 px-2 py-0.5 rounded border border-gray-200">
+                          ${(d.amount/1000).toFixed(0)}k
+                        </span>
+                      )}
+                      <div className="flex items-center gap-1.5">
+                        {d.deal_health_score != null && (
+                          <span className="text-[10px] font-bold px-1.5 py-0.2 rounded bg-emerald-50 text-emerald-700 border border-emerald-200">
+                            Health: {Math.round(d.deal_health_score)}
+                          </span>
+                        )}
+                        <RiskBadge score={d.risk_score} />
+                      </div>
+                    </div>
+                  </div>
+
+                  {d.risk_flags?.length > 0 && (
+                    <div className="mt-2.5 flex flex-wrap gap-1.5">
+                      {d.risk_flags.slice(0, 2).map((f, i) => (
+                        <span key={i} className="text-[10px] text-amber-800 bg-amber-50 border border-amber-200 px-2 py-0.5 rounded-full font-semibold flex items-center gap-1">
+                          <span className="w-1.5 h-1.5 rounded-full bg-amber-500"></span>
+                          <span>{f.type?.replace(/_/g, ' ')}</span>
+                        </span>
+                      ))}
+                    </div>
+                  )}
+                </div>
+              )
+            })}
           </div>
         </div>
 
         {/* Pending actions */}
-        <div className="card p-0 overflow-hidden shadow-sm border border-gray-200">
-          <div className="px-5 py-3.5 border-b border-gray-100 bg-gray-50/50 flex items-center justify-between">
+        <div className="card p-0 overflow-hidden shadow-xs border border-gray-200 flex flex-col">
+          <div className="px-5 py-3.5 border-b border-gray-100 bg-gray-50/70 flex items-center justify-between">
             <div className="flex items-center gap-2">
-              <span className="text-sm font-semibold text-gray-800">CRM Risk Actions</span>
+              <span className="text-sm font-bold text-gray-900">CRM Risk Actions</span>
               <div className="flex bg-gray-200/80 p-0.5 rounded-lg text-xs font-medium">
                 <button
                   onClick={() => setActionTab('pending')}
-                  className={`px-2.5 py-1 rounded-md transition-all ${
+                  className={`px-2.5 py-1 rounded-md transition-all cursor-pointer ${
                     actionTab === 'pending'
                       ? 'bg-white text-blue-600 shadow-xs font-semibold'
                       : 'text-gray-600 hover:text-gray-900'
@@ -172,7 +278,7 @@ export function Deals() {
                 </button>
                 <button
                   onClick={() => setActionTab('history')}
-                  className={`px-2.5 py-1 rounded-md transition-all ${
+                  className={`px-2.5 py-1 rounded-md transition-all cursor-pointer ${
                     actionTab === 'history'
                       ? 'bg-white text-blue-600 shadow-xs font-semibold'
                       : 'text-gray-600 hover:text-gray-900'
@@ -182,18 +288,21 @@ export function Deals() {
                 </button>
               </div>
             </div>
-            <span className="text-[11px] text-gray-400 font-medium">A5 Deal Guard</span>
+            <span className="text-[11px] text-gray-400 font-medium flex items-center gap-1">
+              <ShieldAlert size={12} className="text-amber-500" />
+              <span>A5 Deal Guard</span>
+            </span>
           </div>
 
-          <div className="divide-y divide-gray-100 max-h-96 overflow-y-auto">
+          <div className="divide-y divide-gray-100 max-h-[490px] overflow-y-auto">
             {dealActions.length === 0 ? (
-              <div className="p-8 text-center text-gray-400 text-xs">
+              <div className="p-10 text-center text-gray-400 text-xs">
                 {actionTab === 'pending' ? 'No active pending risk actions for current deals' : 'No resolved actions in history'}
               </div>
             ) : dealActions.map(a => (
-              <div key={a.id} className="px-5 py-3.5 hover:bg-slate-50/50 transition-colors">
+              <div key={a.id} className="px-5 py-3.5 hover:bg-slate-50/50 transition-colors space-y-2">
                 {/* Target Company & Contact Badge */}
-                <div className="flex items-center justify-between mb-1.5 flex-wrap gap-1">
+                <div className="flex items-center justify-between flex-wrap gap-1.5">
                   <div className="flex items-center gap-1.5 text-xs">
                     <span className="font-bold text-gray-900 bg-blue-50 border border-blue-200/80 px-2 py-0.5 rounded-md flex items-center gap-1">
                       <Building2 size={11} className="text-blue-600" />
@@ -226,19 +335,24 @@ export function Deals() {
                 </div>
 
                 {a.deal_name && (
-                  <div className="text-[11px] text-gray-500 mb-1 font-medium">
-                    Deal: <span className="text-gray-700">{a.deal_name}</span>
+                  <div 
+                    onClick={() => handleActionDealClick(a)}
+                    className="text-[11px] text-gray-500 font-medium cursor-pointer hover:text-blue-600 transition-colors flex items-center gap-1"
+                    title="Click to view deal details"
+                  >
+                    <span>Deal: <strong className="text-gray-800 underline decoration-gray-300 underline-offset-2 hover:text-blue-600">{a.deal_name}</strong></span>
+                    <ExternalLink size={10} className="text-gray-400" />
                   </div>
                 )}
 
-                <div className="text-xs text-gray-600 mb-2 leading-relaxed">{a.reason}</div>
+                <div className="text-xs text-gray-600 leading-relaxed">{a.reason}</div>
                 {a.recommended_value && (
-                  <div className="text-xs font-medium text-blue-800 bg-blue-50/80 border border-blue-100 p-2.5 rounded-lg mb-2.5 leading-relaxed">
+                  <div className="text-xs font-medium text-blue-900 bg-blue-50/80 border border-blue-100 p-2.5 rounded-lg leading-relaxed">
                     <strong className="text-blue-950">AI Action: </strong> {a.recommended_value}
                   </div>
                 )}
                 {actionTab === 'pending' ? (
-                  <div className="flex gap-3">
+                  <div className="flex gap-3 pt-1">
                     <button onClick={() => approveMut.mutate({ id: a.id })}
                       className="flex items-center gap-1 text-xs font-semibold text-emerald-700 hover:text-emerald-800 bg-emerald-50 border border-emerald-200 px-3 py-1 rounded-md transition-colors shadow-xs cursor-pointer">
                       <CheckCircle size={12} /> Approve Action
@@ -249,7 +363,7 @@ export function Deals() {
                     </button>
                   </div>
                 ) : (
-                  <div className="text-[10px] text-gray-400">
+                  <div className="text-[10px] text-gray-400 pt-1">
                     Resolved: {a.approved_at ? new Date(a.approved_at).toLocaleString() : new Date(a.created_at).toLocaleString()}
                   </div>
                 )}
@@ -259,7 +373,7 @@ export function Deals() {
         </div>
       </div>
 
-      {/* Interactive Deal Detail & Live Signals Modal */}
+      {/* Interactive Comprehensive Deal Detail & Intelligence Modal */}
       {selectedDeal && (
         <DealDetailModal 
           selectedDeal={selectedDeal} 
@@ -273,242 +387,14 @@ export function Deals() {
   )
 }
 
-function DealDetailModal({ selectedDeal, onClose, actions, approveMut, dismissMut }) {
-  const qc = useQueryClient()
-  const { data: signals = [], isLoading: signalsLoading, refetch: refetchSignals } = useQuery({
-    queryKey: ['signals', selectedDeal.contact_id],
-    queryFn: () => fetchSignals(selectedDeal.contact_id),
-    enabled: !!selectedDeal.contact_id,
-  })
-
-  const [isScanningSignals, setIsScanningSignals] = useState(false)
-  const scanSignalsMut = useMutation({
-    mutationFn: () => runAgent('A2', { contact_ids: [selectedDeal.contact_id] }),
-    onMutate: () => setIsScanningSignals(true),
-    onSuccess: () => {
-      setTimeout(() => {
-        qc.invalidateQueries({ queryKey: ['signals', selectedDeal.contact_id] })
-        setIsScanningSignals(false)
-      }, 2500)
-    },
-    onError: () => setIsScanningSignals(false),
-  })
-
-  const dealRisks = actions.filter(a => a.entity_id === selectedDeal.id && a.status === 'pending')
-
-  return (
-    <div 
-      className="fixed inset-0 bg-[#0F1D3A]/45 backdrop-blur-sm z-50 flex items-center justify-center p-4 animate-fadeIn"
-      onClick={onClose}
-    >
-      <div 
-        className="bg-white rounded-2xl p-6 max-w-2xl w-full shadow-2xl border border-gray-100 relative flex flex-col gap-4 animate-scaleUp text-gray-800 max-h-[90vh] overflow-y-auto"
-        onClick={(e) => e.stopPropagation()}
-      >
-        {/* Modal Header */}
-        <div className="flex items-start justify-between border-b border-gray-100 pb-3">
-          <div>
-            <div className="flex items-center gap-2">
-              <span className="badge badge-blue capitalize">{selectedDeal.stage}</span>
-              <span className="text-xs text-gray-500 font-mono font-bold">${selectedDeal.amount?.toLocaleString() || '60,000'}</span>
-              <span className="text-xs text-emerald-600 bg-emerald-50 px-2 py-0.5 rounded-full font-semibold border border-emerald-200">Active Pipeline</span>
-            </div>
-            <h2 className="text-lg font-bold text-gray-900 mt-1">{selectedDeal.name}</h2>
-            <p className="text-xs text-gray-500 mt-0.5">Owner: {selectedDeal.owner_email || 'Sales Rep'} · Stage Age: {selectedDeal.days_in_current_stage || 0}d</p>
-          </div>
-          <button 
-            onClick={onClose}
-            className="w-8 h-8 rounded-full flex items-center justify-center text-gray-400 hover:text-gray-700 hover:bg-gray-100 transition-colors"
-          >
-            <X size={16} />
-          </button>
-        </div>
-
-        {/* Metrics Breakdown Grid */}
-        <div className="grid grid-cols-2 sm:grid-cols-4 gap-2.5">
-          <div className="p-3 rounded-xl bg-emerald-50/70 border border-emerald-100 text-center">
-            <div className="text-[10px] uppercase font-bold text-emerald-800 tracking-wider">Health Score</div>
-            <div className="text-xl font-extrabold text-emerald-700 mt-0.5">{selectedDeal.deal_health_score?.toFixed(0) || '85'}/100</div>
-          </div>
-          <div className="p-3 rounded-xl bg-blue-50/70 border border-blue-100 text-center">
-            <div className="text-[10px] uppercase font-bold text-blue-800 tracking-wider">Win Probability</div>
-            <div className="text-xl font-extrabold text-blue-700 mt-0.5">{selectedDeal.win_probability?.toFixed(0) || '65'}%</div>
-          </div>
-          <div className="p-3 rounded-xl bg-amber-50/70 border border-amber-100 text-center">
-            <div className="text-[10px] uppercase font-bold text-amber-800 tracking-wider">Buying Intent</div>
-            <div className="text-xs font-extrabold text-amber-700 uppercase mt-2">{selectedDeal.buying_intent || 'STRONG'}</div>
-          </div>
-          <div className="p-3 rounded-xl bg-purple-50/70 border border-purple-100 text-center">
-            <div className="text-[10px] uppercase font-bold text-purple-800 tracking-wider">Stage Conf.</div>
-            <div className="text-xl font-extrabold text-purple-700 mt-0.5">{Math.round((selectedDeal.stage_confidence || 0.5) * 100)}%</div>
-          </div>
-        </div>
-
-        {/* Agent 5 Next Best Action Callout */}
-        {selectedDeal.next_best_action && (
-          <div className="p-4 rounded-xl bg-gradient-to-r from-blue-50 to-indigo-50 border border-blue-200/80">
-            <div className="flex items-center gap-1.5 text-xs font-bold text-blue-800 mb-1">
-              <Sparkles size={13} className="text-blue-600" />
-              <span>Agent 5 Next Best Action</span>
-            </div>
-            <p className="text-xs text-blue-900 leading-relaxed font-medium">
-              {selectedDeal.next_best_action}
-            </p>
-          </div>
-        )}
-
-        {/* Active Deal Risks */}
-        {dealRisks.length > 0 && (
-          <div className="p-4 rounded-xl bg-amber-50/60 border border-amber-200/80 space-y-2">
-            <div className="flex items-center justify-between">
-              <div className="text-xs font-bold text-amber-900 uppercase tracking-wider flex items-center gap-1.5">
-                <ShieldAlert size={14} className="text-amber-600" />
-                <span>Detected Risks for this Deal ({dealRisks.length})</span>
-              </div>
-            </div>
-            <div className="space-y-2 pt-1">
-              {dealRisks.map(r => (
-                <div key={r.id} className="p-3 bg-white rounded-lg border border-amber-200 shadow-xs">
-                  <div className="flex items-center justify-between mb-1">
-                    <span className="text-xs font-bold text-gray-900 capitalize">{r.action_type?.replace(/_/g,' ')}</span>
-                    <div className="flex gap-2">
-                      <button 
-                        onClick={() => approveMut.mutate({ id: r.id })}
-                        className="text-[11px] font-semibold text-emerald-700 bg-emerald-50 hover:bg-emerald-100 border border-emerald-200 px-2 py-0.5 rounded transition-colors"
-                      >
-                        ✓ Approve
-                      </button>
-                      <button 
-                        onClick={() => dismissMut.mutate({ id: r.id })}
-                        className="text-[11px] font-medium text-gray-600 bg-gray-50 hover:bg-gray-100 border border-gray-200 px-2 py-0.5 rounded transition-colors"
-                      >
-                        Dismiss
-                      </button>
-                    </div>
-                  </div>
-                  <p className="text-xs text-gray-600">{r.reason}</p>
-                  {r.recommended_value && (
-                    <p className="text-xs text-blue-700 font-medium mt-1">→ {r.recommended_value}</p>
-                  )}
-                </div>
-              ))}
-            </div>
-          </div>
-        )}
-
-        {/* Real Live Market Signals (Agent 2 Integration) */}
-        <div className="p-4 rounded-xl bg-slate-50 border border-slate-200 space-y-2.5">
-          <div className="flex items-center justify-between">
-            <div className="flex items-center gap-1.5 text-xs font-bold text-gray-800 uppercase tracking-wider">
-              <Zap size={14} className="text-amber-500" />
-              <span>Real Market Signals for Company ({signals.length})</span>
-            </div>
-            <button
-              onClick={() => scanSignalsMut.mutate()}
-              disabled={isScanningSignals}
-              className="text-[11px] font-semibold text-blue-700 hover:text-blue-800 bg-blue-50 border border-blue-200 px-2.5 py-1 rounded-lg transition-colors flex items-center gap-1 cursor-pointer disabled:opacity-50"
-            >
-              <RefreshCw size={11} className={isScanningSignals ? 'animate-spin' : ''} />
-              <span>{isScanningSignals ? 'Scanning Market News...' : '⚡ Run Agent 2 (Scan Signals)'}</span>
-            </button>
-          </div>
-
-          {signalsLoading ? (
-            <div className="text-xs text-gray-400 py-3 text-center">Loading live signals...</div>
-          ) : signals.length === 0 ? (
-            <div className="p-3 bg-white rounded-lg border border-gray-200 text-xs text-gray-600 leading-relaxed">
-              No recent news/hiring signals logged for this company yet. Click <strong>"Run Agent 2"</strong> above to scan live Adzuna job postings and news feeds.
-            </div>
-          ) : (
-            <div className="space-y-1.5 max-h-44 overflow-y-auto pr-1">
-              {signals.map(s => (
-                <div key={s.id} className="p-2.5 bg-white rounded-lg border border-gray-200 text-xs shadow-2xs flex items-start justify-between gap-2">
-                  <div>
-                    <div className="font-semibold text-gray-800 capitalize flex items-center gap-1.5">
-                      <span className="w-1.5 h-1.5 rounded-full bg-amber-500"></span>
-                      <span>{s.signal_type?.replace(/_/g, ' ')}</span>
-                      <span className="text-[10px] text-gray-400 font-normal">· {s.signal_source}</span>
-                    </div>
-                    {s.raw_data?.headline && (
-                      <div className="text-gray-600 mt-0.5 text-[11px] leading-snug">{s.raw_data.headline}</div>
-                    )}
-                  </div>
-                  <span className="text-[10px] text-gray-400 shrink-0">{new Date(s.detected_at).toLocaleDateString()}</span>
-                </div>
-              ))}
-            </div>
-          )}
-        </div>
-
-        {/* BANT Qualification Signals */}
-        <div className="p-4 rounded-xl bg-gray-50 border border-gray-200/70 space-y-2">
-          <div className="text-xs font-bold text-gray-700 uppercase tracking-wider mb-1">BANT Qualification Checklist</div>
-          <div className="grid grid-cols-2 gap-2 text-xs">
-            <div className="flex items-center gap-1.5 text-gray-700">
-              <span className="text-emerald-600 font-bold">✓</span>
-              <span>Budget: <strong className="text-gray-900">${selectedDeal.amount?.toLocaleString() || '60,000'} Confirmed</strong></span>
-            </div>
-            <div className="flex items-center gap-1.5 text-gray-700">
-              <span className="text-emerald-600 font-bold">✓</span>
-              <span>Authority: <strong className="text-gray-900">VP of Engineering</strong></span>
-            </div>
-            <div className="flex items-center gap-1.5 text-gray-700">
-              <span className="text-emerald-600 font-bold">✓</span>
-              <span>Need: <strong className="text-gray-900">CRM & RAG Migration</strong></span>
-            </div>
-            <div className="flex items-center gap-1.5 text-gray-700">
-              <span className="text-emerald-600 font-bold">✓</span>
-              <span>Timeline: <strong className="text-gray-900">4 Weeks Target</strong></span>
-            </div>
-          </div>
-        </div>
-
-        {/* Objections List */}
-        <div className="p-4 rounded-xl bg-rose-50/50 border border-rose-100 space-y-2">
-          <div className="text-xs font-bold text-rose-800 uppercase tracking-wider mb-1">Active Objections (Agent 5)</div>
-          {!selectedDeal.objections || selectedDeal.objections.length === 0 ? (
-            <div className="text-xs text-gray-500 italic">No active objections recorded from recent calls.</div>
-          ) : (
-            <div className="space-y-1.5 max-h-36 overflow-y-auto pr-1">
-              {selectedDeal.objections.map((obj, i) => (
-                <div key={i} className="p-2 bg-white rounded-lg border border-rose-100 text-xs shadow-2xs flex flex-col gap-1">
-                  <div className="flex items-center gap-1.5">
-                    <span className="bg-rose-50 text-rose-700 border border-rose-100 rounded-md capitalize text-[9px] px-1.5 py-0.5 font-bold">
-                      {obj.category || 'other'}
-                    </span>
-                  </div>
-                  <div className="text-gray-700 leading-relaxed italic">"{obj.text}"</div>
-                </div>
-              ))}
-            </div>
-          )}
-        </div>
-
-        {/* Associated Contact Link */}
-        {selectedDeal.contact_id && (
-          <div className="flex items-center justify-between p-3 rounded-xl bg-slate-50 border border-slate-200">
-            <div>
-              <div className="text-[10px] text-gray-500 font-semibold uppercase">Associated Contact & Thread</div>
-              <div className="text-xs font-bold text-gray-800 mt-0.5">Lauren Bell (Galvin Technologies)</div>
-            </div>
-            <a
-              href={`/contacts/${selectedDeal.contact_id}`}
-              className="text-xs font-semibold text-blue-600 hover:text-blue-700 bg-blue-50 border border-blue-200 px-3 py-1.5 rounded-lg transition-colors inline-flex items-center gap-1"
-            >
-              <span>View Conversation Thread</span>
-              <span>→</span>
-            </a>
-          </div>
-        )}
-      </div>
-    </div>
-  )
-}
-
 // ── Revenue Page ──────────────────────────────────────────────────────────
 export function Revenue() {
   const { activeSessionId, ourCompanyName } = useSession()
   const { data: forecast } = useQuery({ queryKey: ['forecast'], queryFn: fetchForecast })
+  const { data: deals = [] } = useQuery({
+    queryKey: ['deals', activeSessionId],
+    queryFn: () => fetchDeals(activeSessionId != null ? { user_input_id: activeSessionId } : {}),
+  })
   const { data: metrics = {} } = useQuery({
     queryKey: ['funnel-metrics', 30],
     queryFn: () => fetchFunnelMetrics(30),
@@ -528,53 +414,64 @@ export function Revenue() {
 
   return (
     <div className="max-w-6xl mx-auto">
-      <div className="mb-6">
-        <h1 className="text-xl font-semibold text-gray-100">
-          Revenue Intelligence {ourCompanyName ? `for ${ourCompanyName}` : ''}
-        </h1>
-        <p className="text-sm text-gray-500 mt-0.5">A7 forecast model — 30/60/90-day pipeline</p>
+      <div className="mb-6 flex justify-between items-center">
+        <div>
+          <h1 className="text-xl font-semibold text-gray-100">
+            Revenue Intelligence {ourCompanyName ? `for ${ourCompanyName}` : ''}
+          </h1>
+          <p className="text-sm text-gray-500 mt-0.5">A7 forecast model — Multi-factor deal-level pipeline intelligence</p>
+        </div>
+        {forecast?.current_pipeline_value != null && (
+          <div className="text-right">
+            <div className="text-xs text-gray-400">Total Active Pipeline</div>
+            <div className="text-lg font-bold text-gray-100">${Math.round(forecast.current_pipeline_value).toLocaleString()}</div>
+          </div>
+        )}
       </div>
 
       {/* Forecast cards */}
       <div className="grid grid-cols-3 gap-4 mb-6">
         {[
-          { label: '30-Day Forecast', val: forecast?.forecast_30d },
-          { label: '60-Day Forecast', val: forecast?.forecast_60d },
-          { label: '90-Day Forecast', val: forecast?.forecast_90d },
+          { label: '30-Day Forecast', val: forecast?.forecast_30d, note: 'Near-term closing expected value' },
+          { label: '60-Day Forecast', val: forecast?.forecast_60d, note: 'Mid-term velocity-weighted forecast' },
+          { label: '90-Day Forecast', val: forecast?.forecast_90d, note: 'Full quarterly pipeline conversion' },
         ].map(f => (
           <div key={f.label} className="stat-card">
             <div className="stat-label">{f.label}</div>
-            <div className="stat-value">
-              {f.val != null ? `$${(f.val/1000).toFixed(0)}k` : '—'}
+            <div className="stat-value text-blue-400 font-bold">
+              {f.val != null ? `$${Math.round(f.val).toLocaleString()}` : '—'}
             </div>
+            <div className="text-[11px] text-gray-500 mt-1">{f.note}</div>
           </div>
         ))}
       </div>
 
-      <div className="grid grid-cols-1 lg:grid-cols-2 gap-4 mb-4">
+      <div className="grid grid-cols-1 lg:grid-cols-2 gap-4 mb-6">
         {/* Constraint */}
         {forecast?.bottleneck_stage && (
           <div className="card border-amber-800/40 bg-amber-900/10">
             <div className="flex items-center gap-2 mb-2">
               <AlertTriangle size={14} className="text-amber-400" />
-              <span className="text-sm font-medium text-amber-300">Constraint Detected</span>
+              <span className="text-sm font-medium text-amber-300">Pipeline Constraint Identified</span>
             </div>
-            <div className="text-sm text-amber-400 font-medium capitalize mb-1">{forecast.bottleneck_stage} Stage</div>
+            <div className="text-sm text-amber-400 font-medium capitalize mb-1">{forecast.bottleneck_stage} Stage Bottleneck</div>
             <div className="text-xs text-gray-400 mb-3">{forecast.bottleneck_description}</div>
-            <div className="text-xs text-blue-400">→ {forecast.recommended_lever}</div>
+            <div className="text-xs text-blue-400 font-medium bg-blue-950/40 p-2.5 rounded border border-blue-900/30">
+              <strong className="text-blue-300">Recommended Growth Lever:</strong> {forecast.recommended_lever}
+            </div>
           </div>
         )}
 
         {/* Stage conversion rates */}
         <div className="card">
-          <div className="section-title">Stage Conversion Rates</div>
-          <div className="section-sub">Current vs historical baseline</div>
-          <div className="space-y-2">
+          <div className="section-title">Stage Conversion Rates & Velocity</div>
+          <div className="section-sub">Current transition probabilities (A7 calibrated model)</div>
+          <div className="space-y-2 mt-2">
             {stages.map(s => (
               <div key={s.stage}>
                 <div className="flex justify-between text-xs mb-1">
-                  <span className="text-gray-500 capitalize">{s.stage}</span>
-                  <span className="text-gray-300">{s.rate}%</span>
+                  <span className="text-gray-400 capitalize">{s.stage} Transition</span>
+                  <span className="text-gray-200 font-medium">{s.rate}%</span>
                 </div>
                 <div className="score-bar">
                   <div className="score-fill bg-blue-500" style={{ width: `${s.rate}%` }} />
@@ -586,6 +483,76 @@ export function Revenue() {
             )}
           </div>
         </div>
+      </div>
+
+      {/* Deal-Level Revenue Predictions */}
+      <div className="card mb-6">
+        <div className="flex justify-between items-center mb-2">
+          <div>
+            <div className="section-title">Deal-Level Revenue Predictions</div>
+            <div className="section-sub">Individual deal expected values based on BANT qualification, health score & time-in-stage decay</div>
+          </div>
+          <span className="text-xs text-gray-400 bg-gray-800 px-2.5 py-1 rounded border border-gray-700">
+            {deals.length} Active Deals
+          </span>
+        </div>
+
+        {deals.length === 0 ? (
+          <div className="text-sm text-gray-500 text-center py-6">No active deals recorded. Run A5 Deal Intelligence to sync pipeline.</div>
+        ) : (
+          <div className="overflow-x-auto mt-3">
+            <table className="w-full text-left border-collapse text-xs">
+              <thead>
+                <tr className="border-b border-gray-800 text-gray-400 font-medium">
+                  <th className="py-2.5 px-3">Deal / Company</th>
+                  <th className="py-2.5 px-3">Stage</th>
+                  <th className="py-2.5 px-3 text-right">Deal Value</th>
+                  <th className="py-2.5 px-3 text-center">Win Probability</th>
+                  <th className="py-2.5 px-3 text-right">Expected Revenue</th>
+                  <th className="py-2.5 px-3">Next Best Action</th>
+                </tr>
+              </thead>
+              <tbody className="divide-y divide-gray-800/60">
+                {deals.map(deal => {
+                  const amt = deal.amount || 50000
+                  const prob = deal.win_probability != null ? deal.win_probability : 35
+                  const ev = (amt * prob) / 100
+                  return (
+                    <tr key={deal.id} className="hover:bg-gray-800/30 transition-colors">
+                      <td className="py-2.5 px-3">
+                        <div className="font-medium text-gray-200">{deal.name}</div>
+                        <div className="text-[11px] text-gray-500">{deal.contact?.company || 'Enterprise Account'}</div>
+                      </td>
+                      <td className="py-2.5 px-3">
+                        <span className="inline-block px-2 py-0.5 rounded text-[10px] font-medium uppercase tracking-wide bg-blue-900/30 text-blue-300 border border-blue-800/40">
+                          {deal.stage}
+                        </span>
+                      </td>
+                      <td className="py-2.5 px-3 text-right font-medium text-gray-200">
+                        ${Math.round(amt).toLocaleString()}
+                      </td>
+                      <td className="py-2.5 px-3 text-center">
+                        <span className={`inline-block px-2 py-0.5 rounded font-bold text-xs ${
+                          prob >= 50 ? 'bg-emerald-900/30 text-emerald-400 border border-emerald-800/40' :
+                          prob >= 30 ? 'bg-amber-900/30 text-amber-400 border border-amber-800/40' :
+                          'bg-gray-800 text-gray-400 border border-gray-700'
+                        }`}>
+                          {Math.round(prob)}%
+                        </span>
+                      </td>
+                      <td className="py-2.5 px-3 text-right font-bold text-blue-400">
+                        ${Math.round(ev).toLocaleString()}
+                      </td>
+                      <td className="py-2.5 px-3 text-gray-400 max-w-xs truncate" title={deal.next_best_action || 'Review stage progression'}>
+                        {deal.next_best_action || 'Schedule follow-up and review BANT criteria'}
+                      </td>
+                    </tr>
+                  )
+                })}
+              </tbody>
+            </table>
+          </div>
+        )}
       </div>
 
       {/* Activity breakdown */}
@@ -713,6 +680,13 @@ export function Agents() {
           await Promise.all([
             queryClient.invalidateQueries({ queryKey: ['overview'] }),
             queryClient.invalidateQueries({ queryKey: ['contacts'] }),
+            queryClient.invalidateQueries({ queryKey: ['deals'] }),
+            queryClient.invalidateQueries({ queryKey: ['pipeline-summary'] }),
+            queryClient.invalidateQueries({ queryKey: ['pending-actions'] }),
+            queryClient.invalidateQueries({ queryKey: ['content'] }),
+            queryClient.invalidateQueries({ queryKey: ['forecast'] }),
+            queryClient.invalidateQueries({ queryKey: ['drafts'] }),
+            queryClient.invalidateQueries({ queryKey: ['outreach-drafts'] }),
             queryClient.invalidateQueries({ queryKey: ['funnel-metrics'] }),
           ])
           break
@@ -827,6 +801,13 @@ export function Agents() {
       await Promise.all([
         queryClient.invalidateQueries({ queryKey: ['overview'] }),
         queryClient.invalidateQueries({ queryKey: ['contacts'] }),
+        queryClient.invalidateQueries({ queryKey: ['deals'] }),
+        queryClient.invalidateQueries({ queryKey: ['pipeline-summary'] }),
+        queryClient.invalidateQueries({ queryKey: ['pending-actions'] }),
+        queryClient.invalidateQueries({ queryKey: ['content'] }),
+        queryClient.invalidateQueries({ queryKey: ['forecast'] }),
+        queryClient.invalidateQueries({ queryKey: ['drafts'] }),
+        queryClient.invalidateQueries({ queryKey: ['outreach-drafts'] }),
         queryClient.invalidateQueries({ queryKey: ['funnel-metrics'] }),
       ])
     } catch (error) {

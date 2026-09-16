@@ -231,6 +231,38 @@ def reply_approval_timeout(thread_event_id: str):
     return run_async(_run())
 
 
+@celery_app.task(name="app.workers.scheduler_tasks.poll_gmail_inbox", queue="webhooks")
+def poll_gmail_inbox(config: Optional[Dict] = None):
+    """
+    Polls Gmail inbox via IMAP for unread prospect replies and dispatches each to A4.
+    """
+    async def _run():
+        from app.services.gmail_imap_service import GmailIMAPService
+        from app.agents.a4_inbound import InboundAgent
+
+        service = GmailIMAPService()
+        unread = service.fetch_unread_replies()
+        logger.info("Gmail IMAP poller fetched replies", count=len(unread))
+
+        processed = []
+        async with AsyncSessionLocal() as db:
+            agent = InboundAgent(db)
+            for item in unread:
+                payload = {
+                    "event_type": "reply_received",
+                    "from_address": item["from_address"],
+                    "reply_text": item["reply_text"],
+                    "subject": item.get("subject", ""),
+                }
+                res = await agent.handle_reply(payload)
+                processed.append({"from": item["from_address"], "res": res})
+            await db.commit()
+
+        return {"count": len(processed), "processed": processed}
+
+    return run_async(_run())
+
+
 # ── A4 test task — simulate a reply for dev/testing ───────────────────────
 
 @celery_app.task(name="app.workers.agent_tasks.run_a4_test", queue="webhooks")

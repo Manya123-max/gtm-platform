@@ -49,6 +49,8 @@ function AgentTrigger() {
   const agents = [
     { id: 'A1', label: 'Prospect', desc: 'Find new contacts' },
     { id: 'A2', label: 'Signal', desc: 'Scan buying signals' },
+    { id: 'A3', label: 'Outreach', desc: 'Draft outreach' },
+    { id: 'A5', label: 'Deal Intel', desc: 'Transcripts & deals' },
     { id: 'A6', label: 'Content', desc: 'Generate content' },
     { id: 'A7', label: 'Forecast', desc: 'Update forecast' },
   ]
@@ -61,6 +63,9 @@ function AgentTrigger() {
       await Promise.all([
         queryClient.invalidateQueries({ queryKey: ['overview'] }),
         queryClient.invalidateQueries({ queryKey: ['contacts'] }),
+        queryClient.invalidateQueries({ queryKey: ['deals'] }),
+        queryClient.invalidateQueries({ queryKey: ['pipeline-summary'] }),
+        queryClient.invalidateQueries({ queryKey: ['pending-actions'] }),
         queryClient.invalidateQueries({ queryKey: ['funnel-metrics'] }),
       ])
     } catch (error) {
@@ -74,9 +79,9 @@ function AgentTrigger() {
     <div className="card">
       <div className="flex items-center gap-2 mb-4">
         <Bot size={15} className="text-blue-400" />
-        <span className="section-title mb-0">Quick Run</span>
+        <span className="section-title mb-0">Quick Run Agents</span>
       </div>
-      <div className="grid grid-cols-2 gap-2">
+      <div className="grid grid-cols-2 md:grid-cols-3 gap-2">
         {agents.map(a => (
           <button
             key={a.id}

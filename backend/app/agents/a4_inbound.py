@@ -155,6 +155,24 @@ class InboundAgent:
         logger.info("A4: Generating draft reply via Claude Haiku", contact_id=contact.id, intent=intent)
         draft = await self._generate_draft(contact, reply_text, thread, intent)
 
+        # Check if meeting threshold crossed or positive interest
+        should_request_meeting = (
+            intent in ["meeting_request", "interested", "pricing", "technical_question"]
+            or new_score >= settings.READINESS_SCORE_MEETING_THRESHOLD
+        )
+
+        # Embed Cal.com link directly in the draft body so it is visible in Slack and in the email
+        if should_request_meeting:
+            try:
+                booking_link = await self.cal.get_booking_link(
+                    contact_email=contact.email,
+                    contact_name=f"{contact.first_name or ''} {contact.last_name or ''}".strip(),
+                )
+                if booking_link and "cal.com" not in draft.lower():
+                    draft = draft.rstrip() + f"\n\nHere's my calendar if you'd like to select a date and time that works best: {booking_link}"
+            except Exception as cal_err:
+                logger.warning("A4: Failed to append Cal.com booking link", error=str(cal_err))
+
         # Record thread event (ConversationThread is the single source of truth)
         logger.info("A4: Storing event in ConversationThread", contact_id=contact.id)
         thread_event = await self._record_thread_event(
@@ -167,9 +185,6 @@ class InboundAgent:
             "intent": intent,
             "readiness_score": new_score,
         })
-
-        # Check if meeting threshold crossed
-        should_request_meeting = new_score >= settings.READINESS_SCORE_MEETING_THRESHOLD
 
         # Notify a human — Slack (interactive) or ntfy (heads-up only)
         logger.info("A4: Sending draft response for manual approval", contact_id=contact.id, thread_event_id=thread_event.id)
@@ -246,24 +261,45 @@ class InboundAgent:
         )
         contact = contact_result.scalar_one_or_none()
 
-        # Get booking link if readiness score is high enough
+        # Get booking link if readiness score is high enough and not already in draft
         booking_link = None
-        if (contact and contact.readiness_score >= settings.READINESS_SCORE_MEETING_THRESHOLD):
+        final_response = thread_event.draft_content or ""
+        if "cal.com" not in final_response.lower() and (contact and contact.readiness_score >= settings.READINESS_SCORE_MEETING_THRESHOLD):
             booking_link = await self.cal.get_booking_link(
                 contact_email=contact.email,
                 contact_name=f"{contact.first_name or ''} {contact.last_name or ''}".strip(),
             )
-
-        # Send the approved reply via Resend
-        if settings.ENABLE_EMAIL_SENDING and contact:
-            final_response = thread_event.draft_content or ""
             if booking_link:
-                final_response += f"\n\nHere's my calendar if you'd like to find a time: {booking_link}"
-            await self._send_reply_via_resend(contact, final_response)
+                final_response += f"\n\nHere's my calendar if you'd like to select a date and time that works best: {booking_link}"
+
+        # Determine subject
+        reply_subject = "Re: Your inquiry"
+        if thread_event.subject:
+            sub = thread_event.subject.strip()
+            reply_subject = sub if sub.lower().startswith("re:") else f"Re: {sub}"
+
+        # Send the approved reply via SMTP/Resend
+        if settings.ENABLE_EMAIL_SENDING and contact:
+            await self._send_reply_via_resend(contact, final_response, subject=reply_subject)
 
         thread_event.approved_by = approved_by
         thread_event.approved_at = datetime.utcnow()
         thread_event.sent_at = datetime.utcnow()
+
+        # Insert outbound reply event into ConversationThread history
+        outbound_reply_event = ConversationThread(
+            contact_id=contact.id if contact else thread_event.contact_id,
+            event_type="reply_sent",
+            direction="outbound",
+            channel="email",
+            content=final_response,
+            readiness_score_after=contact.readiness_score if contact else 100,
+            approved_by=approved_by,
+            approved_at=datetime.utcnow(),
+            sent_at=datetime.utcnow(),
+            occurred_at=datetime.utcnow(),
+        )
+        self.db.add(outbound_reply_event)
         await self.db.commit()
 
         # Update Slack message UI in-place if tracking ID exists
@@ -396,10 +432,29 @@ Intent classes:
             cleaned_result = _clean_json_str(result)
             import json
             parsed = json.loads(cleaned_result)
-            return parsed.get("intent", "unknown"), parsed.get("confidence", 0.5)
+            intent = parsed.get("intent", "unknown")
+            confidence = parsed.get("confidence", 0.5)
+            if intent and intent in REPLY_INTENT_CLASSES and intent != "unknown":
+                return intent, confidence
         except Exception as e:
-            logger.error("Intent classification failed", error=str(e))
-            return "unknown", 0.0
+            logger.error("Intent classification LLM call failed", error=str(e))
+
+        # Robust rule-based fallback heuristic if LLM returns unknown or fails
+        text_lower = reply_text.lower()
+        if any(w in text_lower for w in ["demo", "schedule", "meeting", "call", "book a time", "calendar", "time to talk"]):
+            logger.info("A4: Rule-based fallback classified meeting_request", text_snippet=reply_text[:60])
+            return "meeting_request", 0.9
+        elif any(w in text_lower for w in ["interested", "pricing", "cost", "quote", "rates", "tell me more"]):
+            logger.info("A4: Rule-based fallback classified interested", text_snippet=reply_text[:60])
+            return "interested", 0.85
+        elif any(w in text_lower for w in ["unsubscribe", "opt out", "remove me", "stop email"]):
+            logger.info("A4: Rule-based fallback classified unsubscribe", text_snippet=reply_text[:60])
+            return "unsubscribe", 0.95
+        elif any(w in text_lower for w in ["not interested", "no thanks", "pass"]):
+            logger.info("A4: Rule-based fallback classified not_interested", text_snippet=reply_text[:60])
+            return "not_interested", 0.9
+        
+        return "unknown", 0.0
 
     async def _generate_draft(
         self, contact: Contact, reply_text: str,
@@ -445,10 +500,63 @@ Return only the email body text, no subject line."""
         return list(result.scalars().all())
 
     async def _find_contact(self, email: str) -> Optional[Contact]:
+        import os
+        # 1. Exact match
         result = await self.db.execute(
             select(Contact).where(Contact.email == email)
         )
-        return result.scalar_one_or_none()
+        contact = result.scalar_one_or_none()
+        if contact:
+            return contact
+
+        # 2. Case insensitive match
+        result = await self.db.execute(
+            select(Contact).where(Contact.email.ilike(email))
+        )
+        contact = result.scalar_one_or_none()
+        if contact:
+            return contact
+
+        # 3. Fallback for test override email
+        test_override = getattr(settings, "TEST_EMAIL_OVERRIDE", "") or os.getenv("TEST_EMAIL_OVERRIDE", "")
+        if test_override and (email.lower() == test_override.lower() or "forcecloudlabs" in email.lower()):
+            sub_res = await self.db.execute(
+                select(Contact).join(OutreachLog, Contact.id == OutreachLog.contact_id)
+                .order_by(OutreachLog.sent_at.desc())
+                .limit(1)
+            )
+            latest_contact = sub_res.scalar_one_or_none()
+            if latest_contact:
+                logger.info("A4: Fallback test contact matched latest emailed contact", email=email, contact_id=latest_contact.id)
+                return latest_contact
+
+        # 4. If not found in contacts, auto-create a new inbound contact so every client reply triggers Slack approval
+        if email and "@" in email:
+            try:
+                name_part = email.split("@")[0]
+                domain_part = email.split("@")[1]
+                first_name = name_part.replace(".", " ").replace("_", " ").title().split()[0] if name_part else "Lead"
+                company = domain_part.split(".")[0].title() if domain_part.lower() not in ["gmail.com", "yahoo.com", "outlook.com", "hotmail.com"] else "Inbound Company"
+                
+                from app.models.models import UserInput
+                user_input_res = await self.db.execute(select(UserInput.id).order_by(UserInput.id.desc()).limit(1))
+                active_session_id = user_input_res.scalar_one_or_none()
+                
+                new_contact = Contact(
+                    email=email.strip().lower(),
+                    first_name=first_name,
+                    company=company,
+                    user_input_id=active_session_id,
+                    readiness_score=50.0,
+                )
+                self.db.add(new_contact)
+                await self.db.flush()
+                logger.info("A4: Auto-created new contact for inbound email", email=email, contact_id=new_contact.id)
+                return new_contact
+            except Exception as ex:
+                logger.error("A4: Failed to auto-create contact", email=email, error=str(ex))
+
+        return None
 
     async def _record_thread_event(
         self, contact_id: str, content: str, intent: str,
@@ -474,18 +582,46 @@ Return only the email body text, no subject line."""
         await self.db.refresh(event)
         return event
 
-    async def _send_reply_via_resend(self, contact: Contact, body: str):
-        """Send the reply email via Resend (free tier)."""
-        html = "<br>".join(body.splitlines()) or body
-        message_id = await self.resend.send_email(
-            to=contact.email,
-            subject="Re: your message",
-            html=html,
+    async def _send_reply_via_resend(self, contact: Optional[Contact], body: str, subject: str = "Re: Your inquiry"):
+        """Send the reply email via SMTP (primary) or Resend (fallback)."""
+        import re
+        html_body = body
+        # Convert any http/https URL into a clean, clickable anchor tag
+        html_body = re.sub(
+            r'(https?://[^\s<>"]+)',
+            r'<a href="\1" style="color: #2563eb; font-weight: 500; text-decoration: underline;">\1</a>',
+            html_body
         )
-        if message_id:
-            logger.info("Resend reply sent", email=contact.email, message_id=message_id)
-        else:
-            logger.error("Resend reply send failed", email=contact.email)
+        formatted_html = f"<div style='font-family: -apple-system, BlinkMacSystemFont, Segoe UI, Roboto, Helvetica, Arial, sans-serif; font-size: 15px; line-height: 1.6; color: #1e293b;'>{'<br/>'.join(html_body.splitlines())}</div>"
+        
+        target_to = getattr(settings, "TEST_EMAIL_OVERRIDE", "") or (contact.email if contact else "") or "ibmsuriya@gmail.com"
+
+        # 1. Try SMTP if configured
+        if getattr(settings, "SMTP_USER", "") and getattr(settings, "SMTP_PASSWORD", ""):
+            from app.services import SMTPService
+            smtp_svc = SMTPService()
+            provider_id = await smtp_svc.send_email(
+                to=target_to,
+                subject=subject,
+                html=formatted_html,
+            )
+            if provider_id:
+                logger.info("A4: Reply email successfully dispatched via SMTP", target=target_to, original_contact=contact.email if contact else "", subject=subject, provider_id=provider_id)
+                return provider_id
+
+        # 2. Try Resend if configured
+        if settings.RESEND_API_KEY:
+            message_id = await self.resend.send_email(
+                to=target_to,
+                subject=subject,
+                html=formatted_html,
+            )
+            if message_id:
+                logger.info("A4: Reply email successfully dispatched via Resend", target=target_to, original_contact=contact.email if contact else "", subject=subject, message_id=message_id)
+                return message_id
+
+        logger.error("A4: Email dispatch failed — neither SMTP nor Resend succeeded", target=target_to)
+        return None
 
     async def _log_funnel_event(self, event_type: str, contact_id: str, metadata: Dict):
         event = FunnelEvent(

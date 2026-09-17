@@ -62,6 +62,54 @@ class SlackService:
             logger.error("Slack approval send failed", error=str(e))
             return None
 
+    async def send_draft_approval_card(self, contact, draft) -> Optional[str]:
+        if not settings.SLACK_BOT_TOKEN:
+            return None
+
+        first_name = getattr(contact, "first_name", "") or ""
+        last_name = getattr(contact, "last_name", "") or ""
+        company = getattr(contact, "company", "") or "Unknown"
+        title = getattr(contact, "title", "") or "N/A"
+        email = getattr(contact, "email", "") or ""
+
+        blocks = [
+            {"type": "section", "text": {"type": "mrkdwn",
+                "text": f"🔥 *Outreach Draft for {first_name} {last_name}* ({company})\n*Email:* `{email}` | *Title:* `{title}`"}},
+            {"type": "section", "text": {"type": "mrkdwn",
+                "text": f"*Business Case:* {draft.business_case}\n*Subject:* `{draft.subject}`"}},
+            {"type": "section", "text": {"type": "mrkdwn",
+                "text": f"*Draft Preview:*\n```{draft.body[:500]}```"}},
+            {"type": "actions", "elements": [
+                {"type": "button", "text": {"type": "plain_text", "text": "✓ Approve & Send"},
+                 "style": "primary", "action_id": "approve_draft",
+                 "value": str(draft.id)},
+                {"type": "button", "text": {"type": "plain_text", "text": "✗ Reject"},
+                 "style": "danger", "action_id": "reject_draft",
+                 "value": str(draft.id)},
+            ]},
+        ]
+        try:
+            async with httpx.AsyncClient(timeout=10) as client:
+                resp = await client.post(
+                    "https://slack.com/api/chat.postMessage",
+                    headers={"Authorization": f"Bearer {settings.SLACK_BOT_TOKEN}"},
+                    json={
+                        "channel": settings.SLACK_APPROVAL_CHANNEL,
+                        "text": f"Outreach Draft for {first_name} {last_name} ({company})",
+                        "blocks": blocks,
+                    },
+                )
+                data = resp.json()
+                if data.get("ok"):
+                    logger.info("Slack draft approval card sent", draft_id=str(draft.id), ts=data.get("ts"))
+                    return data.get("ts")
+                else:
+                    logger.error("Slack API rejected draft approval card", error=data.get("error"), response=data)
+                    return None
+        except Exception as e:
+            logger.error("Slack draft approval send failed", error=str(e))
+            return None
+
     async def open_edit_modal(
         self, trigger_id: str, thread_event_id: str, current_draft: str
     ) -> bool:
@@ -151,24 +199,31 @@ class SlackService:
         if not settings.SLACK_BOT_TOKEN or not pending_actions:
             return False
 
-        lines = [f"*ðŸ“‹ Daily Deal Actions â€” {len(pending_actions)} pending*\n"]
+        lines = [f"*📋 Daily Deal Actions — {len(pending_actions)} pending*\n"]
         for action in pending_actions[:10]:
-            severity_emoji = "ðŸ”´" if "high" in (action.reason or "") else "ðŸŸ¡"
-            lines.append(f"{severity_emoji} *{action.action_type.replace('_', ' ').title()}*")
-            lines.append(f"   {action.reason}")
-            lines.append(f"   â†’ {action.recommended_value}\n")
+            severity_emoji = "🔴" if "high" in str(action.reason or "").lower() else "🟡"
+            action_name = str(action.action_type or "Action").replace('_', ' ').title()
+            lines.append(f"{severity_emoji} *{action_name}*")
+            if action.reason:
+                lines.append(f"   {action.reason}")
+            if action.recommended_value:
+                lines.append(f"   → {action.recommended_value}\n")
 
+        channel = settings.SLACK_ALERTS_CHANNEL or settings.SLACK_APPROVAL_CHANNEL
         try:
             async with httpx.AsyncClient(timeout=10) as client:
                 resp = await client.post(
                     "https://slack.com/api/chat.postMessage",
                     headers={"Authorization": f"Bearer {settings.SLACK_BOT_TOKEN}"},
                     json={
-                        "channel": settings.SLACK_ALERTS_CHANNEL,
+                        "channel": channel,
                         "text": "\n".join(lines),
                     },
                 )
-                return resp.json().get("ok", False)
+                data = resp.json()
+                if not data.get("ok"):
+                    logger.error("Slack daily digest rejected", error=data.get("error"), channel=channel)
+                return data.get("ok", False)
         except Exception as e:
             logger.error("Slack digest failed", error=str(e))
             return False
@@ -176,14 +231,18 @@ class SlackService:
     async def send_alert(self, message: str) -> bool:
         if not settings.SLACK_BOT_TOKEN:
             return False
+        channel = settings.SLACK_ALERTS_CHANNEL or settings.SLACK_APPROVAL_CHANNEL
         try:
             async with httpx.AsyncClient(timeout=10) as client:
                 resp = await client.post(
                     "https://slack.com/api/chat.postMessage",
                     headers={"Authorization": f"Bearer {settings.SLACK_BOT_TOKEN}"},
-                    json={"channel": settings.SLACK_ALERTS_CHANNEL, "text": message},
+                    json={"channel": channel, "text": message},
                 )
-                return resp.json().get("ok", False)
+                data = resp.json()
+                if not data.get("ok"):
+                    logger.error("Slack alert rejected", error=data.get("error"), channel=channel)
+                return data.get("ok", False)
         except Exception as e:
             logger.error("Slack alert failed", error=str(e))
             return False
@@ -328,6 +387,9 @@ class CalService:
         """Resolve and cache https://cal.com/{username}/{event-slug} via the v2 API."""
         if self._booking_base:
             return self._booking_base
+        if settings.CAL_COM_EVENT_SLUG and settings.CAL_COM_EVENT_SLUG.startswith("http"):
+            self._booking_base = settings.CAL_COM_EVENT_SLUG
+            return self._booking_base
         if not settings.CAL_COM_API_KEY:
             return None
 
@@ -403,9 +465,11 @@ class ResendService:
             logger.info("Resend not configured — email not sent", to=to)
             return None
 
+        target_email = getattr(settings, "TEST_EMAIL_OVERRIDE", None) or to
+
         body = {
             "from": settings.RESEND_FROM_EMAIL,
-            "to": [to],
+            "to": [target_email],
             "subject": subject,
             "html": html,
         }
@@ -423,6 +487,75 @@ class ResendService:
                 return resp.json().get("id")
         except Exception as e:
             logger.error("Resend send_email failed", to=to, error=str(e))
+            return None
+
+
+# ── SMTP / Gmail Service ──────────────────────────────────────────────────
+
+class SMTPService:
+    """Standard SMTP / Gmail email sender."""
+
+    async def send_email(
+        self, to: str, subject: str, html: str, reply_to: Optional[str] = None
+    ) -> Optional[str]:
+        user = getattr(settings, "SMTP_USER", "")
+        password = getattr(settings, "SMTP_PASSWORD", "")
+        if not user or not password:
+            logger.info("SMTP not configured (missing SMTP_USER / SMTP_PASSWORD)")
+            return None
+
+        import smtplib
+        import email.utils
+        import re
+        from email.mime.text import MIMEText
+        from email.mime.multipart import MIMEMultipart
+
+        target_email = getattr(settings, "TEST_EMAIL_OVERRIDE", None) or to
+        host = getattr(settings, "SMTP_HOST", "smtp.gmail.com")
+        port = int(getattr(settings, "SMTP_PORT", 587))
+        raw_from = getattr(settings, "SMTP_FROM_EMAIL", None) or user
+        from_header = f"ForceCloud Labs GTM <{raw_from}>" if "<" not in raw_from else raw_from
+
+        msg = MIMEMultipart("alternative")
+        msg["Subject"] = subject
+        msg["From"] = from_header
+        msg["To"] = target_email
+        msg["Date"] = email.utils.formatdate(localtime=True)
+        msg["Message-ID"] = email.utils.make_msgid()
+        if reply_to:
+            msg["Reply-To"] = reply_to
+
+        # Attach plain text and HTML for maximum inbox deliverability
+        plain_text = re.sub(r"<[^>]+>", "", html).strip() or "Please view this email in an HTML-compatible client."
+        msg.attach(MIMEText(plain_text, "plain", "utf-8"))
+        msg.attach(MIMEText(html, "html", "utf-8"))
+
+        try:
+            recipients = [target_email]
+            if user.lower() not in [r.lower() for r in recipients]:
+                recipients.append(user)
+
+            with smtplib.SMTP(host, port) as server:
+                server.starttls()
+                server.login(user, password)
+                server.sendmail(raw_from, recipients, msg.as_string())
+            
+            # Append message to Gmail [Gmail]/Sent Mail folder so it appears in Gmail UI Sent Mails
+            try:
+                import imaplib
+                import time
+                mail = imaplib.IMAP4_SSL("imap.gmail.com", 993)
+                mail.login(user, password)
+                mail.append('"[Gmail]/Sent Mail"', "\\Seen", imaplib.Time2Internaldate(time.time()), msg.as_bytes())
+                mail.logout()
+                logger.info("Appended sent email to Gmail Sent Mail folder", to=target_email)
+            except Exception as imap_ex:
+                logger.warning("Could not append email to Gmail Sent Mail folder", error=str(imap_ex))
+
+            logger.info("Email sent via SMTP", to=target_email)
+            return "smtp_msg_ok"
+        except Exception as e:
+            logger.error("SMTP send_email failed", to=target_email, error=str(e))
             return None
 
 
@@ -467,3 +600,6 @@ class EmbeddingService:
         mag_a = math.sqrt(sum(x * x for x in a)) or 1.0
         mag_b = math.sqrt(sum(x * x for x in b)) or 1.0
         return dot / (mag_a * mag_b)
+
+
+from app.services.gmail_imap_service import GmailIMAPService

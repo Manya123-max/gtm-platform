@@ -8,14 +8,14 @@ from uuid import UUID
 from fastapi import APIRouter, Depends, HTTPException, Query, BackgroundTasks
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select, and_, func, desc, asc
+from sqlalchemy.orm import selectinload
 from pydantic import BaseModel
 
 from app.core.config import settings
 from app.core.database import get_db
-from app.core.config import settings
 from app.models.models import (
     Contact, SignalEvent, OutreachLog, ConversationThread,
-    Deal, FunnelEvent, GeneratedContent, RevenueForecast,
+    Deal, DealStageHistory, FunnelEvent, GeneratedContent, RevenueForecast,
     PendingAction, ActionStatus, SignalConversionRegistry,
     PromptVariant, WorkflowRun, AgentSchedule, OutreachDraft,
     ContactUserInputAssociation
@@ -47,6 +47,31 @@ class ContactOut(BaseModel):
         from_attributes = True
 
 
+class DealContactOut(BaseModel):
+    id: str
+    first_name: Optional[str] = None
+    last_name: Optional[str] = None
+    email: Optional[str] = None
+    company: Optional[str] = None
+    title: Optional[str] = None
+    industry: Optional[str] = None
+    linkedin_url: Optional[str] = None
+    icp_score: Optional[float] = None
+    signal_score: Optional[float] = None
+    class Config:
+        from_attributes = True
+
+
+class DealStageHistoryOut(BaseModel):
+    id: str
+    from_stage: Optional[str] = None
+    to_stage: str
+    days_in_from_stage: Optional[int] = None
+    transitioned_at: datetime
+    class Config:
+        from_attributes = True
+
+
 class DealOut(BaseModel):
     id: str
     name: str
@@ -67,7 +92,16 @@ class DealOut(BaseModel):
     need_confirmed: Optional[bool] = None
     timeline_confirmed: Optional[bool] = None
     owner_email: Optional[str] = None
+    hubspot_deal_id: Optional[str] = None
+    close_date: Optional[datetime] = None
+    stakeholder_count: int = 1
+    meeting_count: int = 0
+    avg_response_time_hours: Optional[float] = None
+    stage_entered_at: Optional[datetime] = None
+    created_at: Optional[datetime] = None
     updated_at: datetime
+    contact: Optional[DealContactOut] = None
+    stage_history: Optional[List[DealStageHistoryOut]] = None
     class Config:
         from_attributes = True
 
@@ -300,12 +334,15 @@ async def list_deals(
     contact_id: Optional[UUID] = None,
     db: AsyncSession = Depends(get_db),
 ):
-    q = select(Deal).where(Deal.outcome.is_(None))
+    q = select(Deal).options(
+        selectinload(Deal.contact),
+        selectinload(Deal.stage_history)
+    ).where(Deal.outcome.is_(None))
     if contact_id is not None:
         q = q.where(Deal.contact_id == contact_id)
     if user_input_id is not None:
         contact_ids_q = select(ContactUserInputAssociation.contact_id).where(ContactUserInputAssociation.user_input_id == user_input_id)
-        q = q.where(Deal.contact_id.in_(contact_ids_q))
+        q = q.where((Deal.contact_id.in_(contact_ids_q)) | (Deal.contact_id.is_(None)))
     if stage:
         q = q.where(Deal.stage == stage)
     if min_risk is not None:
@@ -320,22 +357,37 @@ async def get_pipeline_summary(
     user_input_id: Optional[int] = None,
     db: AsyncSession = Depends(get_db)
 ):
-    base = select(Deal).where(Deal.outcome.is_(None))
+    where_clauses = [Deal.outcome.is_(None)]
     if user_input_id is not None:
         contact_ids_q = select(ContactUserInputAssociation.contact_id).where(ContactUserInputAssociation.user_input_id == user_input_id)
-        base = base.where(Deal.contact_id.in_(contact_ids_q))
+        where_clauses.append((Deal.contact_id.in_(contact_ids_q)) | (Deal.contact_id.is_(None)))
     result = await db.execute(
         select(Deal.stage, func.count(Deal.id).label("count"),
                func.sum(Deal.amount).label("value"),
                func.avg(Deal.days_in_current_stage).label("avg_days"),
                func.avg(Deal.risk_score).label("avg_risk"))
-        .where(Deal.outcome.is_(None))
-        .where(*([] if user_input_id is None else [Deal.contact_id.in_(select(ContactUserInputAssociation.contact_id).where(ContactUserInputAssociation.user_input_id == user_input_id))]))
+        .where(and_(*where_clauses))
         .group_by(Deal.stage)
     )
     return [{"stage": r.stage, "count": r.count, "value": float(r.value or 0),
              "avg_days": float(r.avg_days or 0), "avg_risk": float(r.avg_risk or 0)}
             for r in result.all()]
+
+
+@router.get("/deals/{deal_id}", response_model=DealOut)
+async def get_deal(deal_id: str, db: AsyncSession = Depends(get_db)):
+    result = await db.execute(
+        select(Deal)
+        .options(
+            selectinload(Deal.contact),
+            selectinload(Deal.stage_history)
+        )
+        .where(Deal.id == deal_id)
+    )
+    deal = result.scalar_one_or_none()
+    if not deal:
+        raise HTTPException(status_code=404, detail="Deal not found")
+    return deal
 
 
 # ── Pending Actions ────────────────────────────────────────────────────────
@@ -1287,3 +1339,12 @@ async def get_outreach_analytics(db: AsyncSession = Depends(get_db)):
         "business_case_performance": business_case_performance,
         "template_performance": template_performance
     }
+
+
+@router.post("/inbound/poll-gmail")
+async def poll_gmail_inbox_endpoint():
+    """Triggers Gmail IMAP poller to check unread emails in intotech7@gmail.com and process replies via A4."""
+    from app.workers.agent_tasks import poll_gmail_inbox
+    task = poll_gmail_inbox.apply_async(queue="webhooks")
+    return {"status": "queued", "task_id": task.id}
+

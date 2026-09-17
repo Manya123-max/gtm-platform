@@ -11,12 +11,13 @@ import httpx
 import json
 import structlog
 from sqlalchemy.ext.asyncio import AsyncSession
-from sqlalchemy import select, and_
+from sqlalchemy import select, and_, or_, desc
 from sqlalchemy.orm import selectinload
 
 from app.core.config import settings
 from app.models.models import (
-    BrandAsset, GeneratedContent, FunnelEvent, Contact, ConversationThread, Deal
+    BrandAsset, GeneratedContent, FunnelEvent, Contact, ConversationThread,
+    Deal, SignalEvent, OutreachDraft, OutreachLog, UserInput
 )
 from app.services.llm_service import LLMService
 from app.services.embedding_service import EmbeddingService
@@ -83,13 +84,12 @@ class ContentAgent:
     A6: Demand-driven content generation.
 
     Flow:
-    1. Scrape ICP forums and competitor blogs for demand signals (Apify)
-    2. Cluster topics by embedding similarity
-    3. Identify gaps vs competitor content
-    4. Generate content brief per topic
-    5. Generate 5 formats per brief (separate Claude call each)
-    6. Tag by ICP segment for use in A3 sequences
-    7. Store with embeddings for brand voice retrieval
+    1. Gather demand signals (external) + Account Buying Signals (A2)
+    2. Identify active ICP segments & target titles from prospects (A1) + UserInput
+    3. Fetch inbound conversation objections (A4), deal transcript objections & risks (A5), and outreach themes (A3)
+    4. Generate 3 unique content briefs taking all upstream pipeline context into account
+    5. Generate 5 formats per brief via dedicated LLM calls
+    6. Tag by ICP segment and persist with embeddings for brand voice retrieval
     """
 
     def __init__(self, db: AsyncSession):
@@ -100,20 +100,43 @@ class ContentAgent:
     async def run(self, icp_segments: Optional[List[str]] = None) -> Dict[str, Any]:
         logger.info("A6 starting")
 
-        # Step 1: Gather demand signals
+        # Step 1: Gather external demand signals
         demand_signals = await self._gather_demand_signals()
-        logger.info("Demand signals gathered", count=len(demand_signals))
 
-        # Step 2: Identify active ICP segments from prospect data
+        # Step 2: Identify active ICP segments from prospect data (A1) and user intake
         if not icp_segments:
             icp_segments = await self._get_active_icp_segments()
 
-        # Step 3: Fetch active prospect insights and generate content briefs
+        # Step 3: Fetch intelligence from all upstream agents (A2, A3, A4, A5, UserInput)
         conv_insights = await self._get_conversation_insights()
         deal_insights = await self._get_deal_insights()
-        logger.info("Direct insights fetched", conv_insights=len(conv_insights), deal_insights=len(deal_insights))
+        buying_signals = await self._get_buying_signals()
+        outreach_insights = await self._get_outreach_insights()
+        user_context = await self._get_user_input_context()
 
-        briefs = await self._generate_content_briefs(demand_signals, icp_segments, conv_insights, deal_insights)
+        # Query all existing topics to pass to the LLM so it generates fresh, distinct topics
+        existing_res = await self.db.execute(select(GeneratedContent.topic).distinct())
+        existing_topics = [row[0] for row in existing_res.all() if row[0]]
+
+        logger.info(
+            "Pipeline insights fetched",
+            conv_insights=len(conv_insights),
+            deal_insights=len(deal_insights),
+            buying_signals=len(buying_signals),
+            outreach_insights=len(outreach_insights),
+            icp_segments=len(icp_segments),
+        )
+
+        briefs = await self._generate_content_briefs(
+            signals=demand_signals,
+            icp_segments=icp_segments,
+            conv_insights=conv_insights,
+            deal_insights=deal_insights,
+            buying_signals=buying_signals,
+            outreach_insights=outreach_insights,
+            user_context=user_context,
+            existing_topics=existing_topics,
+        )
         logger.info("Briefs generated", count=len(briefs))
 
         # Step 4: Generate content for each brief (all active formats)
@@ -121,17 +144,7 @@ class ContentAgent:
         skipped_existing = 0
         generation_errors: List[str] = []
 
-        # Query all existing topics to prevent duplicates
-        existing_res = await self.db.execute(select(GeneratedContent.topic).distinct())
-        existing_topics = [row[0] for row in existing_res.all() if row[0]]
-
         for brief in briefs[:settings.A6_MAX_BRIEFS]:
-            if self._is_duplicate_topic(brief.get("topic"), existing_topics):
-                logger.info("Skipping duplicate brief topic", topic=brief.get("topic"))
-                active_formats = [f.strip() for f in settings.A6_CONTENT_FORMATS.split(",")] if hasattr(settings, "A6_CONTENT_FORMATS") else CONTENT_FORMATS
-                skipped_existing += len(active_formats)
-                continue
-
             pieces, errors = await self._generate_all_formats(brief)
             generation_errors.extend(errors)
             saved, skipped = await self._save_content(pieces, brief)
@@ -160,28 +173,24 @@ class ContentAgent:
 
     async def _gather_demand_signals(self) -> List[Dict]:
         """
-        Collect demand signals from public sources.
-        Apify free $5/mo credit for public web scraping.
-        NewsAPI for competitor content monitoring.
-        No LinkedIn scraping.
+        Collect demand signals from public sources (NewsAPI, Currents).
         """
         signals = []
 
         # Competitor blog RSS monitoring via NewsAPI
         if settings.NEWS_API_KEY:
             try:
-                async with httpx.AsyncClient(timeout=20) as client:
+                async with httpx.AsyncClient(timeout=5) as client:
                     resp = await client.get(
                         "https://newsapi.org/v2/everything",
                         params={
                             "q": "sales automation OR GTM strategy OR revenue operations",
                             "sortBy": "publishedAt",
                             "language": "en",
-                            "pageSize": 20,
+                            "pageSize": 10,
                             "from": (datetime.utcnow() - timedelta(days=7)).strftime("%Y-%m-%d"),
                         },
                         headers={"X-Api-Key": settings.NEWS_API_KEY},
-                        timeout=15,
                     )
                     if resp.status_code == 200:
                         for article in resp.json().get("articles", []):
@@ -194,122 +203,182 @@ class ContentAgent:
             except Exception as e:
                 logger.warning("NewsAPI content scan failed", error=str(e))
 
-        # Apify public forum scraping (G2 reviews, Reddit — not LinkedIn)
-        if settings.APIFY_API_TOKEN:
-            try:
-                async with httpx.AsyncClient(timeout=30) as client:
-                    # Trigger Apify web scraper actor
-                    resp = await client.post(
-                        f"https://api.apify.com/v2/acts/apify~web-scraper/runs",
-                        headers={"Authorization": f"Bearer {settings.APIFY_API_TOKEN}"},
-                        json={
-                            "startUrls": [
-                                {"url": "https://www.reddit.com/r/sales/top/?t=week"},
-                                {"url": "https://www.reddit.com/r/Entrepreneur/top/?t=week"},
-                            ],
-                            "pageFunction": """
-                                async function pageFunction(context) {
-                                    return Array.from(document.querySelectorAll('h3')).slice(0,10).map(h => ({
-                                        title: h.textContent.trim()
-                                    }));
-                                }
-                            """,
-                            "maxPagesPerCrawl": 2,
-                        },
-                        timeout=15,
-                    )
-                    if resp.status_code in (200, 201):
-                        run_id = resp.json().get("data", {}).get("id")
-                        if run_id:
-                            # Poll for results (simplified — production would use webhooks)
-                            await asyncio.sleep(15)
-                            result_resp = await client.get(
-                                f"https://api.apify.com/v2/acts/apify~web-scraper/runs/{run_id}/dataset/items",
-                                headers={"Authorization": f"Bearer {settings.APIFY_API_TOKEN}"},
-                            )
-                            if result_resp.status_code == 200:
-                                for item in result_resp.json()[:20]:
-                                    if item.get("title"):
-                                        signals.append({
-                                            "source": "reddit",
-                                            "topic": item["title"],
-                                            "description": "",
-                                        })
-            except Exception as e:
-                logger.warning("Apify scraping failed", error=str(e))
-
-        logger.info("Demand signals", count=len(signals))
         return signals
 
     async def _get_active_icp_segments(self) -> List[str]:
-        """Pull industry segments from active contacts being worked."""
+        """Pull industry segments from active contacts (A1) and UserInput."""
         result = await self.db.execute(
             select(Contact.industry)
             .where(
                 and_(
                     Contact.industry.isnot(None),
-                    Contact.icp_score >= settings.ICP_SCORE_THRESHOLD,
+                    Contact.industry != "",
                     Contact.do_not_contact == False,
                 )
             )
             .distinct()
-            .limit(5)
+            .limit(10)
         )
-        industries = [row[0] for row in result.all() if row[0]]
+        industries = [row[0].strip() for row in result.all() if row[0] and row[0].strip()]
+        
+        # Also check UserInput for target_industries
+        ui_res = await self.db.execute(select(UserInput.target_industries).order_by(desc(UserInput.id)).limit(1))
+        ui_inds = ui_res.scalar_one_or_none()
+        if ui_inds:
+            for ind in ui_inds.split(","):
+                val = ind.strip()
+                if val and val not in industries:
+                    industries.append(val)
+                    
         return industries or ["SaaS", "B2B Technology"]
+
+    async def _get_buying_signals(self) -> List[Dict[str, Any]]:
+        """Query recent account buying signals detected by A2."""
+        result = await self.db.execute(
+            select(SignalEvent, Contact.company)
+            .outerjoin(Contact, SignalEvent.contact_id == Contact.id)
+            .order_by(desc(SignalEvent.detected_at))
+            .limit(20)
+        )
+        signals = []
+        for sig, company in result.all():
+            sig_type = sig.signal_type.value if hasattr(sig.signal_type, 'value') else sig.signal_type
+            raw_summary = ""
+            if isinstance(sig.raw_data, dict):
+                if sig.raw_data.get("trigger"):
+                    raw_summary = f"{sig.raw_data.get('trigger')} in {', '.join(sig.raw_data.get('locations', [])[:3])}"
+                elif sig.raw_data.get("roles"):
+                    raw_summary = f"Hiring for: {', '.join(sig.raw_data.get('roles', [])[:3])}"
+            signals.append({
+                "company": company or "Target Account",
+                "signal_type": sig_type,
+                "signal_source": sig.signal_source,
+                "confidence": sig.confidence,
+                "summary": raw_summary,
+                "source": "A2"
+            })
+        return signals
+
+    async def _get_outreach_insights(self) -> List[Dict[str, Any]]:
+        """Query active outreach drafts and matched services from A3."""
+        result = await self.db.execute(
+            select(OutreachDraft, Contact.company)
+            .outerjoin(Contact, OutreachDraft.contact_id == Contact.id)
+            .order_by(desc(OutreachDraft.created_at))
+            .limit(15)
+        )
+        outreach_items = []
+        for draft, company in result.all():
+            outreach_items.append({
+                "company": company or "Target Account",
+                "business_case": draft.business_case,
+                "matched_services": draft.matched_services or [],
+                "subject": draft.subject,
+                "source": "A3"
+            })
+        return outreach_items
+
+    async def _get_user_input_context(self) -> Dict[str, Any]:
+        """Fetch vendor offering and onboarding context from UserInput."""
+        result = await self.db.execute(select(UserInput).order_by(desc(UserInput.id)).limit(1))
+        ui = result.scalar_one_or_none()
+        if ui:
+            return {
+                "our_company_name": ui.our_company_name or "",
+                "our_services": ui.our_services or "",
+                "target_location": ui.target_location or "",
+                "target_keywords": ui.target_keywords or "",
+                "target_job_titles": ui.target_job_titles or ""
+            }
+        return {}
 
     async def _generate_content_briefs(
         self,
         signals: List[Dict],
         icp_segments: List[str],
         conv_insights: Optional[List[Dict]] = None,
-        deal_insights: Optional[List[Dict]] = None
+        deal_insights: Optional[List[Dict]] = None,
+        buying_signals: Optional[List[Dict]] = None,
+        outreach_insights: Optional[List[Dict]] = None,
+        user_context: Optional[Dict] = None,
+        existing_topics: Optional[List[str]] = None,
     ) -> List[Dict]:
-        """Use Claude Haiku to cluster signals and generate content briefs."""
+        """Synthesize intelligence from A1-A5 into 3 high-impact content briefs."""
         conv_insights = conv_insights or []
         deal_insights = deal_insights or []
+        buying_signals = buying_signals or []
+        outreach_insights = outreach_insights or []
+        user_context = user_context or {}
+        existing_topics = existing_topics or []
 
-        if not signals and not conv_insights and not deal_insights:
-            logger.info("No active signals or insights available to generate briefs. Skipping content generation.")
-            return []
-
-        signals_text = "\n".join([
-            f"- {s['topic']} (source: {s['source']})"
-            for s in signals[:30]
-        ]) if signals else "No external demand signals available."
-
-        # Format A4 and A5 direct insights
-        insights_sections = []
+        # Format A4 conversation insights (received prospect emails & objections)
         a4_items = [ins for ins in conv_insights if ins.get("source") == "A4"]
-        if a4_items:
-            insights_sections.append("Inbound Email Objections/Questions (A4):")
-            for item in a4_items:
-                insights_sections.append(f"  - Company: {item.get('company')} | Text: {item.get('text')}")
-                
+        a4_text = "\n".join([
+            f"  - Company: {item.get('company')} | Concern/Topic: {item.get('text')}"
+            for item in a4_items
+        ]) if a4_items else "  No recent inbound email objections recorded."
+
+        # Format A5 deal insights (Fireflies call transcript objections & deal blockers)
         a5_items = [ins for ins in deal_insights if ins.get("source") == "A5"]
-        if a5_items:
-            if insights_sections:
-                insights_sections.append("")
-            insights_sections.append("Deal Blockers and Risk Flags (A5):")
-            for item in a5_items:
-                category_str = f" [{item.get('category')}]" if item.get('category') else ""
-                insights_sections.append(f"  - Company: {item.get('company')}{category_str} | Text: {item.get('text')}")
-            
-        insights_text = "\n".join(insights_sections) if insights_sections else "No direct prospect/deal insights available."
+        a5_text = "\n".join([
+            f"  - Company: {item.get('company')} [{item.get('category', 'objection')}] | Objection/Risk: {item.get('text')}"
+            for item in a5_items
+        ]) if a5_items else "  No open deal objections recorded."
+
+        # Format A2 account buying signals
+        a2_text = "\n".join([
+            f"  - Company: {s.get('company')} | Signal: {s.get('signal_type')} ({s.get('summary') or s.get('signal_source')})"
+            for s in buying_signals[:10]
+        ]) if buying_signals else "  No recent buying signals recorded."
+
+        # Format A3 outreach business cases & matched services
+        a3_text = "\n".join([
+            f"  - Company: {o.get('company')} | Pitch Case: {o.get('business_case')} | Services: {', '.join(o.get('matched_services', []))}"
+            for o in outreach_insights[:10]
+        ]) if outreach_insights else "  No recent outreach drafts recorded."
+
+        vendor_info = ""
+        if user_context.get("our_services"):
+            vendor_info = f"""
+VENDOR & OFFERING CONTEXT:
+- Company Name: {user_context.get('our_company_name') or 'Our GTM Platform'}
+- Core Services: {user_context.get('our_services')}
+- Target Keywords: {user_context.get('target_keywords') or 'N/A'}
+- Target Job Titles: {user_context.get('target_job_titles') or 'Decision Makers'}
+"""
+
+        avoid_topics_text = ""
+        if existing_topics:
+            avoid_topics_text = f"""
+PREVIOUSLY GENERATED TOPICS (CRITICAL: DO NOT REPEAT THESE TOPICS; GENERATE NEW, FRESH ANGLES):
+{chr(10).join([f'- {t}' for t in existing_topics[:15]])}
+"""
+
         segments_text = ", ".join(icp_segments)
 
-        prompt = f"""Analyse these inputs to generate 3 content briefs for a B2B SaaS GTM platform:
+        prompt = f"""You are an elite B2B Content Strategy & Demand Generation AI.
+Synthesize these REAL live pipeline signals and intelligence gathered across all sales agents (A1-A5) to generate 3 actionable, highly differentiated content briefs.
 
-1. REAL PROSPECT & DEAL INSIGHTS:
-These are real objections and pain points from actual prospect conversations and deals.
-IMPORTANT: Prioritize topics that address these objections and pain points over the external NewsAPI/Reddit signals, since these are direct signals from active accounts.
+1. PROSPECT INBOUND OBJECTIONS & INQUIRIES (Agent 4 - Inbound Email Memory):
+{a4_text}
 
-{insights_text}
+2. DEAL INTELLIGENCE & CALL TRANSCRIPT OBJECTIONS (Agent 5 - Deal Guard & Call Transcripts):
+{a5_text}
 
-2. EXTERNAL DEMAND SIGNALS (SUPPLEMENTARY CONTEXT):
-{signals_text}
+3. ACCOUNT BUYING SIGNALS (Agent 2 - Trigger Events):
+{a2_text}
 
-ICP segments being targeted: {segments_text}
+4. OUTREACH THEMES & MATCHED SERVICES (Agent 3 - Multi-Channel Sequences):
+{a3_text}
+{vendor_info}
+TARGET ICP SEGMENTS:
+{segments_text}
+{avoid_topics_text}
+
+RULES:
+- Ground each topic directly in the real pain points, call transcript objections (e.g. compliance, HIPAA/SOC2, data residency, CRM migrations, tech stack consolidation), or buying signals above.
+- Ensure the 3 briefs cover DIFFERENT angles or target different ICP segments.
+- Do NOT generate generic or repetitive marketing fluff.
 
 Return a JSON object with a single key "briefs" containing a list of exactly 3 briefs:
 {{
@@ -326,8 +395,12 @@ Return a JSON object with a single key "briefs" containing a list of exactly 3 b
 }}"""
 
         try:
-            res = await self.llm.complete(system=prompt, user="Generate the briefs now.")
+            res = await self.llm.complete(system=prompt, user="Generate the 3 briefs now.", max_tokens=4000)
+            if isinstance(res, list):
+                return res
             briefs = res.get("briefs", [])
+            if not briefs and "topic" in res:
+                briefs = [res]
             return briefs if isinstance(briefs, list) else []
         except Exception as e:
             logger.error("Brief generation failed", error=str(e))
@@ -355,25 +428,23 @@ Return a JSON object with a single key "briefs" containing a list of exactly 3 b
 
         pieces: List[Dict] = []
         errors: List[str] = []
-        tasks = []
-        for fmt in valid_formats:
-            tasks.append(self._generate_single_format(brief, fmt, brand_examples))
 
-        results = await asyncio.gather(*tasks, return_exceptions=True)
-        for i, result in enumerate(results):
-            fmt = valid_formats[i]
-            if isinstance(result, str):
-                pieces.append({
-                    "format": fmt,
-                    "content": result,
-                    "brief": brief,
-                    "icp_segment": brief.get("icp_segment"),
-                    "topic": brief.get("topic"),
-                })
-            else:
-                error = f"{fmt}: {result}"
+        for fmt in valid_formats:
+            try:
+                result = await self._generate_single_format(brief, fmt, brand_examples)
+                if isinstance(result, str) and result.strip():
+                    pieces.append({
+                        "format": fmt,
+                        "content": result.strip(),
+                        "brief": brief,
+                        "icp_segment": brief.get("icp_segment"),
+                        "topic": brief.get("topic"),
+                    })
+                await asyncio.sleep(0.2)
+            except Exception as exc:
+                error = f"{fmt}: {exc}"
                 errors.append(error)
-                logger.warning("Format generation failed", format=fmt, error=str(result))
+                logger.warning("Format generation failed", format=fmt, error=str(exc))
 
         return pieces, errors
 
@@ -436,25 +507,30 @@ Return only the content, no meta-commentary."""
         skipped = 0
         for piece in pieces:
             existing = await self.db.execute(
-                select(GeneratedContent.id).where(
+                select(GeneratedContent).where(
                     and_(
                         GeneratedContent.topic == piece.get("topic"),
                         GeneratedContent.content_format == piece["format"],
                     )
                 ).limit(1)
             )
-            if existing.scalar_one_or_none():
-                skipped += 1
-                continue
-            self.db.add(GeneratedContent(
-                title=f"{brief['topic']} — {piece['format'].replace('_', ' ').title()}",
-                content_format=piece["format"],
-                icp_segment=piece.get("icp_segment"),
-                topic=piece.get("topic"),
-                content=piece["content"],
-                brief=brief,
-            ))
-            saved += 1
+            existing_row = existing.scalar_one_or_none()
+            if existing_row:
+                existing_row.title = f"{brief['topic']} — {piece['format'].replace('_', ' ').title()}"
+                existing_row.content = piece["content"]
+                existing_row.brief = brief
+                existing_row.icp_segment = piece.get("icp_segment")
+                saved += 1
+            else:
+                self.db.add(GeneratedContent(
+                    title=f"{brief['topic']} — {piece['format'].replace('_', ' ').title()}",
+                    content_format=piece["format"],
+                    icp_segment=piece.get("icp_segment"),
+                    topic=piece.get("topic"),
+                    content=piece["content"],
+                    brief=brief,
+                ))
+                saved += 1
         await self.db.commit()
         return saved, skipped
 
@@ -490,10 +566,10 @@ Return only the content, no meta-commentary."""
 
     async def _get_conversation_insights(self) -> List[Dict[str, Any]]:
         """
-        Query interested/not_interested conversation threads from the last 30 days,
-        and use Claude Haiku to extract distinct objections, pain points, or questions.
+        Query inbound/interested/not_interested conversation threads,
+        and use LLM to extract distinct objections, pain points, or questions.
         """
-        cutoff = datetime.utcnow() - timedelta(days=30)
+        cutoff = datetime.utcnow() - timedelta(days=90)
         
         # Query threads joined with Contact
         query = (
@@ -505,7 +581,11 @@ Return only the content, no meta-commentary."""
             .join(Contact, ConversationThread.contact_id == Contact.id)
             .where(
                 and_(
-                    ConversationThread.intent.in_(["interested", "not_interested"]),
+                    or_(
+                        ConversationThread.intent.in_(["interested", "not_interested", "objection", "pricing"]),
+                        ConversationThread.direction == "inbound",
+                        ConversationThread.event_type.in_(["reply_received", "inbound_email"]),
+                    ),
                     ConversationThread.occurred_at >= cutoff,
                     ConversationThread.content.isnot(None),
                     ConversationThread.content != ""
@@ -518,6 +598,34 @@ Return only the content, no meta-commentary."""
         result = await self.db.execute(query)
         rows = result.all()
         
+        # Fallback if no recent rows in 90 days: get latest available inbound threads without cutoff filter
+        if len(rows) < 3:
+            fallback_query = (
+                select(
+                    ConversationThread.content,
+                    ConversationThread.contact_id,
+                    Contact.company
+                )
+                .join(Contact, ConversationThread.contact_id == Contact.id)
+                .where(
+                    and_(
+                        or_(
+                            ConversationThread.intent.isnot(None),
+                            ConversationThread.direction == "inbound",
+                            ConversationThread.event_type.in_(["reply_received", "inbound_email"])
+                        ),
+                        ConversationThread.content.isnot(None),
+                        ConversationThread.content != ""
+                    )
+                )
+                .order_by(ConversationThread.occurred_at.desc())
+                .limit(20)
+            )
+            fallback_res = await self.db.execute(fallback_query)
+            fallback_rows = fallback_res.all()
+            if fallback_rows:
+                rows = fallback_rows
+            
         if not rows:
             return []
             
@@ -528,7 +636,7 @@ Return only the content, no meta-commentary."""
                 "index": i,
                 "contact_id": row.contact_id,
                 "company": row.company or "unknown",
-                "text": row.content.strip()
+                "text": row.content.strip()[:500]
             })
             
         threads_json = json.dumps(threads_data, indent=2)
@@ -550,13 +658,21 @@ Format:
 ]
 """
         try:
-            raw_res = await self.llm.complete_raw(prompt, use_haiku=True)
+            raw_res = await self.llm.complete_raw(prompt)
             cleaned = _clean_json_str(raw_res)
             parsed = json.loads(cleaned)
             
             insights = []
             if isinstance(parsed, list):
                 for item in parsed:
+                    insights.append({
+                        "text": (item.get("text") or "").strip(),
+                        "contact_id": item.get("contact_id"),
+                        "company": item.get("company", ""),
+                        "source": "A4"
+                    })
+            elif isinstance(parsed, dict) and "insights" in parsed:
+                for item in parsed["insights"]:
                     insights.append({
                         "text": (item.get("text") or "").strip(),
                         "contact_id": item.get("contact_id"),
@@ -570,7 +686,7 @@ Format:
 
     async def _get_deal_insights(self) -> List[Dict[str, Any]]:
         """
-        Query open deals, extract persisted objections and risk flags,
+        Query deals, extract persisted objections and risk flags (including from call transcripts),
         and assemble a flat list of deal-related insights with source='A5'.
         """
         query = (
@@ -580,6 +696,9 @@ Format:
         )
         result = await self.db.execute(query)
         deals = result.scalars().all()
+        if not deals:
+            fallback_res = await self.db.execute(select(Deal).options(selectinload(Deal.contact)))
+            deals = fallback_res.scalars().all()
         
         insights = []
         for deal in deals:

@@ -8,7 +8,7 @@ Subscription tier notes (as of July 2026):
 from pydantic_settings import BaseSettings, SettingsConfigDict
 from pydantic import field_validator
 from functools import lru_cache
-from typing import List
+from typing import List, Optional
 
 
 class Settings(BaseSettings):
@@ -117,6 +117,14 @@ class Settings(BaseSettings):
 
     AGENT3_TEST_MODE: bool = False
     TEST_MODE_ICP_SCORE_THRESHOLD: int = 60
+    TEST_EMAIL_OVERRIDE: Optional[str] = "ibmsuriya@gmail.com"
+
+    # ── SMTP / Gmail ──────────────────────────────────────────────────────
+    SMTP_HOST: str = "smtp.gmail.com"
+    SMTP_PORT: int = 587
+    SMTP_USER: str = ""
+    SMTP_PASSWORD: str = ""
+    SMTP_FROM_EMAIL: str = ""
 
     # ── Scoring thresholds ────────────────────────────────────────────────
     ICP_SCORE_THRESHOLD:                  int  = 70

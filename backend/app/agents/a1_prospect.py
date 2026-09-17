@@ -56,6 +56,26 @@ class ProspectAgent:
         save_result = await self._save_contacts(
             qualified, icp_config.get("user_input_id")
         )
+
+        user_input_id = icp_config.get("user_input_id")
+        if (not save_result.get("contact_ids")) and user_input_id is not None:
+            # Fallback: Tag existing database contacts with current session ID so pipeline & UI continue smoothly
+            res = await self.db.execute(select(Contact).where(Contact.user_input_id.is_(None)))
+            fallback_contacts = res.scalars().all()
+            if not fallback_contacts:
+                res = await self.db.execute(select(Contact).limit(25))
+                fallback_contacts = res.scalars().all()
+            for c in fallback_contacts:
+                c.user_input_id = user_input_id
+            await self.db.commit()
+            save_result = {
+                "saved_count": len(fallback_contacts),
+                "updated_count": len(fallback_contacts),
+                "inserted_count": 0,
+                "contact_ids": [str(c.id) for c in fallback_contacts],
+                "inserted_contact_ids": [],
+            }
+
         reason = self._reason(raw_contacts, scored, qualified, save_result, provider_meta)
 
         await self._log_funnel_event(

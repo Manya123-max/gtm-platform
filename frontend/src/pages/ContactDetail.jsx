@@ -2,12 +2,14 @@ import { useState } from 'react'
 import { useQuery } from '@tanstack/react-query'
 import { useParams, useNavigate } from 'react-router-dom'
 import { fetchContact, fetchThread, fetchSignals, fetchDeals } from '../api'
-import { ArrowLeft, Mail, Building2, MapPin, Zap, MessageSquare, X, Link, TrendingUp, CheckCircle2, Clock, Sparkles, ExternalLink, ShieldCheck, UserCheck } from 'lucide-react'
+import { ArrowLeft, Mail, Building2, MapPin, Zap, MessageSquare, X, Link, TrendingUp, CheckCircle2, Clock, Sparkles, ExternalLink, ShieldCheck, UserCheck, Briefcase } from 'lucide-react'
+import DealDetailModal from '../components/DealDetailModal'
 
 export default function ContactDetail() {
   const { id } = useParams()
   const navigate = useNavigate()
   const [selectedSignal, setSelectedSignal] = useState(null)
+  const [selectedDeal, setSelectedDeal] = useState(null)
 
   const { data: contact, isLoading } = useQuery({ queryKey: ['contact', id], queryFn: () => fetchContact(id) })
   const { data: thread = [] } = useQuery({ queryKey: ['thread', id], queryFn: () => fetchThread(id) })
@@ -102,6 +104,54 @@ export default function ContactDetail() {
               </div>
             )}
           </div>
+
+          {/* Associated Active Deals Card */}
+          {deals.length > 0 && (
+            <div className="mt-4 pt-4 border-t border-[#1F2937] space-y-2.5">
+              <div className="flex items-center justify-between">
+                <div className="flex items-center gap-1.5 text-xs font-semibold text-gray-200">
+                  <Briefcase size={12} className="text-blue-400" />
+                  <span>Associated Deals ({deals.length})</span>
+                </div>
+                <span className="text-[10px] text-blue-400 font-medium">Click to view</span>
+              </div>
+              <div className="space-y-1.5">
+                {deals.map(d => (
+                  <div
+                    key={d.id}
+                    onClick={() => setSelectedDeal(d)}
+                    className="p-2.5 rounded-lg bg-[#1F2937] hover:bg-[#374151] cursor-pointer transition-all border border-gray-700/50 hover:border-blue-500/50 group"
+                  >
+                    <div className="flex items-start justify-between gap-1.5">
+                      <div className="text-xs font-semibold text-gray-200 group-hover:text-blue-300 transition-colors truncate">
+                        {d.name}
+                      </div>
+                      {d.amount != null && (
+                        <span className="text-[11px] font-bold text-gray-300 font-mono shrink-0">
+                          ${(d.amount/1000).toFixed(0)}k
+                        </span>
+                      )}
+                    </div>
+                    <div className="flex items-center gap-2 text-[10px] text-gray-400 mt-1">
+                      <span className="capitalize text-blue-400 bg-blue-900/30 px-1.5 py-0.2 rounded font-medium">
+                        {d.stage}
+                      </span>
+                      <span>·</span>
+                      <span>{d.days_in_current_stage ?? 0}d in stage</span>
+                      {d.deal_health_score != null && (
+                        <>
+                          <span>·</span>
+                          <span className="text-emerald-400 font-semibold">
+                            Health: {Math.round(d.deal_health_score)}
+                          </span>
+                        </>
+                      )}
+                    </div>
+                  </div>
+                ))}
+              </div>
+            </div>
+          )}
         </div>
 
         <div className="lg:col-span-2 space-y-4">
@@ -159,6 +209,7 @@ export default function ContactDetail() {
             ) : (
               <div className="space-y-4 max-h-[560px] overflow-y-auto pr-1">
                 {thread.map((t, idx) => {
+                  const isOutbound = t.direction === 'outbound' || t.event_type === 'email_sent' || t.event_type === 'reply_sent'
                   const prospectName = `${contact.first_name || ''} ${contact.last_name || ''}`.trim() || 'Prospect'
                   const prospectInitials = `${contact.first_name?.[0] || 'P'}${contact.last_name?.[0] || ''}`
                   
@@ -166,39 +217,94 @@ export default function ContactDetail() {
                   const gmailComposeUrl = `https://mail.google.com/mail/?view=cm&fs=1&to=${encodeURIComponent(contact.email)}&su=${encodeURIComponent(`Re: Discussion with ${contact.company || 'Galvin Technologies'}`)}&body=${encodeURIComponent(t.draft_content || '')}`
 
                   return (
-                    <div key={t.id || idx} className="space-y-3 pt-3 border-t border-gray-200/60 first:border-0 first:pt-0">
-                      {/* Inbound Message */}
-                      {t.direction === 'inbound' && (
-                        <>
-                          {/* Left Bubble: Prospect's Inbound Reply */}
-                          <div className="flex items-start gap-2.5 max-w-[90%]">
-                            <div className="w-8 h-8 rounded-full bg-slate-200 text-slate-700 font-bold text-xs flex items-center justify-center shrink-0 border border-slate-300 shadow-sm">
-                              {prospectInitials}
-                            </div>
-                            <div className="space-y-1">
-                              <div className="p-3.5 rounded-2xl rounded-tl-none bg-white text-slate-800 border border-slate-200 shadow-sm text-xs leading-relaxed">
+                      {isOutbound ? (
+                        /* ── Outbound (Sent) Message Bubble — GREEN ── */
+                        <div className="flex items-start gap-2.5 max-w-[90%] ml-auto flex-row-reverse">
+                          <div className="w-8 h-8 rounded-full bg-emerald-600 text-white font-bold text-xs flex items-center justify-center shrink-0 border border-emerald-500 shadow-sm">
+                            You
+                          </div>
+                          <div className="space-y-1.5 text-right w-full">
+                            <div className="p-3.5 rounded-2xl rounded-tr-none bg-[#ECFDF5] text-[#064E3B] border border-[#A7F3D0] shadow-xs text-xs leading-relaxed text-left whitespace-pre-line font-normal">
+                              <div className="flex items-center justify-between gap-2 pb-1.5 mb-1.5 border-b border-emerald-200/80 text-[11px] font-semibold text-emerald-800">
+                                <span className="inline-flex items-center gap-1">
+                                  <span className="w-1.5 h-1.5 rounded-full bg-emerald-600"></span>
+                                  Sent Message
+                                </span>
+                                <span className="text-[10px] text-emerald-700 font-normal">
+                                  {t.sent_at || t.occurred_at ? new Date(t.sent_at || t.occurred_at).toLocaleDateString([], { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' }) : 'Sent'}
+                                </span>
+                              </div>
+                              <div className="text-slate-800 whitespace-pre-line">
                                 {t.content}
                               </div>
-                              <div className="flex items-center gap-2 text-[10px] text-slate-500 px-1">
-                                <span className="font-semibold text-slate-700">{prospectName}</span>
-                                <span>·</span>
-                                {t.intent && <span className="text-amber-700 bg-amber-50 border border-amber-200/80 px-1.5 py-0.2 rounded capitalize font-medium">{t.intent.replace(/_/g, ' ')}</span>}
-                                <span>·</span>
-                                <span>Score: <strong className="text-blue-600 font-bold">{t.readiness_score_after?.toFixed(0) || '25'}%</strong></span>
-                                {t.occurred_at && <span>· {new Date(t.occurred_at).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}</span>}
+                            </div>
+                            <div className="flex items-center justify-end gap-2 text-[10px] text-slate-500 px-1">
+                              <span className="font-medium text-emerald-700">Sent by You</span>
+                              {t.channel && <span>· Via {t.channel.toUpperCase()}</span>}
+                            </div>
+                          </div>
+                        </div>
+                      ) : (
+                        /* ── Inbound (Received) Message Bubble — BLUE ── */
+                        <div className="space-y-3">
+                          <div className="flex items-start gap-2.5 max-w-[90%]">
+                            <div className="w-8 h-8 rounded-full bg-blue-600 text-white font-bold text-xs flex items-center justify-center shrink-0 border border-blue-500 shadow-sm">
+                              {prospectInitials}
+                            </div>
+                            <div className="space-y-1 w-full">
+                              <div className="p-3.5 rounded-2xl rounded-tl-none bg-[#EFF6FF] text-[#1E3A8A] border border-[#BFDBFE] shadow-xs text-xs leading-relaxed">
+                                <div className="flex items-center justify-between gap-2 pb-1.5 mb-1.5 border-b border-blue-200/80 text-[11px] font-semibold text-blue-900">
+                                  <span className="inline-flex items-center gap-1">
+                                    <span className="w-1.5 h-1.5 rounded-full bg-blue-600"></span>
+                                    Received Email
+                                  </span>
+                                  <span className="text-[10px] text-blue-700 font-normal">
+                                    {t.occurred_at ? new Date(t.occurred_at).toLocaleDateString([], { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' }) : ''}
+                                  </span>
+                                </div>
+                                <div className="text-slate-800 whitespace-pre-line">
+                                  {t.content}
+                                </div>
+                              </div>
+                              <div className="flex items-center gap-2 text-[10px] text-slate-500 px-1 flex-wrap">
+                                <span className="font-semibold text-blue-900">{prospectName}</span>
+                                {t.intent && (
+                                  <>
+                                    <span>·</span>
+                                    <span className="text-blue-800 bg-blue-100/80 border border-blue-300/80 px-1.5 py-0.2 rounded capitalize font-medium">
+                                      {t.intent.replace(/_/g, ' ')}
+                                    </span>
+                                  </>
+                                )}
+                                {t.readiness_score_after != null && (
+                                  <>
+                                    <span>·</span>
+                                    <span>Score: <strong className="text-blue-600 font-bold">{t.readiness_score_after.toFixed(0)}%</strong></span>
+                                  </>
+                                )}
                               </div>
                             </div>
                           </div>
 
-                          {/* Right Bubble: Our AI Draft */}
+                          {/* Outbound AI Draft Reply for Received Email — GREEN */}
                           {t.draft_content && (
                             <div className="flex items-start gap-2.5 max-w-[90%] ml-auto flex-row-reverse">
-                              <div className="w-8 h-8 rounded-full bg-blue-600 text-white font-bold text-xs flex items-center justify-center shrink-0 border border-blue-500 shadow-sm">
+                              <div className="w-8 h-8 rounded-full bg-emerald-600 text-white font-bold text-xs flex items-center justify-center shrink-0 border border-emerald-500 shadow-sm">
                                 You
                               </div>
-                              <div className="space-y-1.5 text-right">
-                                <div className="p-3.5 rounded-2xl rounded-tr-none bg-[#EEF4FF] text-[#1E3A8A] border border-[#BFDBFE] shadow-sm text-xs leading-relaxed text-left whitespace-pre-line font-normal">
-                                  {t.draft_content}
+                              <div className="space-y-1.5 text-right w-full">
+                                <div className="p-3.5 rounded-2xl rounded-tr-none bg-[#ECFDF5] text-[#064E3B] border border-[#A7F3D0] shadow-xs text-xs leading-relaxed text-left whitespace-pre-line font-normal">
+                                  <div className="flex items-center justify-between gap-2 pb-1 mb-1 border-b border-emerald-200/80 text-[11px] font-semibold text-emerald-800">
+                                    <span>AI Suggested Reply</span>
+                                    {t.approved_at ? (
+                                      <span className="text-[10px] text-emerald-700 font-medium">Approved</span>
+                                    ) : (
+                                      <span className="text-[10px] text-amber-700 font-medium">Pending Approval</span>
+                                    )}
+                                  </div>
+                                  <div className="text-slate-800 whitespace-pre-line">
+                                    {t.draft_content}
+                                  </div>
                                 </div>
                                 <div className="flex items-center justify-end gap-2 text-[11px] px-1 flex-wrap">
                                   {t.approved_at ? (
@@ -214,7 +320,7 @@ export default function ContactDetail() {
                                     href={gmailComposeUrl}
                                     target="_blank"
                                     rel="noopener noreferrer"
-                                    className="inline-flex items-center gap-1 text-white font-semibold bg-blue-600 hover:bg-blue-700 active:bg-blue-800 px-3 py-0.5 rounded-full shadow-sm transition-all"
+                                    className="inline-flex items-center gap-1 text-white font-semibold bg-emerald-600 hover:bg-emerald-700 active:bg-emerald-800 px-3 py-0.5 rounded-full shadow-sm transition-all text-[11px]"
                                   >
                                     <ExternalLink size={11} /> Send via Gmail Web
                                   </a>
@@ -222,29 +328,6 @@ export default function ContactDetail() {
                               </div>
                             </div>
                           )}
-                        </>
-                      )}
-
-                      {/* Outbound Message */}
-                      {t.direction === 'outbound' && (
-                        <div className="flex items-start gap-2.5 max-w-[90%] ml-auto flex-row-reverse">
-                          <div className="w-8 h-8 rounded-full bg-blue-600 text-white font-bold text-xs flex items-center justify-center shrink-0 border border-blue-500 shadow-sm">
-                            You
-                          </div>
-                          <div className="space-y-1.5 text-right">
-                            <div className="p-3.5 rounded-2xl rounded-tr-none bg-[#EEF4FF] text-[#1E3A8A] border border-[#BFDBFE] shadow-sm text-xs leading-relaxed text-left whitespace-pre-line font-normal">
-                              {t.content}
-                            </div>
-                            <div className="flex items-center justify-end gap-2 text-[10px] text-slate-500 px-1">
-                              <span className="font-semibold text-slate-700">Sent via Email</span>
-                              {t.occurred_at && (
-                                <>
-                                  <span>·</span>
-                                  <span>{new Date(t.occurred_at).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}</span>
-                                </>
-                              )}
-                            </div>
-                          </div>
                         </div>
                       )}
                     </div>
@@ -463,6 +546,14 @@ export default function ContactDetail() {
             </div>
           </div>
         </div>
+      )}
+
+      {/* Interactive Deal Detail Modal */}
+      {selectedDeal && (
+        <DealDetailModal
+          selectedDeal={selectedDeal}
+          onClose={() => setSelectedDeal(null)}
+        />
       )}
     </div>
   )

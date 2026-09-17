@@ -137,7 +137,7 @@ def run_agent_node(
                                 "org_keyword_tags":       kw_list if kw_list else None,
                                 "vendor_services":        user_input.our_services,
                                 "threshold":              0,
-                                "enrich_limit":           settings.APOLLO_ENRICH_LIMIT,
+                                "enrich_limit":           getattr(settings, "APOLLO_ENRICH_LIMIT", 25),
                                 "user_input_id":          user_input.id,
                             }
                         else:
@@ -145,7 +145,7 @@ def run_agent_node(
                                 # Empty titles keep manual test runs broad.
                                 "titles": [],
                                 "employee_ranges": ["11,200", "201,1000"],
-                                "enrich_limit": settings.APOLLO_ENRICH_LIMIT,
+                                "enrich_limit": getattr(settings, "APOLLO_ENRICH_LIMIT", 25),
                             }
 
                     raw_result = await ProspectAgent(db).run(cfg)

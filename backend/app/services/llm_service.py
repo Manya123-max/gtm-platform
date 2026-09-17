@@ -25,8 +25,8 @@ from app.core.config import settings
 logger = structlog.get_logger()
 
 # ── Model IDs ────────────────────────────────────────────────────────────────
-HAIKU_MODEL  = "claude-3-haiku-20240307"
-SONNET_MODEL = "claude-3-5-sonnet-latest"
+HAIKU_MODEL  = "claude-haiku-4-5-20251001"
+SONNET_MODEL = "claude-sonnet-4-6"
 
 GROQ_URL     = "https://api.groq.com/openai/v1/chat/completions"
 GEMINI_URL   = "https://generativelanguage.googleapis.com/v1beta/models/gemini-flash-latest:generateContent"
@@ -202,6 +202,7 @@ async def _call_with_fallback(
 # ── JSON cleaner ──────────────────────────────────────────────────────────────
 
 def _clean_json(content: str) -> Dict[str, Any]:
+
     """Strip markdown fences and parse JSON."""
     if content.startswith("```"):
         content = re.sub(r"^```(?:json)?\n?", "", content)
@@ -261,10 +262,15 @@ class LLMService:
         Tries all available LLM providers in order until one succeeds.
         Pass use_sonnet=True for tasks needing deeper reasoning (Claude Sonnet).
         """
-        json_suffix = "\n\nReturn ONLY valid JSON. No markdown fences, no preamble."
+        json_instruction = (
+            "\n\nReturn ONLY valid JSON matching this schema, no markdown fences: "
+            + json.dumps(response_format)
+            if response_format
+            else "\n\nReturn ONLY valid JSON. No markdown fences, no preamble."
+        )
         claude_model = SONNET_MODEL if use_sonnet else HAIKU_MODEL
         content = await _call_with_fallback(
-            system + json_suffix, user, max_tokens,
+            system + json_instruction, user, max_tokens,
             force_json=True, claude_model=claude_model,
         )
         return _clean_json(content)

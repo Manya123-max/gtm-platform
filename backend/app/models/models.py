@@ -67,6 +67,17 @@ class ContentFormat(str, enum.Enum):
 
 
 
+class ContactUserInputAssociation(Base):
+    """
+    Join table for many-to-many relationship between Contact and UserInput (Search History).
+    Allows a contact to belong to multiple search runs/sessions.
+    """
+    __tablename__ = "contact_user_input_association"
+
+    contact_id: Mapped[str] = mapped_column(UUID(as_uuid=False), ForeignKey("contacts.id", ondelete="CASCADE"), primary_key=True)
+    user_input_id: Mapped[int] = mapped_column(Integer, ForeignKey("user_inputs.id", ondelete="CASCADE"), primary_key=True)
+
+
 class Contact(Base):
     """
     Central contact table. All agents read from and write to this.

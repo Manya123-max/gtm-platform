@@ -17,7 +17,8 @@ from app.models.models import (
     Contact, SignalEvent, OutreachLog, ConversationThread,
     Deal, FunnelEvent, GeneratedContent, RevenueForecast,
     PendingAction, ActionStatus, SignalConversionRegistry,
-    PromptVariant, WorkflowRun, AgentSchedule, OutreachDraft
+    PromptVariant, WorkflowRun, AgentSchedule, OutreachDraft,
+    ContactUserInputAssociation
 )
 
 router = APIRouter()
@@ -142,19 +143,27 @@ async def get_dashboard_overview(
     # Base contact filter
     contact_filter = [Contact.do_not_contact == False]
     if user_input_id is not None:
-        contact_filter.append(Contact.user_input_id == user_input_id)
-
-    total_contacts = await db.scalar(
-        select(func.count(Contact.id)).where(and_(*contact_filter))
-    ) or 0
-    qualified = await db.scalar(
-        select(func.count(Contact.id)).where(
-            and_(*contact_filter, Contact.icp_score >= settings.ICP_SCORE_THRESHOLD)
-        )
-    ) or 0
-
-    # Signal / outreach scoped to session contacts
-    contact_ids_q = select(Contact.id).where(and_(*contact_filter))
+        total_contacts = await db.scalar(
+            select(func.count(Contact.id))
+            .join(ContactUserInputAssociation, Contact.id == ContactUserInputAssociation.contact_id)
+            .where(and_(*contact_filter, ContactUserInputAssociation.user_input_id == user_input_id))
+        ) or 0
+        qualified = await db.scalar(
+            select(func.count(Contact.id))
+            .join(ContactUserInputAssociation, Contact.id == ContactUserInputAssociation.contact_id)
+            .where(and_(*contact_filter, ContactUserInputAssociation.user_input_id == user_input_id, Contact.icp_score >= settings.ICP_SCORE_THRESHOLD))
+        ) or 0
+        contact_ids_q = select(ContactUserInputAssociation.contact_id).where(ContactUserInputAssociation.user_input_id == user_input_id)
+    else:
+        total_contacts = await db.scalar(
+            select(func.count(Contact.id)).where(and_(*contact_filter))
+        ) or 0
+        qualified = await db.scalar(
+            select(func.count(Contact.id)).where(
+                and_(*contact_filter, Contact.icp_score >= settings.ICP_SCORE_THRESHOLD)
+            )
+        ) or 0
+        contact_ids_q = select(Contact.id).where(and_(*contact_filter))
     active_signals = await db.scalar(
         select(func.count(SignalEvent.id)).where(
             and_(SignalEvent.processed == False,
@@ -231,7 +240,7 @@ async def list_contacts(
 ):
     q = select(Contact).where(Contact.do_not_contact == do_not_contact)
     if user_input_id is not None:
-        q = q.where(Contact.user_input_id == user_input_id)
+        q = q.join(ContactUserInputAssociation, Contact.id == ContactUserInputAssociation.contact_id).where(ContactUserInputAssociation.user_input_id == user_input_id)
     if min_score is not None:
         q = q.where(Contact.icp_score >= min_score)
     if has_signal:
@@ -247,7 +256,11 @@ async def list_contacts(
         q = q.order_by(order_func(Contact.created_at), desc(Contact.icp_score))
     q = q.offset(skip).limit(limit)
     result = await db.execute(q)
-    return result.scalars().all()
+    contacts = result.scalars().all()
+    if user_input_id is not None:
+        for c in contacts:
+            c.user_input_id = user_input_id
+    return contacts
 
 
 @router.get("/contacts/{contact_id}", response_model=ContactOut)
@@ -293,7 +306,7 @@ async def list_deals(
     if contact_id is not None:
         q = q.where(Deal.contact_id == contact_id)
     if user_input_id is not None:
-        contact_ids_q = select(Contact.id).where(Contact.user_input_id == user_input_id)
+        contact_ids_q = select(ContactUserInputAssociation.contact_id).where(ContactUserInputAssociation.user_input_id == user_input_id)
         q = q.where(Deal.contact_id.in_(contact_ids_q))
     if stage:
         q = q.where(Deal.stage == stage)
@@ -311,7 +324,7 @@ async def get_pipeline_summary(
 ):
     base = select(Deal).where(Deal.outcome.is_(None))
     if user_input_id is not None:
-        contact_ids_q = select(Contact.id).where(Contact.user_input_id == user_input_id)
+        contact_ids_q = select(ContactUserInputAssociation.contact_id).where(ContactUserInputAssociation.user_input_id == user_input_id)
         base = base.where(Deal.contact_id.in_(contact_ids_q))
     result = await db.execute(
         select(Deal.stage, func.count(Deal.id).label("count"),
@@ -319,7 +332,7 @@ async def get_pipeline_summary(
                func.avg(Deal.days_in_current_stage).label("avg_days"),
                func.avg(Deal.risk_score).label("avg_risk"))
         .where(Deal.outcome.is_(None))
-        .where(*([] if user_input_id is None else [Deal.contact_id.in_(select(Contact.id).where(Contact.user_input_id == user_input_id))]))
+        .where(*([] if user_input_id is None else [Deal.contact_id.in_(select(ContactUserInputAssociation.contact_id).where(ContactUserInputAssociation.user_input_id == user_input_id))]))
         .group_by(Deal.stage)
     )
     return [{"stage": r.stage, "count": r.count, "value": float(r.value or 0),
@@ -490,9 +503,10 @@ async def list_content(
         # 2. Fetch distinct industries from active contacts associated with this user_input_id
         contact_res = await db.execute(
             select(Contact.industry)
+            .join(ContactUserInputAssociation, Contact.id == ContactUserInputAssociation.contact_id)
             .where(
                 and_(
-                    Contact.user_input_id == user_input_id,
+                    ContactUserInputAssociation.user_input_id == user_input_id,
                     Contact.industry.isnot(None),
                     Contact.industry != ""
                 )
@@ -768,7 +782,7 @@ async def get_outreach_drafts(
              OutreachLog.sent_at >= datetime.utcnow() - timedelta(days=7))
     )
     if user_input_id is not None:
-        q = q.join(Contact).where(Contact.user_input_id == user_input_id)
+        q = q.join(Contact).join(ContactUserInputAssociation, Contact.id == ContactUserInputAssociation.contact_id).where(ContactUserInputAssociation.user_input_id == user_input_id)
     result = await db.execute(q.order_by(desc(OutreachLog.sent_at)).limit(50))
     return result.scalars().all()
 
@@ -1024,7 +1038,7 @@ async def get_drafts(
 ):
     q = select(OutreachDraft)
     if user_input_id is not None:
-        q = q.join(Contact).where(Contact.user_input_id == user_input_id)
+        q = q.join(Contact).join(ContactUserInputAssociation, Contact.id == ContactUserInputAssociation.contact_id).where(ContactUserInputAssociation.user_input_id == user_input_id)
     result = await db.execute(
         q.order_by(OutreachDraft.created_at.desc())
     )
@@ -1055,7 +1069,7 @@ async def get_drafts(
                 "email": contact.email if contact else "",
                 "company": contact.company if contact else "",
                 "title": contact.title if contact else "",
-                "user_input_id": contact.user_input_id if contact else None
+                "user_input_id": user_input_id if user_input_id is not None else (contact.user_input_id if contact else None)
             } if contact else None,
             "signal": {
                 "signal_type": signal.signal_type if signal else "",

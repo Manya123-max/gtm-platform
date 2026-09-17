@@ -20,7 +20,7 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.config import settings
-from app.models.models import Contact, FunnelEvent
+from app.models.models import Contact, FunnelEvent, ContactUserInputAssociation
 from app.services.scoring_service import WinPatternScorer
 
 logger = structlog.get_logger()
@@ -534,6 +534,14 @@ class ProspectAgent:
                 contact.source                 = "apollo"
                 if user_input_id is not None:
                     contact.user_input_id = user_input_id
+                    assoc_check = await self.db.execute(
+                        select(ContactUserInputAssociation).where(
+                            ContactUserInputAssociation.contact_id == contact.id,
+                            ContactUserInputAssociation.user_input_id == user_input_id
+                        )
+                    )
+                    if not assoc_check.scalar_one_or_none():
+                        self.db.add(ContactUserInputAssociation(contact_id=contact.id, user_input_id=user_input_id))
                 updated_ids.append(str(contact.id))
             else:
                 contact = Contact(
@@ -563,6 +571,8 @@ class ProspectAgent:
                 )
                 self.db.add(contact)
                 await self.db.flush()
+                if user_input_id is not None:
+                    self.db.add(ContactUserInputAssociation(contact_id=contact.id, user_input_id=user_input_id))
                 inserted_ids.append(str(contact.id))
 
         await self.db.commit()

@@ -39,7 +39,8 @@ from sqlalchemy import select, and_, or_
 from app.core.config import settings
 from app.models.models import (
     Contact, SignalEvent, OutreachLog, PromptVariant,
-    FunnelEvent, SignalType, PendingAction, ActionStatus, UserInput, OutreachDraft
+    FunnelEvent, SignalType, PendingAction, ActionStatus, UserInput, OutreachDraft,
+    ContactUserInputAssociation
 )
 from app.services.llm_service import LLMService
 from app.services.instantly_service import InstantlyService
@@ -804,12 +805,17 @@ class OutreachAgent:
                 continue
 
             # Enforce strict current-session checks
-            if contact.user_input_id != active_session_id:
+            assoc_check = await self.db.execute(
+                select(ContactUserInputAssociation).where(
+                    ContactUserInputAssociation.contact_id == contact.id,
+                    ContactUserInputAssociation.user_input_id == active_session_id
+                )
+            )
+            if not assoc_check.scalar_one_or_none():
                 skip_reasons["inactive_session"] += 1
                 logger.info(
-                    "Outreach skipped: contact belongs to historical session",
+                    "Outreach skipped: contact does not belong to active session",
                     contact_id=contact.id,
-                    contact_session_id=contact.user_input_id,
                     active_session_id=active_session_id
                 )
                 continue
@@ -1038,9 +1044,10 @@ class OutreachAgent:
         result = await self.db.execute(
             select(Contact, SignalEvent)
             .join(SignalEvent, SignalEvent.contact_id == Contact.id)
+            .join(ContactUserInputAssociation, Contact.id == ContactUserInputAssociation.contact_id)
             .where(
                 and_(
-                    Contact.user_input_id == active_session_id,
+                    ContactUserInputAssociation.user_input_id == active_session_id,
                     Contact.do_not_contact == False,
                     Contact.icp_score >= settings.ICP_SCORE_THRESHOLD,
                     SignalEvent.confidence >= settings.SIGNAL_SCORE_THRESHOLD / 100,

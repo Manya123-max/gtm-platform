@@ -167,54 +167,82 @@ export default function ContactDetail() {
 
                   return (
                     <div key={t.id || idx} className="space-y-3 pt-3 border-t border-gray-200/60 first:border-0 first:pt-0">
-                      {/* Left Bubble: Prospect's Inbound Reply */}
-                      <div className="flex items-start gap-2.5 max-w-[90%]">
-                        <div className="w-8 h-8 rounded-full bg-slate-200 text-slate-700 font-bold text-xs flex items-center justify-center shrink-0 border border-slate-300 shadow-sm">
-                          {prospectInitials}
-                        </div>
-                        <div className="space-y-1">
-                          <div className="p-3.5 rounded-2xl rounded-tl-none bg-white text-slate-800 border border-slate-200 shadow-sm text-xs leading-relaxed">
-                            {t.content}
+                      {/* Inbound Message */}
+                      {t.direction === 'inbound' && (
+                        <>
+                          {/* Left Bubble: Prospect's Inbound Reply */}
+                          <div className="flex items-start gap-2.5 max-w-[90%]">
+                            <div className="w-8 h-8 rounded-full bg-slate-200 text-slate-700 font-bold text-xs flex items-center justify-center shrink-0 border border-slate-300 shadow-sm">
+                              {prospectInitials}
+                            </div>
+                            <div className="space-y-1">
+                              <div className="p-3.5 rounded-2xl rounded-tl-none bg-white text-slate-800 border border-slate-200 shadow-sm text-xs leading-relaxed">
+                                {t.content}
+                              </div>
+                              <div className="flex items-center gap-2 text-[10px] text-slate-500 px-1">
+                                <span className="font-semibold text-slate-700">{prospectName}</span>
+                                <span>·</span>
+                                {t.intent && <span className="text-amber-700 bg-amber-50 border border-amber-200/80 px-1.5 py-0.2 rounded capitalize font-medium">{t.intent.replace(/_/g, ' ')}</span>}
+                                <span>·</span>
+                                <span>Score: <strong className="text-blue-600 font-bold">{t.readiness_score_after?.toFixed(0) || '25'}%</strong></span>
+                                {t.occurred_at && <span>· {new Date(t.occurred_at).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}</span>}
+                              </div>
+                            </div>
                           </div>
-                          <div className="flex items-center gap-2 text-[10px] text-slate-500 px-1">
-                            <span className="font-semibold text-slate-700">{prospectName}</span>
-                            <span>·</span>
-                            {t.intent && <span className="text-amber-700 bg-amber-50 border border-amber-200/80 px-1.5 py-0.2 rounded capitalize font-medium">{t.intent.replace(/_/g, ' ')}</span>}
-                            <span>·</span>
-                            <span>Score: <strong className="text-blue-600 font-bold">{t.readiness_score_after?.toFixed(0) || '25'}%</strong></span>
-                            {t.occurred_at && <span>· {new Date(t.occurred_at).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}</span>}
-                          </div>
-                        </div>
-                      </div>
 
-                      {/* Right Bubble: Our AI Draft / Approved Outbound Response */}
-                      {t.draft_content && (
+                          {/* Right Bubble: Our AI Draft */}
+                          {t.draft_content && (
+                            <div className="flex items-start gap-2.5 max-w-[90%] ml-auto flex-row-reverse">
+                              <div className="w-8 h-8 rounded-full bg-blue-600 text-white font-bold text-xs flex items-center justify-center shrink-0 border border-blue-500 shadow-sm">
+                                You
+                              </div>
+                              <div className="space-y-1.5 text-right">
+                                <div className="p-3.5 rounded-2xl rounded-tr-none bg-[#EEF4FF] text-[#1E3A8A] border border-[#BFDBFE] shadow-sm text-xs leading-relaxed text-left whitespace-pre-line font-normal">
+                                  {t.draft_content}
+                                </div>
+                                <div className="flex items-center justify-end gap-2 text-[11px] px-1 flex-wrap">
+                                  {t.approved_at ? (
+                                    <span className="inline-flex items-center gap-1 text-emerald-800 font-semibold bg-emerald-50 border border-emerald-300 px-2.5 py-0.5 rounded-full shadow-xs">
+                                      <CheckCircle2 size={11} className="text-emerald-600" /> Approved by {t.approved_by || 'Rep'}
+                                    </span>
+                                  ) : (
+                                    <span className="inline-flex items-center gap-1 text-amber-800 font-semibold bg-amber-50 border border-amber-300 px-2.5 py-0.5 rounded-full shadow-xs">
+                                      <Clock size={11} className="text-amber-600" /> Pending Slack Approval
+                                    </span>
+                                  )}
+                                  <a
+                                    href={gmailComposeUrl}
+                                    target="_blank"
+                                    rel="noopener noreferrer"
+                                    className="inline-flex items-center gap-1 text-white font-semibold bg-blue-600 hover:bg-blue-700 active:bg-blue-800 px-3 py-0.5 rounded-full shadow-sm transition-all"
+                                  >
+                                    <ExternalLink size={11} /> Send via Gmail Web
+                                  </a>
+                                </div>
+                              </div>
+                            </div>
+                          )}
+                        </>
+                      )}
+
+                      {/* Outbound Message */}
+                      {t.direction === 'outbound' && (
                         <div className="flex items-start gap-2.5 max-w-[90%] ml-auto flex-row-reverse">
                           <div className="w-8 h-8 rounded-full bg-blue-600 text-white font-bold text-xs flex items-center justify-center shrink-0 border border-blue-500 shadow-sm">
                             You
                           </div>
                           <div className="space-y-1.5 text-right">
                             <div className="p-3.5 rounded-2xl rounded-tr-none bg-[#EEF4FF] text-[#1E3A8A] border border-[#BFDBFE] shadow-sm text-xs leading-relaxed text-left whitespace-pre-line font-normal">
-                              {t.draft_content}
+                              {t.content}
                             </div>
-                            <div className="flex items-center justify-end gap-2 text-[11px] px-1 flex-wrap">
-                              {t.approved_at ? (
-                                <span className="inline-flex items-center gap-1 text-emerald-800 font-semibold bg-emerald-50 border border-emerald-300 px-2.5 py-0.5 rounded-full shadow-xs">
-                                  <CheckCircle2 size={11} className="text-emerald-600" /> Approved by {t.approved_by || 'Rep'}
-                                </span>
-                              ) : (
-                                <span className="inline-flex items-center gap-1 text-amber-800 font-semibold bg-amber-50 border border-amber-300 px-2.5 py-0.5 rounded-full shadow-xs">
-                                  <Clock size={11} className="text-amber-600" /> Pending Slack Approval
-                                </span>
+                            <div className="flex items-center justify-end gap-2 text-[10px] text-slate-500 px-1">
+                              <span className="font-semibold text-slate-700">Sent via Email</span>
+                              {t.occurred_at && (
+                                <>
+                                  <span>·</span>
+                                  <span>{new Date(t.occurred_at).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}</span>
+                                </>
                               )}
-                              <a
-                                href={gmailComposeUrl}
-                                target="_blank"
-                                rel="noopener noreferrer"
-                                className="inline-flex items-center gap-1 text-white font-semibold bg-blue-600 hover:bg-blue-700 active:bg-blue-800 px-3 py-0.5 rounded-full shadow-sm transition-all"
-                              >
-                                <ExternalLink size={11} /> Send via Gmail Web
-                              </a>
                             </div>
                           </div>
                         </div>

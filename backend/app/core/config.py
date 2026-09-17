@@ -139,8 +139,17 @@ class Settings(BaseSettings):
     REVENUE_AGENT_SCHEDULE:  str = "0 2 * * *"
 
     # ── Content Agent Settings ────────────────────────────────────────────
-    A6_CONTENT_FORMATS:      str = "linkedin_post,email_sequence,case_study,blog_article,sales_deck_outline"
-    A6_MAX_BRIEFS:           int = 3
+    A6_CONTENT_FORMATS:          str = "linkedin_post,email_sequence,case_study,blog_article,sales_deck_outline"
+    A6_MAX_BRIEFS:               int = 3
+    RSS_FEED_URLS:               str = ""
+    GOOGLE_NEWS_QUERIES:         str = ""
+    A6_GOOGLE_NEWS_QUERIES:      str = ""
+    A6_RSS_FEEDS:                str = ""
+    A6_NEWS_MAX_RESULTS:         int = 5
+    A6_REDDIT_MAX_RESULTS:       int = 5
+    A6_GOOGLE_NEWS_MAX_RESULTS:  int = 5
+    A6_RSS_MAX_RESULTS_PER_FEED: int = 5
+    A6_RELEVANCE_KEYWORDS:       str = "Salesforce, CRM, AI, AI agents, RAG, automation, sales automation, enterprise AI, B2B, cloud, data integration, customer service, lead generation, sales intelligence"
 
 
 

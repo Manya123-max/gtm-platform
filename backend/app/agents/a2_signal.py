@@ -293,10 +293,14 @@ class SignalAgent:
 
             signals: List[Dict[str, Any]] = []
             if any(term in job_text for term in ["sdr", "bdr", "sales development", "business development rep", "hiring", "recruiting", "sales", "careers", "we are hiring", "open position"]):
+                first_job = jobs[0] if jobs else {}
                 job_data = {
                     "job_count": len(jobs),
                     "roles": titles,
-                    "locations": locations
+                    "locations": locations,
+                    "url": first_job.get("redirect_url"),
+                    "headline": first_job.get("title"),
+                    "description": first_job.get("description")
                 }
                 if max_salary is not None:
                     job_data["max_salary"] = max_salary
@@ -312,6 +316,7 @@ class SignalAgent:
                 })
 
             if any(term in job_text for term in ["vp of sales", "director of sales", "chief revenue", "head of sales"]):
+                first_job = next((j for j in jobs if any(t in j.get("title", "").lower() for t in ["director", "vp", "chief", "head"])), jobs[0] if jobs else {})
                 signals.append({
                     "contact_id": contact.id,
                     "signal_type": SignalType.NEW_HIRE,
@@ -320,6 +325,9 @@ class SignalAgent:
                     "raw_data": {
                         "trigger": "leadership_hire",
                         "roles": [title for title in titles if "director" in title or "vp" in title][:20],
+                        "url": first_job.get("redirect_url"),
+                        "headline": first_job.get("title"),
+                        "description": first_job.get("description")
                     },
                 })
 
@@ -331,6 +339,7 @@ class SignalAgent:
                     if contact_geo not in loc.lower():
                         expansion_locations.append(loc)
             if expansion_locations:
+                first_job = jobs[0] if jobs else {}
                 signals.append({
                     "contact_id": contact.id,
                     "signal_type": SignalType.NEWS_EXPANSION,
@@ -339,6 +348,9 @@ class SignalAgent:
                     "raw_data": {
                         "trigger": "geographic_expansion",
                         "locations": expansion_locations,
+                        "url": first_job.get("redirect_url"),
+                        "headline": f"Geographic expansion detected via hiring in: {', '.join(expansion_locations[:3])}",
+                        "description": first_job.get("description")
                     }
                 })
 
@@ -400,6 +412,9 @@ class SignalAgent:
                                 "event_count": len(recent),
                                 "round_type": latest.get("round_type") or latest.get("category"),
                                 "amount": latest.get("amount"),
+                                "headline": latest.get("title") or latest.get("headline") or f"Funding round announced: {latest.get('round_type') or 'investment'}",
+                                "description": latest.get("description") or latest.get("summary"),
+                                "url": latest.get("source_url") or latest.get("url")
                             },
                         })
                 elif fin_resp.status_code not in (404,):
@@ -429,6 +444,8 @@ class SignalAgent:
                                 "event_count": len(recent),
                                 "category": latest.get("category"),
                                 "headline": latest.get("title") or latest.get("headline"),
+                                "description": latest.get("description") or latest.get("summary"),
+                                "url": latest.get("source_url") or latest.get("url"),
                             },
                         })
                 elif news_resp.status_code not in (404,):

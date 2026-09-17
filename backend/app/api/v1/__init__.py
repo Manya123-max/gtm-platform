@@ -7,20 +7,53 @@ from uuid import UUID
 
 from fastapi import APIRouter, Depends, HTTPException, Query, BackgroundTasks
 from sqlalchemy.ext.asyncio import AsyncSession
-from sqlalchemy import select, and_, func, desc, asc
+from sqlalchemy import select, and_, func, desc, asc, or_, String as SAString
 from sqlalchemy.orm import selectinload
 from pydantic import BaseModel
 
 from app.core.config import settings
 from app.core.database import get_db
+from app.core.security import get_current_user
 from app.models.models import (
     Contact, SignalEvent, OutreachLog, ConversationThread,
     Deal, DealStageHistory, FunnelEvent, GeneratedContent, RevenueForecast,
     PendingAction, ActionStatus, SignalConversionRegistry,
-    PromptVariant, WorkflowRun, AgentSchedule, OutreachDraft
+    PromptVariant, WorkflowRun, AgentSchedule, OutreachDraft,
+    User, UserInput,
 )
 
-router = APIRouter()
+# Every endpoint on this router requires a valid Bearer token (server-side
+# enforced). The public auth routes live in app.api.v1.auth (mounted in main.py).
+router = APIRouter(dependencies=[Depends(get_current_user)])
+
+
+# ── Ownership helpers ──────────────────────────────────────────────────────
+
+async def _owned_input_ids(db: AsyncSession, user):
+    """IDs of the user's intake sessions. None ⇒ auth disabled (legacy mode)."""
+    if user is None:
+        return None
+    result = await db.execute(select(UserInput.id).where(UserInput.user_id == user.id))
+    return [r[0] for r in result.all()]
+
+
+async def _ensure_owned_input(db: AsyncSession, user, user_input_id: int) -> None:
+    """404 if the requested session is not owned by the current user."""
+    if user is None or user_input_id is None:
+        return
+    row = await db.get(UserInput, user_input_id)
+    if not row or row.user_id != user.id:
+        raise HTTPException(status_code=404, detail="Session not found")
+
+
+def _own_contact_ids_q(user):
+    """Subquery: contact ids owned by the user."""
+    return select(Contact.id).where(Contact.user_id == user.id)
+
+
+def _own_deal_ids_q(user):
+    """Subquery: deal ids whose contact is owned by the user."""
+    return select(Deal.id).where(Deal.contact_id.in_(_own_contact_ids_q(user)))
 
 
 # ── Pydantic response models ───────────────────────────────────────────────
@@ -143,22 +176,26 @@ class OrchestratorWorkflowRunRequest(BaseModel):
 # ── Dashboard ──────────────────────────────────────────────────────────────
 
 @router.get("/active-session")
-async def get_active_session(db: AsyncSession = Depends(get_db)):
+async def get_active_session(current_user=Depends(get_current_user), db: AsyncSession = Depends(get_db)):
     """Returns the most recent user_input id — the current active session."""
     from app.models.models import UserInput
-    result = await db.execute(select(UserInput.id).order_by(UserInput.id.desc()).limit(1))
+    stmt = select(UserInput.id).order_by(UserInput.id.desc())
+    if current_user is not None:
+        stmt = stmt.where(UserInput.user_id == current_user.id)
+    result = await db.execute(stmt.limit(1))
     row = result.scalar_one_or_none()
     return {"user_input_id": row}
 
 
 @router.get("/sessions/{session_id}")
-async def get_session_details(session_id: int, db: AsyncSession = Depends(get_db)):
+async def get_session_details(session_id: int, current_user=Depends(get_current_user), db: AsyncSession = Depends(get_db)):
     """Returns details for a specific user input session."""
     from app.models.models import UserInput
     result = await db.execute(select(UserInput).where(UserInput.id == session_id))
     row = result.scalar_one_or_none()
-    if not row:
-        return {"error": "Session not found"}, 404
+    if not row or (current_user is not None and row.user_id != current_user.id):
+        from fastapi.responses import JSONResponse
+        return JSONResponse(status_code=404, content={"error": "Session not found"})
     return {
         "id": row.id,
         "our_company_name": row.our_company_name,
@@ -169,12 +206,18 @@ async def get_session_details(session_id: int, db: AsyncSession = Depends(get_db
 @router.get("/dashboard/overview")
 async def get_dashboard_overview(
     user_input_id: Optional[int] = None,
+    current_user=Depends(get_current_user),
     db: AsyncSession = Depends(get_db)
 ):
+    if current_user is not None:
+        await _ensure_owned_input(db, current_user, user_input_id)
+
     thirty_days_ago = datetime.utcnow() - timedelta(days=30)
 
-    # Base contact filter
+    # Base contact filter — always scoped to the current user's own contacts
     contact_filter = [Contact.do_not_contact == False]
+    if current_user is not None:
+        contact_filter.append(Contact.user_id == current_user.id)
     if user_input_id is not None:
         contact_filter.append(Contact.user_input_id == user_input_id)
 
@@ -219,7 +262,9 @@ async def get_dashboard_overview(
 
     # Deals scoped to session contacts
     deal_filter = [Deal.outcome.is_(None)]
-    if user_input_id is not None:
+    if current_user is not None:
+        deal_filter.append(Deal.contact_id.in_(_own_contact_ids_q(current_user)))
+    elif user_input_id is not None:
         deal_filter.append(Deal.contact_id.in_(contact_ids_q))
     pipeline_value = await db.scalar(
         select(func.sum(Deal.amount)).where(and_(*deal_filter))
@@ -227,11 +272,23 @@ async def get_dashboard_overview(
 
     pending_actions = await db.scalar(
         select(func.count(PendingAction.id)).where(
-            PendingAction.status == ActionStatus.PENDING)
+            and_(
+                PendingAction.status == ActionStatus.PENDING,
+                # scope pending actions to entities owned by the current user
+                or_(
+                    and_(PendingAction.entity_type == "contact",
+                         PendingAction.entity_id.in_(_own_contact_ids_q(current_user))),
+                    and_(PendingAction.entity_type == "deal",
+                         PendingAction.entity_id.in_(_own_deal_ids_q(current_user))),
+                ),
+            )
+        ) if current_user is not None else PendingAction.status == ActionStatus.PENDING
     ) or 0
 
     forecast_result = await db.execute(
-        select(RevenueForecast).order_by(desc(RevenueForecast.calculated_at)).limit(1))
+        select(RevenueForecast)
+        .where(RevenueForecast.user_id == current_user.id if current_user is not None else True)
+        .order_by(desc(RevenueForecast.calculated_at)).limit(1))
     forecast = forecast_result.scalar_one_or_none()
 
     return {
@@ -261,9 +318,13 @@ async def list_contacts(
     sort_by: str = "newest",
     sort_order: str = "desc",
     user_input_id: Optional[int] = None,
+    current_user=Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
 ):
     q = select(Contact).where(Contact.do_not_contact == do_not_contact)
+    if current_user is not None:
+        await _ensure_owned_input(db, current_user, user_input_id)
+        q = q.where(Contact.user_id == current_user.id)
     if user_input_id is not None:
         q = q.where(Contact.user_input_id == user_input_id)
     if min_score is not None:
@@ -283,8 +344,11 @@ async def list_contacts(
 
 
 @router.get("/contacts/{contact_id}", response_model=ContactOut)
-async def get_contact(contact_id: UUID, db: AsyncSession = Depends(get_db)):
-    result = await db.execute(select(Contact).where(Contact.id == contact_id))
+async def get_contact(contact_id: UUID, current_user=Depends(get_current_user), db: AsyncSession = Depends(get_db)):
+    stmt = select(Contact).where(Contact.id == contact_id)
+    if current_user is not None:
+        stmt = stmt.where(Contact.user_id == current_user.id)
+    result = await db.execute(stmt)
     contact = result.scalar_one_or_none()
     if not contact:
         raise HTTPException(status_code=404, detail="Contact not found")
@@ -292,23 +356,31 @@ async def get_contact(contact_id: UUID, db: AsyncSession = Depends(get_db)):
 
 
 @router.get("/contacts/{contact_id}/thread")
-async def get_contact_thread(contact_id: UUID, db: AsyncSession = Depends(get_db)):
+async def get_contact_thread(contact_id: UUID, current_user=Depends(get_current_user), db: AsyncSession = Depends(get_db)):
     from sqlalchemy import asc
-    result = await db.execute(
+    stmt = (
         select(ConversationThread)
+        .join(Contact, Contact.id == ConversationThread.contact_id)
         .where(ConversationThread.contact_id == contact_id)
-        .order_by(asc(ConversationThread.occurred_at))
     )
+    if current_user is not None:
+        stmt = stmt.where(Contact.user_id == current_user.id)
+    stmt = stmt.order_by(asc(ConversationThread.occurred_at))
+    result = await db.execute(stmt)
     return result.scalars().all()
 
 
 @router.get("/contacts/{contact_id}/signals")
-async def get_contact_signals(contact_id: UUID, db: AsyncSession = Depends(get_db)):
-    result = await db.execute(
+async def get_contact_signals(contact_id: UUID, current_user=Depends(get_current_user), db: AsyncSession = Depends(get_db)):
+    stmt = (
         select(SignalEvent)
+        .join(Contact, Contact.id == SignalEvent.contact_id)
         .where(SignalEvent.contact_id == contact_id)
-        .order_by(desc(SignalEvent.detected_at))
     )
+    if current_user is not None:
+        stmt = stmt.where(Contact.user_id == current_user.id)
+    stmt = stmt.order_by(desc(SignalEvent.detected_at))
+    result = await db.execute(stmt)
     return result.scalars().all()
 
 
@@ -319,15 +391,23 @@ async def list_deals(
     stage: Optional[str] = None, min_risk: Optional[float] = None,
     user_input_id: Optional[int] = None,
     contact_id: Optional[UUID] = None,
+    current_user=Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
 ):
+    if current_user is not None:
+        await _ensure_owned_input(db, current_user, user_input_id)
     q = select(Deal).options(
         selectinload(Deal.contact),
         selectinload(Deal.stage_history)
     ).where(Deal.outcome.is_(None))
     if contact_id is not None:
         q = q.where(Deal.contact_id == contact_id)
-    if user_input_id is not None:
+    if current_user is not None:
+        own_contacts = _own_contact_ids_q(current_user)
+        if user_input_id is not None:
+            own_contacts = own_contacts.where(Contact.user_input_id == user_input_id)
+        q = q.where(Deal.contact_id.in_(own_contacts))
+    elif user_input_id is not None:
         contact_ids_q = select(Contact.id).where(
             (Contact.user_input_id == user_input_id) | (Contact.user_input_id.is_(None))
         )
@@ -344,10 +424,18 @@ async def list_deals(
 @router.get("/deals/pipeline-summary")
 async def get_pipeline_summary(
     user_input_id: Optional[int] = None,
+    current_user=Depends(get_current_user),
     db: AsyncSession = Depends(get_db)
 ):
+    if current_user is not None:
+        await _ensure_owned_input(db, current_user, user_input_id)
     where_clauses = [Deal.outcome.is_(None)]
-    if user_input_id is not None:
+    if current_user is not None:
+        own_contacts = _own_contact_ids_q(current_user)
+        if user_input_id is not None:
+            own_contacts = own_contacts.where(Contact.user_input_id == user_input_id)
+        where_clauses.append(Deal.contact_id.in_(own_contacts))
+    elif user_input_id is not None:
         contact_ids_q = select(Contact.id).where(
             (Contact.user_input_id == user_input_id) | (Contact.user_input_id.is_(None))
         )
@@ -366,8 +454,8 @@ async def get_pipeline_summary(
 
 
 @router.get("/deals/{deal_id}", response_model=DealOut)
-async def get_deal(deal_id: str, db: AsyncSession = Depends(get_db)):
-    result = await db.execute(
+async def get_deal(deal_id: str, current_user=Depends(get_current_user), db: AsyncSession = Depends(get_db)):
+    stmt = (
         select(Deal)
         .options(
             selectinload(Deal.contact),
@@ -375,6 +463,9 @@ async def get_deal(deal_id: str, db: AsyncSession = Depends(get_db)):
         )
         .where(Deal.id == deal_id)
     )
+    if current_user is not None:
+        stmt = stmt.where(Deal.contact_id.in_(_own_contact_ids_q(current_user)))
+    result = await db.execute(stmt)
     deal = result.scalar_one_or_none()
     if not deal:
         raise HTTPException(status_code=404, detail="Deal not found")
@@ -383,12 +474,30 @@ async def get_deal(deal_id: str, db: AsyncSession = Depends(get_db)):
 
 # ── Pending Actions ────────────────────────────────────────────────────────
 
+async def _ensure_action_owned(db: AsyncSession, user, action) -> None:
+    """404 if the action's entity (contact/deal) is not owned by the user."""
+    if user is None:
+        return
+    if action.entity_type == "contact":
+        contact = await db.get(Contact, action.entity_id)
+        if not contact or contact.user_id != user.id:
+            raise HTTPException(status_code=404)
+    elif action.entity_type == "deal":
+        deal = await db.get(Deal, action.entity_id)
+        if not deal or not deal.contact_id:
+            raise HTTPException(status_code=404)
+        contact = await db.get(Contact, deal.contact_id)
+        if not contact or contact.user_id != user.id:
+            raise HTTPException(status_code=404)
+
+
 @router.get("/pending-actions")
 async def list_pending_actions(
     status: Optional[str] = "pending",
     agent_id: Optional[str] = None,
     entity_type: Optional[str] = None,
     limit: int = 50,
+    current_user=Depends(get_current_user),
     db: AsyncSession = Depends(get_db)
 ):
     q = select(PendingAction)
@@ -403,6 +512,17 @@ async def list_pending_actions(
         q = q.where(PendingAction.agent_id == agent_id)
     if entity_type:
         q = q.where(PendingAction.entity_type == entity_type)
+
+    if current_user is not None:
+        # Only surface actions whose entity belongs to the current user
+        q = q.where(
+            or_(
+                and_(PendingAction.entity_type == "contact",
+                     PendingAction.entity_id.in_(_own_contact_ids_q(current_user))),
+                and_(PendingAction.entity_type == "deal",
+                     PendingAction.entity_id.in_(_own_deal_ids_q(current_user))),
+            )
+        )
 
     q = q.order_by(desc(PendingAction.created_at)).limit(limit)
     result = await db.execute(q)
@@ -458,11 +578,12 @@ async def list_pending_actions(
 
 @router.post("/pending-actions/{action_id}/approve")
 async def approve_action(
-    action_id: str, body: ApproveActionRequest, db: AsyncSession = Depends(get_db)):
+    action_id: str, body: ApproveActionRequest, current_user=Depends(get_current_user), db: AsyncSession = Depends(get_db)):
     result = await db.execute(select(PendingAction).where(PendingAction.id == action_id))
     action = result.scalar_one_or_none()
     if not action:
         raise HTTPException(status_code=404)
+    await _ensure_action_owned(db, current_user, action)
     action.status = ActionStatus.APPROVED
     action.approved_by = body.approved_by
     action.approved_at = datetime.utcnow()
@@ -477,11 +598,12 @@ async def approve_action(
 
 
 @router.post("/pending-actions/{action_id}/dismiss")
-async def dismiss_action(action_id: str, db: AsyncSession = Depends(get_db)):
+async def dismiss_action(action_id: str, current_user=Depends(get_current_user), db: AsyncSession = Depends(get_db)):
     result = await db.execute(select(PendingAction).where(PendingAction.id == action_id))
     action = result.scalar_one_or_none()
     if not action:
         raise HTTPException(status_code=404)
+    await _ensure_action_owned(db, current_user, action)
     action.status = ActionStatus.DISMISSED
     action.approved_at = datetime.utcnow()  # timestamp of resolution/dismissal
     await db.commit()
@@ -491,9 +613,12 @@ async def dismiss_action(action_id: str, db: AsyncSession = Depends(get_db)):
 # ── Revenue ────────────────────────────────────────────────────────────────
 
 @router.get("/revenue/forecast", response_model=ForecastOut)
-async def get_latest_forecast(db: AsyncSession = Depends(get_db)):
+async def get_latest_forecast(current_user=Depends(get_current_user), db: AsyncSession = Depends(get_db)):
+    stmt = select(RevenueForecast)
+    if current_user is not None:
+        stmt = stmt.where(RevenueForecast.user_id == current_user.id)
     result = await db.execute(
-        select(RevenueForecast).order_by(desc(RevenueForecast.calculated_at)).limit(1))
+        stmt.order_by(desc(RevenueForecast.calculated_at)).limit(1))
     forecast = result.scalar_one_or_none()
     if not forecast:
         raise HTTPException(status_code=404, detail="No forecast yet — run A7")
@@ -502,13 +627,24 @@ async def get_latest_forecast(db: AsyncSession = Depends(get_db)):
 
 @router.get("/revenue/funnel-metrics")
 async def get_funnel_metrics(
-    days: int = Query(30, ge=7, le=365), db: AsyncSession = Depends(get_db)):
+    days: int = Query(30, ge=7, le=365),
+    current_user=Depends(get_current_user),
+    db: AsyncSession = Depends(get_db)):
     since = datetime.utcnow() - timedelta(days=days)
-    result = await db.execute(
+    stmt = (
         select(FunnelEvent.event_type, func.count(FunnelEvent.id).label("count"))
         .where(FunnelEvent.timestamp >= since)
-        .group_by(FunnelEvent.event_type)
     )
+    if current_user is not None:
+        # Events owned via their contact or via the deal's contact
+        stmt = stmt.where(
+            or_(
+                FunnelEvent.contact_id.in_(_own_contact_ids_q(current_user)),
+                FunnelEvent.deal_id.in_(_own_deal_ids_q(current_user)),
+            )
+        )
+    stmt = stmt.group_by(FunnelEvent.event_type)
+    result = await db.execute(stmt)
     return {row.event_type: row.count for row in result.all()}
 
 
@@ -518,8 +654,11 @@ async def get_funnel_metrics(
 async def list_content(
     format: Optional[str] = None, icp_segment: Optional[str] = None,
     user_input_id: Optional[int] = None,
-    limit: int = 20, db: AsyncSession = Depends(get_db)):
-    from app.models.models import UserInput
+    limit: int = 20,
+    current_user=Depends(get_current_user),
+    db: AsyncSession = Depends(get_db)):
+    if current_user is not None:
+        await _ensure_owned_input(db, current_user, user_input_id)
     q = select(GeneratedContent)
     if format:
         q = q.where(GeneratedContent.content_format == format)
@@ -645,6 +784,7 @@ async def get_orchestrator_graph():
 @router.post("/orchestrator/run-agent")
 async def run_orchestrator_agent(
     body: OrchestratorAgentRunRequest,
+    current_user=Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
 ):
     from app.orchestrator.agent_graph import AGENT_GRAPH
@@ -668,6 +808,8 @@ async def run_orchestrator_agent(
         workflow_name=f"manual_{agent_id.lower()}",
         input_payload=body.payload or {},
     )
+    if current_user is not None:
+        workflow.user_id = current_user.id
     execution = await orchestrator.create_agent_execution(
         workflow_run_id=workflow.id,
         agent_id=agent_id,
@@ -704,6 +846,7 @@ async def run_orchestrator_agent(
 @router.post("/orchestrator/run")
 async def run_orchestrator_workflow(
     body: OrchestratorWorkflowRunRequest,
+    current_user=Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
 ):
     from app.orchestrator.agent_graph import AGENT_GRAPH, get_enabled_pipeline
@@ -738,6 +881,8 @@ async def run_orchestrator_workflow(
             "payload": body.payload or {},
         },
     )
+    if current_user is not None:
+        workflow.user_id = current_user.id
 
     for agent_id in agent_ids:
         await orchestrator.create_agent_execution(
@@ -764,6 +909,7 @@ async def run_orchestrator_workflow(
 @router.get("/orchestrator/runs/{workflow_run_id}")
 async def get_orchestrator_run(
     workflow_run_id: str,
+    current_user=Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
 ):
     from app.orchestrator.orchestrator_service import OrchestratorService
@@ -771,18 +917,24 @@ async def get_orchestrator_run(
     status = await OrchestratorService(db).get_workflow_status(workflow_run_id)
     if status["workflow"] is None:
         raise HTTPException(status_code=404, detail="Workflow run not found")
+    if current_user is not None:
+        workflow = await db.get(WorkflowRun, workflow_run_id)
+        if workflow is None or workflow.user_id != current_user.id:
+            raise HTTPException(status_code=404, detail="Workflow run not found")
     return status
 
 
 @router.get("/orchestrator/runs")
 async def list_orchestrator_runs(
     limit: int = Query(20, ge=1, le=100),
+    current_user=Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
 ):
+    stmt = select(WorkflowRun)
+    if current_user is not None:
+        stmt = stmt.where(WorkflowRun.user_id == current_user.id)
     result = await db.execute(
-        select(WorkflowRun)
-        .order_by(desc(WorkflowRun.created_at))
-        .limit(limit)
+        stmt.order_by(desc(WorkflowRun.created_at)).limit(limit)
     )
     runs = result.scalars().all()
 
@@ -814,13 +966,18 @@ async def get_signal_registry(db: AsyncSession = Depends(get_db)):
 @router.get("/outreach/drafts")
 async def get_outreach_drafts(
     user_input_id: Optional[int] = None,
+    current_user=Depends(get_current_user),
     db: AsyncSession = Depends(get_db)
 ):
     q = select(OutreachLog).where(
         and_(OutreachLog.outreach_provider_message_id.is_(None),
              OutreachLog.sent_at >= datetime.utcnow() - timedelta(days=7))
     )
-    if user_input_id is not None:
+    if current_user is not None:
+        q = q.join(Contact, Contact.id == OutreachLog.contact_id).where(Contact.user_id == current_user.id)
+        if user_input_id is not None:
+            q = q.where(Contact.user_input_id == user_input_id)
+    elif user_input_id is not None:
         q = q.join(Contact).where(Contact.user_input_id == user_input_id)
     result = await db.execute(q.order_by(desc(OutreachLog.sent_at)).limit(50))
     return result.scalars().all()
@@ -940,11 +1097,14 @@ class InputData(BaseModel):
 
 
 @router.get("/input-history")
-async def get_input_history(db: AsyncSession = Depends(get_db)):
+async def get_input_history(current_user=Depends(get_current_user), db: AsyncSession = Depends(get_db)):
     """Return all past intake form submissions (newest first)."""
     from app.models.models import UserInput
     from sqlalchemy import select
-    stmt = select(UserInput).order_by(UserInput.id.desc()).limit(50)
+    stmt = select(UserInput)
+    if current_user is not None:
+        stmt = stmt.where(UserInput.user_id == current_user.id)
+    stmt = stmt.order_by(UserInput.id.desc()).limit(50)
     result = await db.execute(stmt)
     rows = result.scalars().all()
     return [
@@ -963,7 +1123,7 @@ async def get_input_history(db: AsyncSession = Depends(get_db)):
 
 
 @router.post("/submit-input")
-async def submit_input(data: InputData, db: AsyncSession = Depends(get_db)):
+async def submit_input(data: InputData, current_user=Depends(get_current_user), db: AsyncSession = Depends(get_db)):
     """
     Accepts structured company/lead input from the frontend and persists it,
     then automatically starts the GTM agent pipeline using this intake information.
@@ -983,9 +1143,11 @@ async def submit_input(data: InputData, db: AsyncSession = Depends(get_db)):
         target_company_size= data.target_company_size,
         target_keywords=     data.target_keywords or None,
         target_job_titles=   data.target_job_titles,
+        user_id=             current_user.id if current_user is not None else None,
     )
     db.add(record)
     await db.commit()
+    await db.refresh(record)
 
     agent_ids = get_enabled_pipeline()
     if "A4" in agent_ids:
@@ -1042,6 +1204,8 @@ async def submit_input(data: InputData, db: AsyncSession = Depends(get_db)):
                 "payload": payload,
             },
         )
+        if current_user is not None:
+            workflow.user_id = current_user.id
 
         for agent_id in agent_ids:
             await orchestrator.create_agent_execution(
@@ -1072,13 +1236,33 @@ class EditDraftRequest(BaseModel):
     subject: str
     body: str
 
+
+async def _get_owned_draft(db: AsyncSession, user, draft_id: str) -> OutreachDraft:
+    """Fetch a draft and enforce that its contact belongs to the user (404 otherwise)."""
+    result = await db.execute(select(OutreachDraft).where(OutreachDraft.id == draft_id))
+    draft = result.scalar_one_or_none()
+    if not draft:
+        raise HTTPException(status_code=404, detail="Draft not found")
+    if user is not None:
+        contact = await db.get(Contact, draft.contact_id)
+        if not contact or contact.user_id != user.id:
+            raise HTTPException(status_code=404, detail="Draft not found")
+    return draft
+
 @router.get("/drafts")
 async def get_drafts(
     user_input_id: Optional[int] = None,
+    current_user=Depends(get_current_user),
     db: AsyncSession = Depends(get_db)
 ):
     q = select(OutreachDraft)
-    if user_input_id is not None:
+    if current_user is not None:
+        await _ensure_owned_input(db, current_user, user_input_id)
+        own = _own_contact_ids_q(current_user)
+        if user_input_id is not None:
+            own = own.where(Contact.user_input_id == user_input_id)
+        q = q.where(OutreachDraft.contact_id.in_(own))
+    elif user_input_id is not None:
         q = q.join(Contact).where(Contact.user_input_id == user_input_id)
     result = await db.execute(
         q.order_by(OutreachDraft.created_at.desc())
@@ -1121,11 +1305,8 @@ async def get_drafts(
     return serialized
 
 @router.get("/drafts/{draft_id}/preview")
-async def preview_draft(draft_id: str, db: AsyncSession = Depends(get_db)):
-    result = await db.execute(select(OutreachDraft).where(OutreachDraft.id == draft_id))
-    d = result.scalar_one_or_none()
-    if not d:
-        raise HTTPException(status_code=404, detail="Draft not found")
+async def preview_draft(draft_id: str, current_user=Depends(get_current_user), db: AsyncSession = Depends(get_db)):
+    d = await _get_owned_draft(db, current_user, draft_id)
         
     contact_res = await db.execute(select(Contact).where(Contact.id == d.contact_id))
     contact = contact_res.scalar_one_or_none()
@@ -1160,12 +1341,11 @@ async def preview_draft(draft_id: str, db: AsyncSession = Depends(get_db)):
     }
 
 @router.post("/drafts/{draft_id}/approve")
-async def approve_draft_route(draft_id: str, db: AsyncSession = Depends(get_db)):
+async def approve_draft_route(draft_id: str, current_user=Depends(get_current_user), db: AsyncSession = Depends(get_db)):
     from app.agents.a3_outreach import DraftManager
     draft_manager = DraftManager(db)
-    # Fetch draft details
-    draft_res = await db.execute(select(OutreachDraft).where(OutreachDraft.id == draft_id))
-    draft = draft_res.scalar_one_or_none()
+    # Fetch draft details (ownership enforced)
+    draft = await _get_owned_draft(db, current_user, draft_id)
     if not draft:
         raise HTTPException(status_code=404, detail="Draft not found")
         
@@ -1200,11 +1380,8 @@ async def approve_draft_route(draft_id: str, db: AsyncSession = Depends(get_db))
     }
 
 @router.post("/drafts/{draft_id}/reject")
-async def reject_draft_route(draft_id: str, db: AsyncSession = Depends(get_db)):
-    result = await db.execute(select(OutreachDraft).where(OutreachDraft.id == draft_id))
-    d = result.scalar_one_or_none()
-    if not d:
-        raise HTTPException(status_code=404, detail="Draft not found")
+async def reject_draft_route(draft_id: str, current_user=Depends(get_current_user), db: AsyncSession = Depends(get_db)):
+    d = await _get_owned_draft(db, current_user, draft_id)
     if d.approval_state != "pending":
         raise HTTPException(status_code=400, detail="Draft not in pending state")
         
@@ -1227,11 +1404,8 @@ async def reject_draft_route(draft_id: str, db: AsyncSession = Depends(get_db)):
     return {"status": "rejected"}
 
 @router.post("/drafts/{draft_id}/edit")
-async def edit_draft_route(draft_id: str, body: EditDraftRequest, db: AsyncSession = Depends(get_db)):
-    result = await db.execute(select(OutreachDraft).where(OutreachDraft.id == draft_id))
-    d = result.scalar_one_or_none()
-    if not d:
-        raise HTTPException(status_code=404, detail="Draft not found")
+async def edit_draft_route(draft_id: str, body: EditDraftRequest, current_user=Depends(get_current_user), db: AsyncSession = Depends(get_db)):
+    d = await _get_owned_draft(db, current_user, draft_id)
     if d.approval_state != "pending":
         raise HTTPException(status_code=400, detail="Cannot edit approved/rejected draft")
         
@@ -1242,20 +1416,45 @@ async def edit_draft_route(draft_id: str, body: EditDraftRequest, db: AsyncSessi
 
 
 @router.get("/dashboard/outreach-analytics")
-async def get_outreach_analytics(db: AsyncSession = Depends(get_db)):
-    # 1. Draft counts
-    draft_pending = await db.scalar(select(func.count(OutreachDraft.id)).where(OutreachDraft.approval_state == "pending")) or 0
-    draft_approved = await db.scalar(select(func.count(OutreachDraft.id)).where(OutreachDraft.approval_state == "approved")) or 0
-    draft_rejected = await db.scalar(select(func.count(OutreachDraft.id)).where(OutreachDraft.approval_state == "rejected")) or 0
+async def get_outreach_analytics(current_user=Depends(get_current_user), db: AsyncSession = Depends(get_db)):
+    # Scope helpers — everything ties back to the user's own contacts
+    draft_pending = await db.scalar(
+        select(func.count(OutreachDraft.id))
+        .join(Contact, Contact.id == OutreachDraft.contact_id)
+        .where(and_(OutreachDraft.approval_state == "pending",
+                    Contact.user_id == current_user.id) if current_user is not None
+               else OutreachDraft.approval_state == "pending")) or 0
+    draft_approved = await db.scalar(
+        select(func.count(OutreachDraft.id))
+        .join(Contact, Contact.id == OutreachDraft.contact_id)
+        .where(and_(OutreachDraft.approval_state == "approved",
+                    Contact.user_id == current_user.id) if current_user is not None
+               else OutreachDraft.approval_state == "approved")) or 0
+    draft_rejected = await db.scalar(
+        select(func.count(OutreachDraft.id))
+        .join(Contact, Contact.id == OutreachDraft.contact_id)
+        .where(and_(OutreachDraft.approval_state == "rejected",
+                    Contact.user_id == current_user.id) if current_user is not None
+               else OutreachDraft.approval_state == "rejected")) or 0
     total_drafts = draft_pending + draft_approved + draft_rejected
 
-    # 2. Sent logs, replies, meetings
-    total_sent = await db.scalar(select(func.count(OutreachLog.id))) or 0
-    total_replies = await db.scalar(select(func.count(OutreachLog.id)).where(OutreachLog.replied == True)) or 0
-    total_meetings = await db.scalar(select(func.count(OutreachLog.id)).where(OutreachLog.meeting_booked == True)) or 0
+    log_scope = (OutreachLog.contact_id.in_(_own_contact_ids_q(current_user))
+                 if current_user is not None else True)
+    total_sent = await db.scalar(select(func.count(OutreachLog.id)).where(log_scope)) or 0
+    total_replies = await db.scalar(select(func.count(OutreachLog.id)).where(and_(log_scope, OutreachLog.replied == True))) or 0
+    total_meetings = await db.scalar(select(func.count(OutreachLog.id)).where(and_(log_scope, OutreachLog.meeting_booked == True))) or 0
 
-    # 3. Channel performance
-    channel_perf_res = await db.execute(
+    # 3. Channel performance (scoped to the user's own outreach)
+    channel_stmt = (
+        select(
+            OutreachLog.channel,
+            func.count(OutreachLog.id),
+            func.count(func.nullif(OutreachLog.replied, False)),
+            func.count(func.nullif(OutreachLog.meeting_booked, False))
+        )
+        .where(log_scope)
+        .group_by(OutreachLog.channel)
+        if current_user is not None else
         select(
             OutreachLog.channel,
             func.count(OutreachLog.id),
@@ -1263,6 +1462,7 @@ async def get_outreach_analytics(db: AsyncSession = Depends(get_db)):
             func.count(func.nullif(OutreachLog.meeting_booked, False))
         ).group_by(OutreachLog.channel)
     )
+    channel_perf_res = await db.execute(channel_stmt)
     channel_performance = []
     for chan, sent, replies, meetings in channel_perf_res.all():
         channel_performance.append({
@@ -1274,8 +1474,19 @@ async def get_outreach_analytics(db: AsyncSession = Depends(get_db)):
             "meeting_rate": round(meetings / max(sent, 1) * 100, 1)
         })
 
-    # 4. Business Case performance (Draft breakdown)
+    # 4. Business Case performance (Draft breakdown, scoped)
+    draft_scope = (Contact.user_id == current_user.id) if current_user is not None else True
     bc_perf_res = await db.execute(
+        select(
+            OutreachDraft.business_case,
+            func.count(OutreachDraft.id),
+            func.count(func.nullif(OutreachDraft.approval_state == "approved", False)),
+            func.count(func.nullif(OutreachDraft.approval_state == "rejected", False))
+        )
+        .join(Contact, Contact.id == OutreachDraft.contact_id)
+        .where(draft_scope)
+        .group_by(OutreachDraft.business_case)
+        if current_user is not None else
         select(
             OutreachDraft.business_case,
             func.count(OutreachDraft.id),

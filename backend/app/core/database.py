@@ -55,7 +55,89 @@ async def init_db():
         print(Base.metadata.tables.keys())
 
         await conn.run_sync(Base.metadata.create_all)
+        await _bootstrap_multi_user_schema(conn)
     logger.info("Database initialised")
+
+
+async def _bootstrap_multi_user_schema(conn) -> None:
+    """
+    Idempotent schema migration for multi-user support (safe to run on every
+    startup). Creates the ownership columns/indexes that `create_all` cannot
+    add to pre-existing tables, then backfills legacy rows to the configured
+    migration owner (never silently — only when GTM_MIGRATION_OWNER_EMAIL is
+    explicitly set).
+    """
+    statements = [
+        "ALTER TABLE user_inputs ADD COLUMN IF NOT EXISTS user_id UUID REFERENCES users(id)",
+        "ALTER TABLE contacts ADD COLUMN IF NOT EXISTS user_id UUID REFERENCES users(id)",
+        "ALTER TABLE workflow_runs ADD COLUMN IF NOT EXISTS user_id UUID REFERENCES users(id)",
+        "ALTER TABLE revenue_forecasts ADD COLUMN IF NOT EXISTS user_id UUID REFERENCES users(id)",
+        "CREATE INDEX IF NOT EXISTS ix_user_inputs_user_id ON user_inputs (user_id)",
+        "CREATE INDEX IF NOT EXISTS ix_contacts_user_id ON contacts (user_id)",
+        "CREATE INDEX IF NOT EXISTS ix_workflow_runs_user_id ON workflow_runs (user_id)",
+        "CREATE INDEX IF NOT EXISTS ix_revenue_forecasts_user_id ON revenue_forecasts (user_id)",
+    ]
+    for stmt in statements:
+        await conn.execute(text(stmt))
+
+    owner_email = (settings.GTM_MIGRATION_OWNER_EMAIL or "").strip().lower()
+    if not owner_email:
+        logger.warning(
+            "GTM_MIGRATION_OWNER_EMAIL not set — legacy (anonymous) rows keep "
+            "user_id NULL and will be invisible to authenticated users."
+        )
+        return
+
+    # Resolve or create the migration owner account
+    owner_id_row = await conn.execute(
+        text("SELECT id FROM users WHERE email = :email"), {"email": owner_email}
+    )
+    owner_row = owner_id_row.first()
+    if owner_row is None:
+        from app.core.security import hash_password
+        import secrets as _secrets
+        temp_password = _secrets.token_urlsafe(24)
+        await conn.execute(
+            text(
+                "INSERT INTO users (id, name, email, password_hash, is_active, created_at, updated_at) "
+                "VALUES (gen_random_uuid(), :name, :email, :password_hash, true, now(), now())"
+            ),
+            {
+                "name": "Migration Owner",
+                "email": owner_email,
+                "password_hash": hash_password(temp_password),
+            },
+        )
+        owner_id_row = await conn.execute(
+            text("SELECT id FROM users WHERE email = :email"), {"email": owner_email}
+        )
+        owner_id = owner_id_row.scalar_one()
+        logger.warning(
+            "Created migration owner account. Temporary password (rotate immediately): "
+            f"{temp_password}"
+        )
+    else:
+        owner_id = owner_row[0]
+
+    # Backfill legacy rows: user_inputs → contacts inherit from their session
+    await conn.execute(text(
+        "UPDATE contacts c SET user_id = ui.user_id "
+        "FROM user_inputs ui WHERE c.user_input_id = ui.id "
+        "AND c.user_id IS NULL AND ui.user_id IS NOT NULL"
+    ))
+    await conn.execute(text(
+        "UPDATE user_inputs SET user_id = :owner WHERE user_id IS NULL"
+    ), {"owner": owner_id})
+    await conn.execute(text(
+        "UPDATE contacts SET user_id = :owner WHERE user_id IS NULL"
+    ), {"owner": owner_id})
+    await conn.execute(text(
+        "UPDATE workflow_runs SET user_id = :owner WHERE user_id IS NULL"
+    ), {"owner": owner_id})
+    await conn.execute(text(
+        "UPDATE revenue_forecasts SET user_id = :owner WHERE user_id IS NULL"
+    ), {"owner": owner_id})
+    logger.info("Legacy rows backfilled to migration owner", owner_email=owner_email)
 
 
 async def close_db():

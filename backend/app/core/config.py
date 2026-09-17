@@ -34,6 +34,17 @@ class Settings(BaseSettings):
     def cors_origins_list(self) -> List[str]:
         return [o.strip() for o in self.CORS_ORIGINS.split(",")]
 
+    # ── Auth ──────────────────────────────────────────────────────────────────
+    AUTH_ENABLED: bool = True          # false = legacy unauthenticated dev mode
+    JWT_SECRET_KEY: str = ""           # falls back to APP_SECRET_KEY when empty
+    JWT_ALGORITHM: str = "HS256"
+    ACCESS_TOKEN_EXPIRE_MINUTES: int = 60
+    REFRESH_TOKEN_EXPIRE_DAYS: int = 14
+    # Legacy data backfill: email of the user that pre-migration (anonymous)
+    # records are assigned to. Empty = never silently assign ownership.
+    GTM_MIGRATION_OWNER_EMAIL: str = ""
+
+
     # ── Database ──────────────────────────────────────────────────────────
     DATABASE_URL: str = "postgresql+asyncpg://gtm:gtmpass@localhost:5432/gtm_platform"
 

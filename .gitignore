@@ -27,6 +27,9 @@ frontend/.vite/
 
 # Docker
 *.log
+celerybeat-schedule
+celerybeat-schedule.db
+*.pid
 
 # IDE
 .vscode/

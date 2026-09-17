@@ -1,9 +1,10 @@
-import { Outlet, NavLink, useLocation } from 'react-router-dom'
+import { Outlet, NavLink, useLocation, useNavigate } from 'react-router-dom'
 import {
   LayoutDashboard, Users, Briefcase, Send, FileText,
-  TrendingUp, Bot, ChevronRight, Bell, Zap, Clipboard, History
+  TrendingUp, Bot, ChevronRight, Bell, Zap, Clipboard, History, LogOut
 } from 'lucide-react'
 import clsx from 'clsx'
+import { useAuth } from '../../context/AuthContext'
 
 const NAV = [
   { to: '/dashboard', icon: LayoutDashboard, label: 'Dashboard' },
@@ -49,7 +50,14 @@ function ForceLogo() {
 export default function Layout() {
   // useLocation must be called at top level — not inside JSX
   const location = useLocation()
+  const navigate = useNavigate()
+  const { user, logout } = useAuth()
   const currentPage = location.pathname.replace('/', '') || 'dashboard'
+
+  const handleLogout = async () => {
+    await logout()
+    navigate('/login', { replace: true })
+  }
 
   return (
     <div
@@ -195,6 +203,35 @@ export default function Layout() {
               <Zap size={11} />
               <span>All systems operational</span>
             </div>
+            {user && (
+              <div
+                className="flex items-center gap-2 text-xs"
+                style={{ color: 'var(--c-text2)' }}
+                title={user.email}
+              >
+                <span
+                  className="w-6 h-6 rounded-full flex items-center justify-center text-[10px] font-bold text-white"
+                  style={{ background: 'linear-gradient(135deg, #0A67FF, #00C8FF)' }}
+                >
+                  {user.name?.charAt(0)?.toUpperCase() || '?'}
+                </span>
+                <span className="hidden md:inline">{user.name}</span>
+              </div>
+            )}
+            <button
+              onClick={handleLogout}
+              title="Sign out"
+              className="w-7 h-7 rounded-lg flex items-center justify-center transition-colors"
+              style={{
+                background: 'var(--c-surface2)',
+                color: 'var(--c-text3)',
+                border: '1px solid var(--c-border)',
+              }}
+              onMouseEnter={e => e.currentTarget.style.color = '#EF4444'}
+              onMouseLeave={e => e.currentTarget.style.color = 'var(--c-text3)'}
+            >
+              <LogOut size={13} />
+            </button>
             <button
               className="w-7 h-7 rounded-lg flex items-center justify-center transition-colors"
               style={{

@@ -1,7 +1,7 @@
 import { useState } from 'react'
 import { useQuery } from '@tanstack/react-query'
 import { useParams, useNavigate } from 'react-router-dom'
-import { fetchContact, fetchThread, fetchSignals, fetchDeals, summarizeSignals } from '../api'
+import { fetchContact, fetchThread, fetchSignals, fetchDeals } from '../api'
 import { ArrowLeft, Mail, Building2, MapPin, Zap, MessageSquare, X, Link, TrendingUp, CheckCircle2, Clock, Sparkles, ExternalLink, ShieldCheck, UserCheck, Briefcase } from 'lucide-react'
 import DealDetailModal from '../components/DealDetailModal'
 
@@ -10,7 +10,6 @@ export default function ContactDetail() {
   const navigate = useNavigate()
   const [selectedSignal, setSelectedSignal] = useState(null)
   const [selectedDeal, setSelectedDeal] = useState(null)
-  const [isSummarizing, setIsSummarizing] = useState(false)
 
   const { data: contact, isLoading, refetch: refetchContact } = useQuery({ queryKey: ['contact', id], queryFn: () => fetchContact(id) })
   const { data: thread = [] } = useQuery({ queryKey: ['thread', id], queryFn: () => fetchThread(id) })
@@ -279,6 +278,91 @@ export default function ContactDetail() {
                               {t.channel && <span>· Via {t.channel.toUpperCase()}</span>}
                             </div>
                           </div>
+                        </div>
+                      ) : (
+                        /* ── Inbound (Received) Message Bubble — BLUE ── */
+                        <div className="space-y-3">
+                          <div className="flex items-start gap-2.5 max-w-[90%]">
+                            <div className="w-8 h-8 rounded-full bg-blue-600 text-white font-bold text-xs flex items-center justify-center shrink-0 border border-blue-500 shadow-sm">
+                              {prospectInitials}
+                            </div>
+                            <div className="space-y-1 w-full">
+                              <div className="p-3.5 rounded-2xl rounded-tl-none bg-[#EFF6FF] text-[#1E3A8A] border border-[#BFDBFE] shadow-xs text-xs leading-relaxed">
+                                <div className="flex items-center justify-between gap-2 pb-1.5 mb-1.5 border-b border-blue-200/80 text-[11px] font-semibold text-blue-900">
+                                  <span className="inline-flex items-center gap-1">
+                                    <span className="w-1.5 h-1.5 rounded-full bg-blue-600"></span>
+                                    Received Email
+                                  </span>
+                                  <span className="text-[10px] text-blue-700 font-normal">
+                                    {t.occurred_at ? new Date(t.occurred_at).toLocaleDateString([], { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' }) : ''}
+                                  </span>
+                                </div>
+                                <div className="text-slate-800 whitespace-pre-line">
+                                  {t.content}
+                                </div>
+                              </div>
+                              <div className="flex items-center gap-2 text-[10px] text-slate-500 px-1 flex-wrap">
+                                <span className="font-semibold text-blue-900">{prospectName}</span>
+                                {t.intent && (
+                                  <>
+                                    <span>·</span>
+                                    <span className="text-blue-800 bg-blue-100/80 border border-blue-300/80 px-1.5 py-0.2 rounded capitalize font-medium">
+                                      {t.intent.replace(/_/g, ' ')}
+                                    </span>
+                                  </>
+                                )}
+                                {t.readiness_score_after != null && (
+                                  <>
+                                    <span>·</span>
+                                    <span>Score: <strong className="text-blue-600 font-bold">{t.readiness_score_after.toFixed(0)}%</strong></span>
+                                  </>
+                                )}
+                              </div>
+                            </div>
+                          </div>
+
+                          {/* Outbound AI Draft Reply for Received Email — GREEN */}
+                          {t.draft_content && (
+                            <div className="flex items-start gap-2.5 max-w-[90%] ml-auto flex-row-reverse">
+                              <div className="w-8 h-8 rounded-full bg-emerald-600 text-white font-bold text-xs flex items-center justify-center shrink-0 border border-emerald-500 shadow-sm">
+                                You
+                              </div>
+                              <div className="space-y-1.5 text-right w-full">
+                                <div className="p-3.5 rounded-2xl rounded-tr-none bg-[#ECFDF5] text-[#064E3B] border border-[#A7F3D0] shadow-xs text-xs leading-relaxed text-left whitespace-pre-line font-normal">
+                                  <div className="flex items-center justify-between gap-2 pb-1 mb-1 border-b border-emerald-200/80 text-[11px] font-semibold text-emerald-800">
+                                    <span>AI Suggested Reply</span>
+                                    {t.approved_at ? (
+                                      <span className="text-[10px] text-emerald-700 font-medium">Approved</span>
+                                    ) : (
+                                      <span className="text-[10px] text-amber-700 font-medium">Pending Approval</span>
+                                    )}
+                                  </div>
+                                  <div className="text-slate-800 whitespace-pre-line">
+                                    {t.draft_content}
+                                  </div>
+                                </div>
+                                <div className="flex items-center justify-end gap-2 text-[11px] px-1 flex-wrap">
+                                  {t.approved_at ? (
+                                    <span className="inline-flex items-center gap-1 text-emerald-800 font-semibold bg-emerald-50 border border-emerald-300 px-2.5 py-0.5 rounded-full shadow-xs">
+                                      <CheckCircle2 size={11} className="text-emerald-600" /> Approved by {t.approved_by || 'Rep'}
+                                    </span>
+                                  ) : (
+                                    <span className="inline-flex items-center gap-1 text-amber-800 font-semibold bg-amber-50 border border-amber-300 px-2.5 py-0.5 rounded-full shadow-xs">
+                                      <Clock size={11} className="text-amber-600" /> Pending Slack Approval
+                                    </span>
+                                  )}
+                                  <a
+                                    href={gmailComposeUrl}
+                                    target="_blank"
+                                    rel="noopener noreferrer"
+                                    className="inline-flex items-center gap-1 text-white font-semibold bg-emerald-600 hover:bg-emerald-700 active:bg-emerald-800 px-3 py-0.5 rounded-full shadow-sm transition-all text-[11px]"
+                                  >
+                                    <ExternalLink size={11} /> Send via Gmail Web
+                                  </a>
+                                </div>
+                              </div>
+                            </div>
+                          )}
                         </div>
                       ) : (
                         /* ── Inbound (Received) Message Bubble — BLUE ── */

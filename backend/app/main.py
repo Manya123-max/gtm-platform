@@ -15,6 +15,7 @@ import structlog
  
 from app.core.config import settings
 from app.core.database import init_db, close_db, get_db
+from app.core.security import get_current_user
 from app.api.v1 import router as api_router
  
 logger = structlog.get_logger()
@@ -53,7 +54,10 @@ app.add_middleware(
 )
  
 # ── API Routes ────────────────────────────────────────────────────────────
+from app.api.v1.auth import auth_router
 app.include_router(api_router, prefix="/api/v1")
+# Public authentication routes (register/login/refresh/me/logout)
+app.include_router(auth_router, prefix="/api/v1")
  
  
 # ── Input Schema (new) ───────────────────────────────────────────────────
@@ -69,13 +73,14 @@ class InputData(BaseModel):
 
 
 @app.post("/submit-input")
-async def submit_input(data: InputData):
+async def submit_input(data: InputData, current_user=Depends(get_current_user)):
     """
     Accepts structured company/lead input from the frontend and persists it.
+    Requires authentication — the record is stamped with the caller's user_id.
     """
     from app.core.database import AsyncSessionLocal
     from app.models.models import UserInput
- 
+
     async with AsyncSessionLocal() as db:
         record = UserInput(
             our_company_name=    data.our_company_name,
@@ -85,11 +90,12 @@ async def submit_input(data: InputData):
             target_company_size= data.target_company_size,
             target_keywords=     data.target_keywords or None,
             target_job_titles=   data.target_job_titles,
+            user_id=             current_user.id if current_user is not None else None,
         )
         db.add(record)
         await db.commit()
         await db.refresh(record)
- 
+
     return {"message": "Input received", "id": record.id}
 
 # ── Webhook Routes ────────────────────────────────────────────────────────
@@ -383,4 +389,4 @@ async def _reject_draft(draft_id: str, approved_by: str, response_url: Optional[
             async with httpx.AsyncClient(timeout=5) as client:
                 await client.post(response_url, json={"text": "✗ *Outreach Draft Rejected*", "response_type": "in_channel"})
         except Exception as e:
-            logger.error("Failed to notify Slack response_url", error=str(e))
+            logger.error("Failed to notify Slack response_url", error=str(e))

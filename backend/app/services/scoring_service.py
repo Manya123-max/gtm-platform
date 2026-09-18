@@ -44,29 +44,52 @@ RULE_WEIGHTS = {
     # ── Job title (max 25) ─────────────────────────────────────────────────
     # First match wins. Order matters — more specific first.
     "title_keywords": {
-        # C-suite engineering/technology
+        # C-suite executive / revenue / technology
         "chief technology":          25,
         "cto":                       25,
+        "chief revenue":             25,
+        "cro":                       25,
+        "chief commercial":          23,
         "chief information":         22,
         "cio":                       22,
         "chief digital":             21,
-        # VP-level engineering
+        "chief marketing":           21,
+        "cmo":                       21,
+        "chief product":             21,
+        "cpo":                       21,
+        # VP-level revenue / engineering / product
+        "vp of sales":               22,
+        "vp sales":                  22,
+        "vp of revenue":             22,
+        "vp revenue":                22,
         "vp of engineering":         22,
         "vp engineering":            22,
         "vp technology":             21,
         "vp of technology":          21,
+        "vp of marketing":           20,
+        "vp marketing":              20,
         "vp product":                19,
         "vp of product":             19,
         "vp of it":                  19,
+        "vp of business development":19,
+        "vp business development":   19,
         # Head-of
+        "head of sales":             21,
+        "head of revenue":           21,
         "head of engineering":       21,
         "head of technology":        20,
+        "head of marketing":         20,
         "head of product":           19,
+        "head of business development":19,
         "head of it":                18,
         "head of digital":           18,
         # Director-level
+        "director of sales":         18,
+        "director of revenue":       18,
         "director of engineering":   18,
         "director of technology":    17,
+        "director of marketing":     17,
+        "director of business development":16,
         "director of it":            16,
         "director of product":       16,
         # Salesforce-specific (4CECloud Labs ICP)
@@ -175,11 +198,11 @@ RULE_WEIGHTS = {
 def _seniority_score(title: str) -> int:
     """Return seniority points based on title string."""
     t = title.lower()
-    if any(k in t for k in ["chief", " cto", " cio", " cpo", " ceo", "c-suite"]):
+    if any(k in t for k in ["chief", "cto", "cio", "cpo", "ceo", "cro", "cmo", "cfo", "ciso", "c-suite", "c-level"]):
         return RULE_WEIGHTS["seniority"]["c_suite"]
-    if any(k in t for k in ["vp", "vice president"]):
+    if any(k in t for k in ["vp", "vice president", "v.p."]):
         return RULE_WEIGHTS["seniority"]["vp"]
-    if "head of" in t or "head," in t:
+    if "head of" in t or "head," in t or "head " in t or t == "head":
         return RULE_WEIGHTS["seniority"]["head"]
     if "director" in t:
         return RULE_WEIGHTS["seniority"]["director"]

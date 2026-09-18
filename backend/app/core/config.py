@@ -34,6 +34,17 @@ class Settings(BaseSettings):
     def cors_origins_list(self) -> List[str]:
         return [o.strip() for o in self.CORS_ORIGINS.split(",")]
 
+    # ── Auth ──────────────────────────────────────────────────────────────────
+    AUTH_ENABLED: bool = True          # false = legacy unauthenticated dev mode
+    JWT_SECRET_KEY: str = ""           # falls back to APP_SECRET_KEY when empty
+    JWT_ALGORITHM: str = "HS256"
+    ACCESS_TOKEN_EXPIRE_MINUTES: int = 60
+    REFRESH_TOKEN_EXPIRE_DAYS: int = 14
+    # Legacy data backfill: email of the user that pre-migration (anonymous)
+    # records are assigned to. Empty = never silently assign ownership.
+    GTM_MIGRATION_OWNER_EMAIL: str = ""
+
+
     # ── Database ──────────────────────────────────────────────────────────
     DATABASE_URL: str = "postgresql+asyncpg://gtm:gtmpass@localhost:5432/gtm_platform"
 
@@ -57,11 +68,13 @@ class Settings(BaseSettings):
     EMBEDDING_MODEL:   str = "hash"   # "hash" = zero deps; "miniLM" = sentence-transformers
 
     # ── Apollo.io (Organization tier) ────────────────────────────────────
-    # Organization tier gives ~10 000 export credits/month + bulk enrichment.
-    # Increase APOLLO_SEARCH_MAX_PAGES from 10 → 25 to take advantage.
-    APOLLO_API_KEY:           str = ""
-    APOLLO_SEARCH_MAX_PAGES:  int = 25   # ↑ was 10 on free tier
-    APOLLO_ENRICH_LIMIT:      int = 10   # number of prospects to fetch/enrich per run (Task 6)
+    APOLLO_API_KEY:               str = ""
+    APOLLO_MAX_SEARCH_PAGES:      int = 10   # Max pages ceiling for safety
+    APOLLO_SEARCH_MAX_PAGES:      int = 10   # Backward-compatible alias
+    APOLLO_SEARCH_PER_PAGE:       int = 100  # Number of stubs per Apollo search page
+    APOLLO_CANDIDATE_POOL_SIZE:   int = 150  # Target candidate pool size before enrichment
+    APOLLO_ENRICH_LIMIT:          int = 25   # Default number of final qualified prospects / enrichment limit
+    APOLLO_INCLUDE_SIMILAR_TITLES: bool = False # Default strict title matching
 
     # ── News / job signals ────────────────────────────────────────────────
     NEWS_API_KEY:           str = ""

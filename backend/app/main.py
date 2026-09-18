@@ -389,4 +389,4 @@ async def _reject_draft(draft_id: str, approved_by: str, response_url: Optional[
             async with httpx.AsyncClient(timeout=5) as client:
                 await client.post(response_url, json={"text": "✗ *Outreach Draft Rejected*", "response_type": "in_channel"})
         except Exception as e:
-            logger.error("Failed to notify Slack response_url", error=str(e))
+            logger.error("Failed to notify Slack response_url", error=str(e))

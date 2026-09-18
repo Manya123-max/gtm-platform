@@ -25,8 +25,8 @@ from app.core.config import settings
 logger = structlog.get_logger()
 
 # ── Model IDs ────────────────────────────────────────────────────────────────
-HAIKU_MODEL  = "claude-haiku-4-5-20251001"
-SONNET_MODEL = "claude-sonnet-4-6"
+HAIKU_MODEL  = "claude-3-haiku-20240307"
+SONNET_MODEL = "claude-3-5-sonnet-latest"
 
 GROQ_URL     = "https://api.groq.com/openai/v1/chat/completions"
 GEMINI_URL   = "https://generativelanguage.googleapis.com/v1beta/models/gemini-flash-lite-latest:generateContent"
@@ -159,6 +159,7 @@ def _build_provider_chain(
             GROQ_URL, settings.GROQ_API_KEY, "qwen/qwen3.8-27b",
             s, u, t, force_json=force_json,
         )))
+
 
     if settings.GEMINI_API_KEY:
         providers.append(("Gemini", lambda s, u, t: _call_gemini(

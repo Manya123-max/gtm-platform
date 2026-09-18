@@ -163,8 +163,8 @@ def resolve_industries_and_terms(industry_str: str) -> Tuple[List[str], List[str
     fallback_keywords: List[str] = []
 
     for term in industry_str.split(","):
-        normalized = term.strip().lower()
-        if not normalized:
+        clean_term = term.strip()
+        if not clean_term:
             continue
         if normalized in INDUSTRY_TAG_MAP:
             tag_id = INDUSTRY_TAG_MAP[normalized]

@@ -74,6 +74,7 @@ class ContactOut(BaseModel):
     email_valid: Optional[bool] = None
     signal_type: Optional[str] = None
     latest_signal_at: Optional[datetime] = None
+    signal_summary: Optional[str] = None
     created_at: datetime
     class Config:
         from_attributes = True
@@ -382,6 +383,41 @@ async def get_contact_signals(contact_id: UUID, current_user=Depends(get_current
     stmt = stmt.order_by(desc(SignalEvent.detected_at))
     result = await db.execute(stmt)
     return result.scalars().all()
+
+
+@router.post("/contacts/{contact_id}/summarize-signals")
+async def summarize_contact_signals(contact_id: str, db: AsyncSession = Depends(get_db)):
+    """Generate or refresh 2-line LLM buying signal summary for a contact."""
+    result = await db.execute(select(Contact).where(Contact.id == contact_id))
+    contact = result.scalar_one_or_none()
+    if not contact:
+        raise HTTPException(status_code=404, detail="Contact not found")
+
+    signals_res = await db.execute(select(SignalEvent).where(SignalEvent.contact_id == contact_id))
+    signals = list(signals_res.scalars().all())
+
+    if not signals:
+        summary_text = f"No active buying signals detected yet for {contact.company or contact.first_name or 'this prospect'}."
+        contact.signal_summary = summary_text
+        await db.commit()
+        return {"contact_id": contact_id, "signal_summary": summary_text}
+
+    sig_dicts = [
+        {
+            "signal_type": s.signal_type,
+            "confidence": s.confidence,
+            "raw_data": s.raw_data,
+            "signal_source": s.signal_source,
+        }
+        for s in signals
+    ]
+
+    from app.agents.a2_signal import SignalAgent
+    agent = SignalAgent(db)
+    summary = await agent._generate_2_line_signal_summary(contact.company or contact.first_name or "Prospect", sig_dicts)
+    contact.signal_summary = summary
+    await db.commit()
+    return {"contact_id": contact_id, "signal_summary": summary}
 
 
 # ── Deals ──────────────────────────────────────────────────────────────────

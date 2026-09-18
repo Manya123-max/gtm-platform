@@ -1,18 +1,28 @@
 """A1 - Prospect Intelligence Agent.
 
-Apollo is the only discovery and enrichment provider. The agent:
-  1. Searches Apollo with the correct ICP filters (no vendor company restriction)
-  2. Pre-scores stubs before paying for enrichment (filter-first)
-  3. Dedupes against recently enriched contacts
-  4. Bulk-matches only the pre-qualified, deduped subset
-  5. Conditionally enriches org data when firmographic fields are blank
-  6. Final-scores, thresholds, and persists contacts
+Apollo is the discovery and enrichment provider. The iterative replenishment pipeline:
+  1. Normalizes ICP configuration (titles, seniorities, size ranges, locations, industry tags).
+  2. Builds validated Apollo search payloads using ApolloQueryBuilder.
+  3. Iterates sequentially across Apollo pages (Page 1 → Page 2 → ... up to max pages):
+     a. Performs fast in-memory deduplication (IDs and composite keys).
+     b. Executes pre-qualification gate on search stubs (rejecting clear mismatches without external calls).
+     c. Excludes candidates enriched in PostgreSQL within the last 7 days.
+     d. Pre-scores eligible stubs with WinPatternScorer to rank the strongest prospects first.
+     e. Selects only the needed subset of pre-qualified candidates for enrichment.
+     f. Bulk-matches selected candidates in batches of 10.
+     g. Conditionally enriches org firmographics if missing.
+     h. Computes final authoritative ICP score with WinPatternScorer and applies threshold.
+     i. Accumulates qualifying prospects until requested count (default 25) is reached.
+  4. Stops immediately when requested count is reached, Apollo is exhausted, or max pages reached.
+  5. Never injects fallback database contacts on failed or empty searches.
+  6. Persists final qualifying prospects with user_id and user_input_id for strict multi-user isolation.
+  7. Emits rich structured telemetry to FunnelEvent (zero secrets).
 """
 from __future__ import annotations
 
-import secrets
-from datetime import datetime, timedelta
-from typing import Any, Dict, List, Optional, Tuple
+import re
+from datetime import datetime, timedelta, timezone
+from typing import Any, Dict, List, Optional, Tuple, Set
 
 import httpx
 import structlog
@@ -22,12 +32,17 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.core.config import settings
 from app.models.models import Contact, FunnelEvent
 from app.services.scoring_service import WinPatternScorer
+from app.services.icp_normalizer import (
+    NormalizedICPConfig,
+    normalize_icp_input,
+    APOLLO_EMPLOYEE_BUCKETS,
+    _infer_seniorities_from_title,
+)
+from app.services.apollo_query_builder import ApolloQueryBuilder
+from app.agents.industry_tag_map import get_industry_synonyms, INDUSTRY_TAG_MAP
 
 logger = structlog.get_logger()
 
-# Pages with fewer total entries than this are searched sequentially from page 1
-# to avoid landing on an empty page. Large result sets use random sampling for variety.
-_RANDOM_PAGE_THRESHOLD = 200
 
 
 class ProspectAgent:
@@ -40,54 +55,56 @@ class ProspectAgent:
     # ------------------------------------------------------------------
 
     async def run(self, icp_config: Dict[str, Any]) -> Dict[str, Any]:
-        logger.info("A1 starting", config_keys=list(icp_config.keys()))
-
-        raw_contacts, provider_meta = await self._fetch_from_apollo(icp_config)
-        logger.info(
-            "Apollo prospect fetch complete",
-            count=len(raw_contacts),
-            **provider_meta,
+        """
+        Execute the A1 prospecting pipeline with normalized input and smart replenishment.
+        """
+        norm_cfg = normalize_icp_input(icp_config)
+        requested_count = int(
+            norm_cfg.requested_count
+            or norm_cfg.enrich_limit
+            or getattr(settings, "APOLLO_ENRICH_LIMIT", 25)
         )
 
-        scored = await self._score_contacts(raw_contacts)
-        threshold = icp_config.get("threshold", settings.ICP_SCORE_THRESHOLD)
-        qualified = [c for c in scored if c.get("win_pattern_score", 0) >= threshold]
+        logger.info(
+            "A1 starting prospecting run",
+            requested_count=requested_count,
+            titles=norm_cfg.titles,
+            seniorities=norm_cfg.seniorities,
+            organization_locations=norm_cfg.organization_locations,
+            employee_ranges=norm_cfg.employee_ranges,
+            industry_tag_ids=norm_cfg.industry_tag_ids,
+            org_keyword_tags=norm_cfg.org_keyword_tags,
+            threshold=norm_cfg.threshold,
+        )
+
+        final_prospects, telemetry = await self._fetch_and_enrich_replenishment(
+            norm_cfg, requested_count
+        )
+
+        logger.info(
+            "Apollo replenishment pipeline complete",
+            qualified_count=len(final_prospects),
+            **{k: v for k, v in telemetry.items() if k != "search_request"},
+        )
 
         save_result = await self._save_contacts(
-            qualified, icp_config.get("user_input_id")
+            final_prospects,
+            user_input_id=norm_cfg.user_input_id,
+            user_id=norm_cfg.user_id,
         )
 
-        user_input_id = icp_config.get("user_input_id")
-        if (not save_result.get("contact_ids")) and user_input_id is not None:
-            # Fallback: Tag existing database contacts with current session ID so pipeline & UI continue smoothly
-            res = await self.db.execute(select(Contact).where(Contact.user_input_id.is_(None)))
-            fallback_contacts = res.scalars().all()
-            if not fallback_contacts:
-                res = await self.db.execute(select(Contact).limit(25))
-                fallback_contacts = res.scalars().all()
-            for c in fallback_contacts:
-                c.user_input_id = user_input_id
-            await self.db.commit()
-            save_result = {
-                "saved_count": len(fallback_contacts),
-                "updated_count": len(fallback_contacts),
-                "inserted_count": 0,
-                "contact_ids": [str(c.id) for c in fallback_contacts],
-                "inserted_contact_ids": [],
-            }
+        telemetry["saved_count"] = save_result.get("saved_count", 0)
+        telemetry["updated_count"] = save_result.get("updated_count", 0)
+        telemetry["final_qualified_count"] = len(final_prospects)
 
-        reason = self._reason(raw_contacts, scored, qualified, save_result, provider_meta)
+        reason = self._reason(final_prospects, save_result, telemetry)
+        telemetry["reason"] = reason
 
         await self._log_funnel_event(
             "prospect_batch_completed",
             {
                 "provider": "apollo",
-                "discovery_method": provider_meta.get("method"),
-                "provider_page": provider_meta.get("page"),
-                "raw_count": len(raw_contacts),
-                "scored_count": len(scored),
-                "qualified_count": len(qualified),
-                "reason": reason,
+                "telemetry": telemetry,
                 **save_result,
             },
         )
@@ -95,34 +112,65 @@ class ProspectAgent:
         return {
             "agent": "A1",
             "provider": "apollo",
-            "discovery_method": provider_meta.get("method"),
-            "provider_page": provider_meta.get("page"),
-            "raw_count": len(raw_contacts),
-            "scored_count": len(scored),
-            "qualified_count": len(qualified),
+            "discovery_method": "prequalified_replenishment_bulk_match",
+            "requested_count": requested_count,
+            "raw_count": telemetry.get("raw_candidates", 0),
+            "prequalified_count": telemetry.get("prequalified_candidates", 0),
+            "enriched_count": telemetry.get("enriched_count", 0),
+            "qualified_count": len(final_prospects),
+            "final_count": len(final_prospects),
+            "saved_count": save_result.get("saved_count", 0),
             "reason": reason,
+            "telemetry": telemetry,
             **save_result,
-            "contacts": [c.get("email") for c in qualified[:5]],
+            "contacts": [c.get("email") for c in final_prospects[:5]],
         }
 
     # ------------------------------------------------------------------
-    # Apollo fetch — filter-before-enrich pipeline
+    # Apollo replenishment & selective enrichment loop
     # ------------------------------------------------------------------
 
-    async def _fetch_from_apollo(
-        self, icp_config: Dict[str, Any]
+    async def _fetch_and_enrich_replenishment(
+        self, norm_cfg: NormalizedICPConfig, requested_count: int
     ) -> Tuple[List[Dict[str, Any]], Dict[str, Any]]:
-        if not settings.APOLLO_API_KEY:
-            return [], {
-                "provider": "apollo",
-                "method": "people_search_bulk_match",
-                "page": None,
-                "reason": "missing_apollo_api_key",
-            }
+        telemetry: Dict[str, Any] = {
+            "requested_count": requested_count,
+            "search_request": {},
+            "pages_requested": 0,
+            "raw_candidates": 0,
+            "duplicate_candidates": 0,
+            "recently_enriched_excluded": 0,
+            "prequalification_rejected": 0,
+            "industry_rejected": 0,
+            "technology_rejected": 0,
+            "location_rejected": 0,
+            "company_size_rejected": 0,
+            "title_rejected": 0,
+            "prequalified_candidates": 0,
+            "candidates_selected_for_enrichment": 0,
+            "enrichment_batches": 0,
+            "enriched_count": 0,
+            "final_threshold_passed": 0,
+            "final_qualified_count": 0,
+            "remaining_needed": requested_count,
+            "exhaustion_reason": None,
+        }
 
-        max_pages = max(1, int(icp_config.get("max_pages", settings.APOLLO_SEARCH_MAX_PAGES)))
-        enrich_limit = int(icp_config.get("enrich_limit", getattr(settings, "APOLLO_ENRICH_LIMIT", 25)))
-        threshold = icp_config.get("threshold", settings.ICP_SCORE_THRESHOLD)
+        if not settings.APOLLO_API_KEY:
+            telemetry["exhaustion_reason"] = "missing_apollo_api_key"
+            return [], telemetry
+
+        max_pages = max(
+            1,
+            int(
+                getattr(
+                    settings,
+                    "APOLLO_MAX_SEARCH_PAGES",
+                    getattr(settings, "APOLLO_SEARCH_MAX_PAGES", 10),
+                )
+            ),
+        )
+        per_page = int(getattr(settings, "APOLLO_SEARCH_PER_PAGE", 100))
 
         headers = {
             "accept": "application/json",
@@ -131,236 +179,464 @@ class ProspectAgent:
             "X-Api-Key": settings.APOLLO_API_KEY,
         }
 
-        # ── Step 1: Initial search (page 1) to learn total_entries ──────────
-        body = self._build_search_body(icp_config, page=1, per_page=100)
+        base_search_body = ApolloQueryBuilder.build_search_payload(norm_cfg, page=1, per_page=per_page)
+        telemetry["search_request"] = ApolloQueryBuilder.to_sanitized_dict(base_search_body)
+
+        final_qualified: List[Dict[str, Any]] = []
+        seen_apollo_ids: Set[str] = set()
+        seen_composite_keys: Set[Tuple[str, str, str]] = set()
+        enriched_apollo_ids: Set[str] = set()
+
+        current_page = 1
 
         try:
             async with httpx.AsyncClient(timeout=30) as client:
-                search_resp = await client.post(
-                    "https://api.apollo.io/api/v1/mixed_people/api_search",
-                    headers=headers,
-                    json=body,
-                )
-                search_resp.raise_for_status()
-                search_data = search_resp.json()
+                while len(final_qualified) < requested_count and current_page <= max_pages:
+                    search_body = ApolloQueryBuilder.build_search_payload(
+                        norm_cfg, page=current_page, per_page=per_page
+                    )
+                    telemetry["pages_requested"] += 1
 
-                pagination = search_data.get("pagination") or {}
-                total_entries = pagination.get("total_entries") or search_data.get("total_entries", 0)
-                people = search_data.get("people") or search_data.get("contacts") or []
-
-                # ── Step 2: Decide page strategy based on total_entries ──────
-                requested_page = icp_config.get("page")
-                if requested_page:
-                    actual_page = int(requested_page)
-                elif total_entries < _RANDOM_PAGE_THRESHOLD:
-                    # Small result set — use page 1 (already fetched)
-                    actual_page = 1
-                else:
-                    # Large result set — re-fetch on a random page for variety
-                    actual_page = secrets.randbelow(max_pages) + 1
-                    if actual_page > 1:
-                        body["page"] = actual_page
-                        search_resp2 = await client.post(
-                            "https://api.apollo.io/api/v1/mixed_people/api_search",
-                            headers=headers,
-                            json=body,
+                    search_resp = await client.post(
+                        "https://api.apollo.io/api/v1/mixed_people/api_search",
+                        headers=headers,
+                        json=search_body,
+                    )
+                    if search_resp.status_code != 200:
+                        logger.error(
+                            "Apollo search HTTP error",
+                            status_code=search_resp.status_code,
+                            body=search_resp.text[:300],
                         )
-                        search_resp2.raise_for_status()
-                        people = (
-                            search_resp2.json().get("people")
-                            or search_resp2.json().get("contacts")
-                            or []
-                        )
+                        telemetry["exhaustion_reason"] = f"apollo_http_{search_resp.status_code}"
+                        break
 
-                if not people:
-                    return [], {
-                        "provider": "apollo",
-                        "method": "people_search_bulk_match",
-                        "page": actual_page,
-                        "total_entries": total_entries,
-                        "reason": "apollo_people_search_empty",
-                    }
+                    search_data = search_resp.json()
+                    pagination = search_data.get("pagination") or {}
+                    total_entries = pagination.get("total_entries") or search_data.get("total_entries", 0)
+                    people = search_data.get("people") or search_data.get("contacts") or []
 
-                # ── Step 3: Pre-score stubs (no enrichment yet) ──────────────
-                stub_scored: List[Tuple[float, Dict]] = []
-                for person in people:
-                    stub = self._stub_dict(person)
-                    score, _ = self.scorer.score(stub)
-                    stub_scored.append((score, person))
+                    if not people:
+                        telemetry["exhaustion_reason"] = "apollo_exhausted"
+                        break
 
-                stub_scored.sort(key=lambda x: x[0], reverse=True)
-                top_candidates = [p for _, p in stub_scored[:enrich_limit]]
-                pre_qualified_count = sum(
-                    1 for s, _ in stub_scored[:enrich_limit] if s >= threshold
-                )
+                    # 1. Filter stubs on current page
+                    page_prequalified_stubs: List[Dict[str, Any]] = []
+                    for person in people:
+                        telemetry["raw_candidates"] += 1
+                        pid = person.get("id") or ""
+                        first_name = (person.get("first_name") or "").strip().lower()
+                        last_name = (person.get("last_name") or "").strip().lower()
+                        org_name = ((person.get("organization") or {}).get("name") or "").strip().lower()
+                        # In-memory deduplication across pages & within page
+                        composite_key = (first_name, last_name, org_name) if (first_name or last_name) and org_name else None
+                        if pid and pid in seen_apollo_ids:
+                            telemetry["duplicate_candidates"] += 1
+                            continue
+                        if composite_key and composite_key in seen_composite_keys:
+                            telemetry["duplicate_candidates"] += 1
+                            continue
 
-                logger.info(
-                    "A1 pre-score complete",
-                    total_stubs=len(people),
-                    pre_qualified=pre_qualified_count,
-                    to_enrich=len(top_candidates),
-                )
+                        # Pre-qualification gate
+                        is_prequal, reject_reason = self._check_prequalification(person, norm_cfg)
+                        if not is_prequal:
+                            telemetry["prequalification_rejected"] += 1
+                            if reject_reason and reject_reason in telemetry:
+                                telemetry[reject_reason] += 1
+                            continue
 
-                # ── Step 4: Dedupe against recently enriched contacts ─────────
-                apollo_ids = [p["id"] for p in top_candidates if p.get("id")]
-                recently_enriched = await self._get_recently_enriched_apollo_ids(apollo_ids)
-                to_enrich = [
-                    p for p in top_candidates
-                    if p.get("id") not in recently_enriched
-                ]
+                        if pid:
+                            seen_apollo_ids.add(pid)
+                        if composite_key:
+                            seen_composite_keys.add(composite_key)
 
-                logger.info(
-                    "A1 dedupe complete",
-                    already_enriched=len(recently_enriched),
-                    to_enrich=len(to_enrich),
-                )
+                        telemetry["prequalified_candidates"] += 1
+                        page_prequalified_stubs.append(person)
 
-                if not to_enrich:
-                    return [], {
-                        "provider": "apollo",
-                        "method": "people_search_bulk_match",
-                        "page": actual_page,
-                        "total_entries": total_entries,
-                        "reason": "all_candidates_recently_enriched",
-                    }
 
-                # ── Step 5: Bulk match (pay for enrichment) — top N only ─────
-                enriched_people = await self._bulk_match(client, headers, to_enrich)
+                    # 2. Exclude stubs enriched in DB within the last 7 days or already enriched in this run
+                    stubs_to_check = [p["id"] for p in page_prequalified_stubs if p.get("id")]
+                    recently_enriched = await self._get_recently_enriched_apollo_ids(stubs_to_check)
+                    fresh_stubs = [
+                        p
+                        for p in page_prequalified_stubs
+                        if p.get("id") not in recently_enriched
+                        and p.get("id") not in enriched_apollo_ids
+                    ]
+                    telemetry["recently_enriched_excluded"] += (
+                        len(page_prequalified_stubs) - len(fresh_stubs)
+                    )
 
-                if not enriched_people:
-                    return [], {
-                        "provider": "apollo",
-                        "method": "people_search_bulk_match",
-                        "page": actual_page,
-                        "total_entries": total_entries,
-                        "reason": "apollo_bulk_match_no_results",
-                    }
-
-                # ── Step 6: Parse + conditional org enrich ───────────────────
-                contacts: List[Dict[str, Any]] = []
-                for person in enriched_people:
-                    if not person.get("email"):
+                    # 3. If no fresh pre-qualified stubs on this page, advance page and replenish
+                    if not fresh_stubs:
+                        if total_entries and (current_page * per_page) >= total_entries:
+                            telemetry["exhaustion_reason"] = "apollo_exhausted"
+                            break
+                        if len(people) < per_page and not total_entries:
+                            telemetry["exhaustion_reason"] = "apollo_exhausted"
+                            break
+                        current_page += 1
                         continue
-                    contact = self._parse_apollo_contact(person)
 
-                    # Org enrich: fire only when key firmographic fields are blank
-                    if (
-                        not contact.get("funding_stage")
-                        and not contact.get("industry")
-                        and not contact.get("tech_stack")
-                        and contact.get("_org_id")
-                    ):
-                        org_data = await self._enrich_org(client, headers, contact["_org_id"])
-                        if org_data:
-                            contact["funding_stage"] = org_data.get("latest_funding_stage") or ""
-                            contact["industry"]      = org_data.get("industry") or ""
-                            contact["tech_stack"]    = org_data.get("technologies") or []
+                    # 4. Pre-score fresh stubs to rank strongest candidates first
+                    stub_scored: List[Tuple[float, Dict]] = []
+                    for p in fresh_stubs:
+                        stub = self._stub_dict(p)
+                        score, _ = self.scorer.score(stub)
+                        stub_scored.append((score, p))
 
-                    contacts.append(contact)
+                    stub_scored.sort(key=lambda x: x[0], reverse=True)
 
-                return contacts, {
-                    "provider": "apollo",
-                    "method": "people_search_bulk_match",
-                    "page": actual_page,
-                    "total_entries": total_entries,
-                    "pre_qualified_count": pre_qualified_count,
-                    "deduped_count": len(recently_enriched),
-                    "enriched_count": len(enriched_people),
-                    "reason": "apollo_contacts_found" if contacts else "apollo_bulk_match_no_emails",
-                }
+                    # Select candidates needed up to remaining_needed (or batch limit)
+                    remaining_needed = requested_count - len(final_qualified)
+                    batch_select_limit = min(len(stub_scored), max(remaining_needed, 10))
+                    selected_stubs = [p for _, p in stub_scored[:batch_select_limit]]
+                    telemetry["candidates_selected_for_enrichment"] += len(selected_stubs)
+
+                    for s in selected_stubs:
+                        if s.get("id"):
+                            enriched_apollo_ids.add(s["id"])
+
+                    # 5. Bulk Match in batches of 10
+                    enriched_people = await self._bulk_match(client, headers, selected_stubs)
+                    telemetry["enriched_count"] += len(enriched_people)
+                    telemetry["enrichment_batches"] += (len(selected_stubs) + 9) // 10
+
+                    # 6. Parse, conditionally org-enrich, and final score
+                    for person in enriched_people:
+                        if not person.get("email"):
+                            continue
+                        contact = self._parse_apollo_contact(person)
+
+                        # Conditional Org enrich when firmographics are missing
+                        if (
+                            not contact.get("funding_stage")
+                            and not contact.get("industry")
+                            and not contact.get("tech_stack")
+                            and contact.get("_org_id")
+                        ):
+                            org_data = await self._enrich_org(client, headers, contact["_org_id"])
+                            if org_data:
+                                contact["funding_stage"] = org_data.get("latest_funding_stage") or ""
+                                contact["industry"] = org_data.get("industry") or ""
+                                contact["tech_stack"] = org_data.get("technologies") or []
+
+                        score, breakdown = self.scorer.score(contact)
+                        contact["win_pattern_score"] = score
+                        contact["icp_score"] = score
+                        contact["icp_score_breakdown"] = breakdown
+
+                        if score >= norm_cfg.threshold:
+                            final_qualified.append(contact)
+                            telemetry["final_threshold_passed"] += 1
+
+                    telemetry["final_qualified_count"] = len(final_qualified)
+                    telemetry["remaining_needed"] = max(0, requested_count - len(final_qualified))
+
+                    # 7. Check if we reached the requested count
+                    if len(final_qualified) >= requested_count:
+                        break
+
+                    # 8. Check if pagination is exhausted
+                    if total_entries and (current_page * per_page) >= total_entries:
+                        telemetry["exhaustion_reason"] = "apollo_exhausted"
+                        break
+                    if len(people) < per_page and not total_entries:
+                        telemetry["exhaustion_reason"] = "apollo_exhausted"
+                        break
+
+                    current_page += 1
+
+                # If loop completed without hitting target or setting reason
+                if len(final_qualified) < requested_count and not telemetry.get("exhaustion_reason"):
+                    if current_page > max_pages:
+                        telemetry["exhaustion_reason"] = "max_pages_reached"
+                    else:
+                        telemetry["exhaustion_reason"] = (
+                            "apollo_exhausted"
+                            if telemetry["raw_candidates"] > 0
+                            else "apollo_people_search_empty"
+                        )
 
         except httpx.HTTPStatusError as exc:
-            logger.error("Apollo fetch failed", status_code=exc.response.status_code)
-            return [], {
-                "provider": "apollo",
-                "method": "people_search_bulk_match",
-                "page": None,
-                "reason": f"apollo_http_{exc.response.status_code}",
-            }
+            logger.error(
+                "Apollo HTTP error",
+                status_code=exc.response.status_code,
+                body=exc.response.text[:300],
+            )
+            telemetry["exhaustion_reason"] = f"apollo_http_{exc.response.status_code}"
         except Exception as exc:
             logger.exception("Apollo fetch failed", error=str(exc))
-            return [], {
-                "provider": "apollo",
-                "method": "people_search_bulk_match",
-                "page": None,
-                "reason": "apollo_request_failed",
-            }
+            telemetry["exhaustion_reason"] = "apollo_request_failed"
+
+        # Sort final qualified prospects descending by score and slice to requested_count
+        final_qualified.sort(key=lambda c: c.get("win_pattern_score", 0), reverse=True)
+        return final_qualified[:requested_count], telemetry
 
     # ------------------------------------------------------------------
-    # Apollo search body builder — correct param names
+    # Pre-Qualification Gate (Search-time stub integrity & ICP check)
     # ------------------------------------------------------------------
 
-    @staticmethod
-    def _build_search_body(
-        icp_config: Dict[str, Any],
-        page: int = 1,
-        per_page: int = 100,
-    ) -> Dict[str, Any]:
+    @classmethod
+    def _matches_target_industry(cls, person: Dict[str, Any], norm_cfg: NormalizedICPConfig) -> bool:
         """
-        Build the Apollo mixed_people/api_search request body.
-
-        Param mapping (confirmed correct Apollo field names):
-          person_titles                    ← icp_config["titles"]
-          organization_locations           ← icp_config["organization_locations"]  (org HQ, not person location)
-          organization_num_employees_ranges← icp_config["employee_ranges"]
-          person_seniorities               ← icp_config["seniorities"]  (optional plumbing)
-          organization_industry_tag_ids    ← icp_config["industry_tag_ids"]  (static map IDs)
-          q_organization_keyword_tags      ← icp_config["org_keyword_tags"]  (array — keywords + unmatched industry terms)
-
-        Intentionally absent:
-          q_organization_name  ← REMOVED (was the bug: restricted results to vendor's own company)
-          q_keywords           ← REPLACED by q_organization_keyword_tags (more targeted)
+        Deterministic industry qualification check using organization-level data.
+        Returns True if candidate satisfies the target industry requirement, False otherwise.
         """
-        body: Dict[str, Any] = {"page": page, "per_page": per_page}
+        # If no target industries or tags are requested, industry check passes
+        if not norm_cfg.industry_terms and not norm_cfg.industry_tag_ids:
+            return True
 
-        if icp_config.get("titles"):
-            body["person_titles"] = icp_config["titles"]
+        org = person.get("organization") or {}
+        stub_industry = (org.get("industry") or "").strip().lower()
 
-        if icp_config.get("organization_locations"):
-            # organization_locations = where the company is headquartered
-            body["organization_locations"] = icp_config["organization_locations"]
+        # Build list of target industry terms
+        target_terms = [t.strip().lower() for t in norm_cfg.industry_terms if t.strip()]
 
-        if icp_config.get("employee_ranges"):
-            body["organization_num_employees_ranges"] = icp_config["employee_ranges"]
+        if stub_industry:
+            # 1. Exact or word-boundary match against target terms
+            for t_term in target_terms:
+                if t_term == stub_industry:
+                    return True
+                if re.search(rf"\b{re.escape(t_term)}\b", stub_industry) or re.search(rf"\b{re.escape(stub_industry)}\b", t_term):
+                    return True
 
-        if icp_config.get("seniorities"):
-            # Plumbing exists for future use; intake form doesn't populate this yet
-            body["person_seniorities"] = icp_config["seniorities"]
+            # 2. Tag ID match
+            if norm_cfg.industry_tag_ids:
+                stub_tag_id = INDUSTRY_TAG_MAP.get(stub_industry)
+                if stub_tag_id and stub_tag_id in norm_cfg.industry_tag_ids:
+                    return True
 
-        if icp_config.get("industry_tag_ids"):
-            # Resolved static tag IDs from industry_tag_map.py
-            body["organization_industry_tag_ids"] = icp_config["industry_tag_ids"]
+            # 3. Synonym matching for target industry terms using regex word-boundaries
+            for t_term in target_terms:
+                synonyms = get_industry_synonyms(t_term)
+                for syn in synonyms:
+                    if len(syn) <= 2:
+                        # Short abbreviations (e.g. 'ai', 'it') must match whole words only
+                        if re.search(rf"\b{re.escape(syn)}\b", stub_industry):
+                            return True
+                    else:
+                        if syn in stub_industry or re.search(rf"\b{re.escape(syn)}\b", stub_industry):
+                            return True
 
-        if icp_config.get("org_keyword_tags"):
-            # Array of keyword terms — covers user keywords + unmatched industry fallback
-            body["q_organization_keyword_tags"] = icp_config["org_keyword_tags"]
+            # If industry was explicitly provided in stub and matched none of the above -> HARD REJECTION
+            return False
 
-        return body
+        # If Apollo provides NO industry, check alternative organization-level evidence
+        org_name = (org.get("name") or "").lower()
+        org_keywords = org.get("keywords") or []
+        if isinstance(org_keywords, list):
+            org_kw_str = " ".join(str(k) for k in org_keywords).lower()
+        else:
+            org_kw_str = str(org_keywords).lower()
+        org_desc = (org.get("short_description") or org.get("description") or org.get("headline") or "").lower()
+        org_domain = (org.get("primary_domain") or org.get("website_url") or "").lower()
+
+        combined_org_text = f"{org_name} {org_kw_str} {org_desc} {org_domain}"
+
+        for t_term in target_terms:
+            if re.search(rf"\b{re.escape(t_term)}\b", combined_org_text):
+                return True
+            synonyms = get_industry_synonyms(t_term)
+            for syn in synonyms:
+                if len(syn) >= 3 and re.search(rf"\b{re.escape(syn)}\b", combined_org_text):
+                    return True
+
+        # No industry provided and no supporting org evidence -> REJECT (insufficient evidence)
+        return False
+
+
+    @classmethod
+    def _matches_target_technology(cls, person: Dict[str, Any], norm_cfg: NormalizedICPConfig) -> bool:
+        """
+        Deterministic technology / category qualification check using organization-level data.
+        Never uses person job title as company-level evidence.
+        """
+        if not norm_cfg.technology_keywords:
+            return True
+
+        org = person.get("organization") or {}
+        org_name = (org.get("name") or "").lower()
+        org_keywords = org.get("keywords") or []
+        if isinstance(org_keywords, list):
+            org_kw_str = " ".join(str(k) for k in org_keywords).lower()
+        else:
+            org_kw_str = str(org_keywords).lower()
+        org_tech = " ".join(str(t) for t in org.get("technologies") or []).lower()
+        org_desc = (org.get("short_description") or org.get("description") or org.get("headline") or "").lower()
+        org_domain = (org.get("primary_domain") or org.get("website_url") or "").lower()
+        org_industry = (org.get("industry") or "").lower()
+
+        combined_org_evidence = f"{org_name} {org_kw_str} {org_tech} {org_desc} {org_domain} {org_industry}"
+
+        matched = False
+        for tk in norm_cfg.technology_keywords:
+            clean_tk = tk.strip().lower()
+            if not clean_tk:
+                continue
+            if clean_tk in combined_org_evidence:
+                matched = True
+                break
+            tk_words = [w for w in re.findall(r"\b\w+\b", clean_tk) if len(w) > 2]
+            if tk_words and all(w in combined_org_evidence for w in tk_words):
+                matched = True
+                break
+
+        if norm_cfg.technology_keywords_required:
+            return matched
+
+        return True
+
+    @classmethod
+    def _check_prequalification(
+        cls, person: Dict[str, Any], norm_cfg: NormalizedICPConfig
+    ) -> Tuple[bool, Optional[str]]:
+        """
+        Lightweight check using ONLY information available in the search response stub.
+        Returns (is_qualified, rejection_reason).
+        """
+        title = (person.get("title") or "").strip()
+        first_name = (person.get("first_name") or "").strip()
+        last_name = (person.get("last_name") or "").strip()
+        org = person.get("organization") or {}
+        org_name = (org.get("name") or "").strip()
+        org_domain = (org.get("primary_domain") or "").strip()
+
+        # Hard Rule 1: Must have a title or name
+        if not title and not (first_name or last_name):
+            return False, "title_rejected"
+
+        # Hard Rule 2: Must have an organization
+        if not org_name and not org_domain:
+            return False, "company_size_rejected"
+
+        title_lower = title.lower()
+
+        # Hard Rule 3: Reject explicit negative / non-decision-maker roles if targeting leadership
+        negative_keywords = ["intern", "student", "assistant to", "retired", "apprentice", "volunteer"]
+        for neg in negative_keywords:
+            if neg in title_lower and not any(neg in t.lower() for t in norm_cfg.titles):
+                return False, "title_rejected"
+
+        # Rule 4: Title & Seniority compatibility
+        if norm_cfg.titles or norm_cfg.seniorities:
+            title_matched = False
+            if norm_cfg.titles:
+                for target_t in norm_cfg.titles:
+                    target_lower = target_t.lower()
+                    if target_lower in title_lower or title_lower in target_lower:
+                        title_matched = True
+                        break
+                    # Token overlap (e.g. "vp", "sales")
+                    target_tokens = set(re.findall(r"\b\w+\b", target_lower))
+                    title_tokens = set(re.findall(r"\b\w+\b", title_lower))
+                    if target_tokens and target_tokens.issubset(title_tokens):
+                        title_matched = True
+                        break
+
+            seniority_matched = False
+            if norm_cfg.seniorities:
+                inferred_sens = _infer_seniorities_from_title(title)
+                stub_sen = (person.get("seniority") or "").strip().lower()
+                if any(s in norm_cfg.seniorities for s in inferred_sens) or (
+                    stub_sen in norm_cfg.seniorities
+                ):
+                    seniority_matched = True
+
+            # Must pass at least title or seniority match
+            if not title_matched and not seniority_matched:
+                return False, "title_rejected"
+
+        # Rule 5: Organization location compatibility (only if known in stub)
+        if norm_cfg.organization_locations:
+            stub_locs = [
+                org.get("country"),
+                org.get("state"),
+                org.get("city"),
+                org.get("raw_address"),
+                person.get("country"),
+                person.get("state"),
+                person.get("city"),
+            ]
+            loc_strings = [str(l).strip().lower() for l in stub_locs if l and str(l).strip()]
+            if loc_strings:
+                matched_loc = False
+                for target_loc in norm_cfg.organization_locations:
+                    t_loc = target_loc.lower()
+                    for l_str in loc_strings:
+                        if t_loc in l_str or l_str in t_loc:
+                            matched_loc = True
+                            break
+                        if t_loc in ["united states", "usa", "us"] and l_str in [
+                            "united states",
+                            "usa",
+                            "us",
+                            "u.s.",
+                            "u.s.a.",
+                        ]:
+                            matched_loc = True
+                            break
+                    if matched_loc:
+                        break
+                if not matched_loc:
+                    return False, "location_rejected"
+
+        # Rule 6: Employee count / company size compatibility (only if known in stub)
+        if norm_cfg.employee_ranges:
+            emp_count = org.get("estimated_num_employees")
+            if emp_count is not None and isinstance(emp_count, (int, float)) and emp_count > 0:
+                bounds: List[Tuple[int, int]] = []
+                for label, lo, hi in APOLLO_EMPLOYEE_BUCKETS:
+                    if label in norm_cfg.employee_ranges:
+                        bounds.append((lo, hi))
+                if bounds:
+                    min_emp = min(b[0] for b in bounds)
+                    max_emp = max(b[1] for b in bounds)
+                    if emp_count < min_emp * 0.7 or emp_count > max_emp * 1.4:
+                        return False, "company_size_rejected"
+
+        # Rule 7: Hard Industry qualification check
+        if not cls._matches_target_industry(person, norm_cfg):
+            return False, "industry_rejected"
+
+        # Rule 8: Technology / Category keywords check
+        if not cls._matches_target_technology(person, norm_cfg):
+            return False, "technology_rejected"
+
+        return True, None
+
+    @classmethod
+    def _is_prequalified(cls, person: Dict[str, Any], norm_cfg: NormalizedICPConfig) -> bool:
+        """
+        Lightweight check using ONLY information available in the search response stub.
+        Never calls external APIs. Does not over-reject missing optional fields.
+        """
+        is_prequal, _ = cls._check_prequalification(person, norm_cfg)
+        return is_prequal
+
 
     # ------------------------------------------------------------------
-    # Pre-score stubs (before enrichment)
+    # Pre-score stub dictionary
     # ------------------------------------------------------------------
 
     @staticmethod
     def _stub_dict(person: Dict[str, Any]) -> Dict[str, Any]:
         """
         Build a scorable dict from an Apollo search stub.
-        Org data (industry, employee count, technologies) is available in stubs
-        without paying for bulk_match enrichment.
         """
         org = person.get("organization") or {}
         return {
-            "title":          person.get("title") or "",
-            "company_size":   str(org.get("estimated_num_employees") or ""),
+            "title": person.get("title") or "",
+            "company_size": str(org.get("estimated_num_employees") or ""),
             "employee_count": org.get("estimated_num_employees"),
-            "industry":       org.get("industry") or "",
-            "tech_stack":     org.get("technologies") or [],
-            "funding_stage":  org.get("latest_funding_stage") or "",
-            "apollo_id":      person.get("id") or "",
+            "industry": org.get("industry") or "",
+            "tech_stack": org.get("technologies") or [],
+            "funding_stage": org.get("latest_funding_stage") or "",
+            "apollo_id": person.get("id") or "",
         }
 
     # ------------------------------------------------------------------
-    # Bulk match helper
+    # Bulk match helper (Batches of 10)
     # ------------------------------------------------------------------
 
     async def _bulk_match(
@@ -369,10 +645,11 @@ class ProspectAgent:
         headers: Dict[str, Any],
         people: List[Dict[str, Any]],
     ) -> List[Dict[str, Any]]:
-        """Call Apollo bulk_match in batches of 10 and return all enriched results."""
+        """Call Apollo bulk_match in batches of 10 and return all enriched matches."""
         enriched: List[Dict[str, Any]] = []
         for i in range(0, len(people), 10):
-            details = [{"id": p["id"]} for p in people[i : i + 10] if p.get("id")]
+            batch = people[i : i + 10]
+            details = [{"id": p["id"]} for p in batch if p.get("id")]
             if not details:
                 continue
             try:
@@ -398,7 +675,7 @@ class ProspectAgent:
         return enriched
 
     # ------------------------------------------------------------------
-    # Conditional org enrichment — fix blank firmographic scoring bug
+    # Conditional org enrichment
     # ------------------------------------------------------------------
 
     async def _enrich_org(
@@ -409,8 +686,7 @@ class ProspectAgent:
     ) -> Dict[str, Any]:
         """
         Call organizations/enrich to fill missing firmographic fields.
-        Fired ONLY when funding_stage + industry + tech_stack are all blank,
-        so we don't spend a credit on every contact.
+        Fired only when funding_stage + industry + tech_stack are blank.
         """
         try:
             resp = await client.post(
@@ -425,12 +701,12 @@ class ProspectAgent:
         return {}
 
     # ------------------------------------------------------------------
-    # Dedupe — skip recently enriched contacts
+    # Dedupe against recently enriched contacts in DB
     # ------------------------------------------------------------------
 
     async def _get_recently_enriched_apollo_ids(
         self, apollo_ids: List[str]
-    ) -> set:
+    ) -> Set[str]:
         """Return apollo_ids of contacts enriched within the last 7 days."""
         if not apollo_ids:
             return set()
@@ -440,10 +716,10 @@ class ProspectAgent:
             .where(Contact.apollo_id.in_(apollo_ids))
             .where(Contact.enriched_at >= cutoff)
         )
-        return {row[0] for row in result.all()}
+        return {row[0] for row in result.all() if row[0]}
 
     # ------------------------------------------------------------------
-    # Parse Apollo response into contact dict
+    # Parse Apollo response into Contact dictionary
     # ------------------------------------------------------------------
 
     @staticmethod
@@ -456,7 +732,7 @@ class ProspectAgent:
         )
         domain = domain.replace("https://", "").replace("http://", "").strip("/")
 
-        # Parse technologies from Apollo's "current_technologies" array of dicts
+        # Parse technologies from current_technologies
         techs = organization.get("current_technologies") or []
         tech_list = []
         if isinstance(techs, list):
@@ -465,64 +741,55 @@ class ProspectAgent:
                     tech_list.append(t["name"])
                 elif isinstance(t, str):
                     tech_list.append(t)
-        
-        # Fallback to "technology_names" string array
+
         if not tech_list and organization.get("technology_names"):
             tech_list = organization.get("technology_names") or []
-        
-        # Fallback to "technologies" string array
+
         if not tech_list and organization.get("technologies"):
             tech_list = organization.get("technologies") or []
 
+        email_status = (person.get("email_status") or "").lower()
+        is_valid_email = email_status in ("verified", "valid", "guessed", "extrapolated") or bool(
+            person.get("email")
+        )
+
         return {
-            "email":          (person.get("email") or "").strip().lower(),
-            "first_name":     person.get("first_name") or "",
-            "last_name":      person.get("last_name") or "",
-            "title":          person.get("title") or "",
-            "company":        organization.get("name") or "",
+            "email": (person.get("email") or "").strip().lower(),
+            "first_name": person.get("first_name") or "",
+            "last_name": person.get("last_name") or "",
+            "title": person.get("title") or "",
+            "company": organization.get("name") or "",
             "company_domain": domain,
-            "linkedin_url":   person.get("linkedin_url") or "",
-            "company_size":   str(organization.get("estimated_num_employees") or ""),
+            "linkedin_url": person.get("linkedin_url") or "",
+            "company_size": str(organization.get("estimated_num_employees") or ""),
             "employee_count": organization.get("estimated_num_employees"),
-            "industry":       organization.get("industry") or "",
-            "geography":      person.get("city") or person.get("country") or "",
-            "tech_stack":     tech_list,
-            "funding_stage":  organization.get("latest_funding_stage") or organization.get("funding_stage") or "",
-            "apollo_id":      person.get("id") or "",
-            "_org_id":        organization.get("id") or "",   # used for conditional org enrich
-            "source":         "apollo",
-            "email_valid":    True,
-            "email_verified": True,
+            "industry": organization.get("industry") or "",
+            "geography": person.get("city") or person.get("country") or organization.get("country") or "",
+            "tech_stack": tech_list,
+            "funding_stage": organization.get("latest_funding_stage")
+            or organization.get("funding_stage")
+            or "",
+            "apollo_id": person.get("id") or "",
+            "_org_id": organization.get("id") or "",
+            "source": "apollo",
+            "email_valid": is_valid_email,
+            "email_verified": email_status in ("verified", "valid"),
         }
 
     # ------------------------------------------------------------------
-    # Score contacts
-    # ------------------------------------------------------------------
-
-    async def _score_contacts(
-        self, contacts: List[Dict[str, Any]]
-    ) -> List[Dict[str, Any]]:
-        scored: List[Dict[str, Any]] = []
-        for contact in contacts:
-            if not contact.get("email"):
-                continue
-            score, breakdown = self.scorer.score(contact)
-            contact["win_pattern_score"] = score
-            contact["icp_score_breakdown"] = breakdown
-            scored.append(contact)
-        return scored
-
-    # ------------------------------------------------------------------
-    # Save contacts
+    # Save contacts with multi-user isolation
     # ------------------------------------------------------------------
 
     async def _save_contacts(
         self,
         contacts: List[Dict[str, Any]],
         user_input_id: Optional[int] = None,
+        user_id: Optional[str] = None,
     ) -> Dict[str, Any]:
         inserted_ids: List[str] = []
         updated_ids: List[str] = []
+
+        now = datetime.utcnow()
 
         for data in contacts:
             email = (data.get("email") or "").strip().lower()
@@ -535,26 +802,29 @@ class ProspectAgent:
             contact = result.scalar_one_or_none()
 
             if contact:
-                contact.icp_score             = data.get("win_pattern_score")
-                contact.win_pattern_score      = data.get("win_pattern_score")
-                contact.icp_score_breakdown    = data.get("icp_score_breakdown")
-                contact.title                  = data.get("title") or contact.title
-                contact.company                = data.get("company") or contact.company
-                contact.company_domain         = data.get("company_domain") or contact.company_domain
-                contact.industry               = data.get("industry") or contact.industry
-                contact.company_size           = data.get("company_size") or contact.company_size
-                contact.employee_count         = data.get("employee_count") or contact.employee_count
-                contact.tech_stack             = data.get("tech_stack") or contact.tech_stack
-                contact.funding_stage          = data.get("funding_stage") or contact.funding_stage
-                contact.geography              = data.get("geography") or contact.geography
-                contact.apollo_id              = data.get("apollo_id") or contact.apollo_id
-                contact.email_valid            = data.get("email_valid")
-                contact.email_verified         = bool(data.get("email_verified"))
-                contact.verified_at            = datetime.utcnow()
-                contact.enriched_at            = datetime.utcnow()
-                contact.source                 = "apollo"
+                contact.icp_score = data.get("win_pattern_score")
+                contact.win_pattern_score = data.get("win_pattern_score")
+                contact.icp_score_breakdown = data.get("icp_score_breakdown")
+                contact.title = data.get("title") or contact.title
+                contact.company = data.get("company") or contact.company
+                contact.company_domain = data.get("company_domain") or contact.company_domain
+                contact.industry = data.get("industry") or contact.industry
+                contact.company_size = data.get("company_size") or contact.company_size
+                contact.employee_count = data.get("employee_count") or contact.employee_count
+                contact.tech_stack = data.get("tech_stack") or contact.tech_stack
+                contact.funding_stage = data.get("funding_stage") or contact.funding_stage
+                contact.geography = data.get("geography") or contact.geography
+                contact.apollo_id = data.get("apollo_id") or contact.apollo_id
+                contact.email_valid = data.get("email_valid")
+                contact.email_verified = bool(data.get("email_verified"))
+                contact.verified_at = now
+                contact.enriched_at = now
+                contact.source = "apollo"
                 if user_input_id is not None:
                     contact.user_input_id = user_input_id
+                # Preserve existing user_id if already owned; assign if unowned
+                if user_id is not None and not contact.user_id:
+                    contact.user_id = user_id
                 updated_ids.append(str(contact.id))
             else:
                 contact = Contact(
@@ -576,11 +846,12 @@ class ProspectAgent:
                     icp_score_breakdown=data.get("icp_score_breakdown"),
                     email_valid=data.get("email_valid"),
                     email_verified=bool(data.get("email_verified")),
-                    verified_at=datetime.utcnow(),
-                    enriched_at=datetime.utcnow(),
+                    verified_at=now,
+                    enriched_at=now,
                     source="apollo",
                     apollo_id=data.get("apollo_id"),
                     user_input_id=user_input_id,
+                    user_id=user_id,
                 )
                 self.db.add(contact)
                 await self.db.flush()
@@ -600,18 +871,16 @@ class ProspectAgent:
 
     @staticmethod
     def _reason(
-        raw_contacts: List[Dict[str, Any]],
-        scored: List[Dict[str, Any]],
-        qualified: List[Dict[str, Any]],
+        final_prospects: List[Dict[str, Any]],
         save_result: Dict[str, Any],
-        provider_meta: Dict[str, Any],
+        telemetry: Dict[str, Any],
     ) -> str:
-        if not raw_contacts:
-            return provider_meta.get("reason") or "apollo_returned_no_contacts"
-        if not scored:
-            return "apollo_contacts_missing_email"
-        if not qualified:
-            return "apollo_contacts_below_icp_threshold"
+        if not final_prospects:
+            return (
+                telemetry.get("exhaustion_reason")
+                or telemetry.get("reason")
+                or "no_qualified_prospects_found"
+            )
         if not save_result.get("saved_count") and not save_result.get("updated_count"):
             return "qualified_contacts_found_but_not_persisted"
         return "apollo_contacts_persisted"

@@ -201,9 +201,7 @@ class OutreachLog(Base):
     linkedin_note: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
     # Opaque message/lead id returned by the email provider (Resend message id)
     outreach_provider_message_id: Mapped[Optional[str]] = mapped_column(String(100))
-    sequence_step: Mapped[int] = mapped_column(Integer, default=0)
-    call_script: Mapped[Optional[str]] = mapped_column(Text)
-    linkedin_note: Mapped[Optional[str]] = mapped_column(Text)
+
 
     # Engagement tracking
     opened: Mapped[bool] = mapped_column(Boolean, default=False)

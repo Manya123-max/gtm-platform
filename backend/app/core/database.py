@@ -76,9 +76,19 @@ async def _bootstrap_multi_user_schema(conn) -> None:
         "CREATE INDEX IF NOT EXISTS ix_contacts_user_id ON contacts (user_id)",
         "CREATE INDEX IF NOT EXISTS ix_workflow_runs_user_id ON workflow_runs (user_id)",
         "CREATE INDEX IF NOT EXISTS ix_revenue_forecasts_user_id ON revenue_forecasts (user_id)",
+        # outreach_log columns
+        "ALTER TABLE outreach_log ADD COLUMN IF NOT EXISTS sequence_step INTEGER NOT NULL DEFAULT 0",
+        "ALTER TABLE outreach_log ADD COLUMN IF NOT EXISTS call_script TEXT",
+        "ALTER TABLE outreach_log ADD COLUMN IF NOT EXISTS linkedin_note TEXT",
+        "ALTER TABLE outreach_log ADD COLUMN IF NOT EXISTS outreach_provider_message_id VARCHAR(100)",
+        "ALTER TABLE outreach_log ADD COLUMN IF NOT EXISTS prompt_variant_id VARCHAR(50)",
+        # signal_events columns
+        "ALTER TABLE signal_events ADD COLUMN IF NOT EXISTS sequence_step INTEGER NOT NULL DEFAULT 0",
+        "ALTER TABLE signal_events ADD COLUMN IF NOT EXISTS next_step_due_at TIMESTAMP WITHOUT TIME ZONE",
     ]
     for stmt in statements:
         await conn.execute(text(stmt))
+
 
     owner_email = (settings.GTM_MIGRATION_OWNER_EMAIL or "").strip().lower()
     if not owner_email:

@@ -1132,8 +1132,7 @@ async def submit_input(data: InputData, current_user=Depends(get_current_user), 
     from app.orchestrator.agent_graph import get_enabled_pipeline
     from app.orchestrator.orchestrator_service import OrchestratorService
     from app.workers.orchestrator_tasks import build_pipeline_chain
-
-    from app.agents.industry_tag_map import resolve_industries
+    from app.services.icp_normalizer import normalize_icp_input
 
     record = UserInput(
         our_company_name=    data.our_company_name,
@@ -1154,47 +1153,23 @@ async def submit_input(data: InputData, current_user=Depends(get_current_user), 
         agent_ids.remove("A4")
 
     if agent_ids:
-        titles = [t.strip() for t in getattr(data, "target_job_titles", getattr(data, "job_title", "")).split(",") if t.strip()]
-        geographies = [g.strip() for g in getattr(data, "target_location", getattr(data, "location", "")).split(",") if g.strip()]
-
-        # Map raw input to Apollo's valid employee range format
-        def to_apollo_ranges(size_str: str) -> list:
-            try:
-                parts = size_str.replace("-", ",").split(",")
-                low = int(parts[0].strip())
-                high = int(parts[-1].strip()) if len(parts) > 1 else low
-                apollo_ranges = [
-                    ("1,10", 1, 10), ("11,50", 11, 50), ("51,200", 51, 200),
-                    ("201,500", 201, 500), ("501,1000", 501, 1000),
-                    ("1001,5000", 1001, 5000), ("5001,10000", 5001, 10000),
-                 ]
-                return [label for label, lo, hi in apollo_ranges if lo <= high and hi >= low]
-            except Exception:
-                return ["51,200"]
-
-        employee_ranges = to_apollo_ranges(getattr(data, "target_company_size", getattr(data, "company_size", "51-200"))) or ["51,200"]
-
-        keyword_list = []
-        target_kw = getattr(data, "target_keywords", getattr(data, "keywords", None))
-        our_serv = getattr(data, "our_services", getattr(data, "services", None))
-        if target_kw:
-           keyword_list.extend([k.strip() for k in target_kw.split(",") if k.strip()])
-        if our_serv:
-           keyword_list.extend([s.strip() for s in our_serv.split(",") if s.strip()])
-
-        payload = {
-            "icp_config": {
-                "titles": titles,
-                "geographies": geographies,
-                "employee_ranges": employee_ranges,
-                "keywords": " ".join(keyword_list) if keyword_list else None,
-                # company_name intentionally omitted — that's YOUR company, not the target
-                "threshold": settings.ICP_SCORE_THRESHOLD,
-                "limit": 25,
-                "user_input_id": record.id,  # stamp session on all contacts
-            }
+        raw_icp_dict = {
+            "our_company_name":    data.our_company_name,
+            "our_services":        data.our_services,
+            "target_location":     data.target_location,
+            "target_industries":   data.target_industries,
+            "target_company_size": data.target_company_size,
+            "target_keywords":     data.target_keywords,
+            "target_job_titles":   data.target_job_titles,
+            "user_id":             current_user.id if current_user is not None else None,
+            "user_input_id":       record.id,
+            "threshold":           settings.ICP_SCORE_THRESHOLD,
+            "enrich_limit":        getattr(settings, "APOLLO_ENRICH_LIMIT", 10),
+            "candidate_pool_size": getattr(settings, "APOLLO_CANDIDATE_POOL_SIZE", 150),
+            "include_similar_titles": getattr(settings, "APOLLO_INCLUDE_SIMILAR_TITLES", False),
         }
-        # NOTE: company_name is intentionally absent from icp_config
+        normalized = normalize_icp_input(raw_icp_dict)
+        payload = {"icp_config": normalized.to_dict()}
 
         orchestrator = OrchestratorService(db)
         workflow = await orchestrator.create_workflow_run(

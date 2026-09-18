@@ -21,12 +21,19 @@ from app.main import app
 @pytest_asyncio.fixture
 async def client():
     from app.core.database import init_db, close_db
+    from app.core.config import get_settings
+    settings = get_settings()
+    orig_auth = settings.AUTH_ENABLED
+    settings.AUTH_ENABLED = True
     await init_db()
-    async with httpx.AsyncClient(
-        transport=httpx.ASGITransport(app=app), base_url="http://test"
-    ) as c:
-        yield c
-    await close_db()
+    try:
+        async with httpx.AsyncClient(
+            transport=httpx.ASGITransport(app=app), base_url="http://test"
+        ) as c:
+            yield c
+    finally:
+        settings.AUTH_ENABLED = orig_auth
+        await close_db()
 
 
 def _email() -> str:

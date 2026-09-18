@@ -36,6 +36,7 @@ export const fetchContacts = (params = {}) => unwrap(api.get('/contacts', { para
 export const fetchContact = id => unwrap(api.get(`/contacts/${id}`))
 export const fetchThread = id => unwrap(api.get(`/contacts/${id}/thread`))
 export const fetchSignals = id => unwrap(api.get(`/contacts/${id}/signals`))
+export const summarizeSignals = id => unwrap(api.post(`/contacts/${id}/summarize-signals`))
 export const fetchDeals = (params = {}) => unwrap(api.get('/deals', { params }))
 export const fetchDeal = id => unwrap(api.get(`/deals/${id}`))
 export const fetchPipelineSummary = (user_input_id) => unwrap(api.get('/deals/pipeline-summary', { params: user_input_id ? { user_input_id } : {} }))

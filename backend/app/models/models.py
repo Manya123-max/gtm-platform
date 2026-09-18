@@ -100,6 +100,7 @@ class Contact(Base):
     signal_type: Mapped[Optional[str]] = mapped_column(String(255))
     signal_score: Mapped[Optional[float]] = mapped_column(Float)
     latest_signal_at: Mapped[Optional[datetime]] = mapped_column(DateTime)
+    signal_summary: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
 
     # Readiness  A4
     readiness_score: Mapped[float] = mapped_column(Float, default=0.0)
@@ -148,6 +149,7 @@ class SignalEvent(Base):
     confidence: Mapped[float] = mapped_column(Float, default=0.5)
     conversion_weight: Mapped[Optional[float]] = mapped_column(Float)
     raw_data: Mapped[Optional[dict]] = mapped_column(JSONB)
+    summary: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
     processed: Mapped[bool] = mapped_column(Boolean, default=False)
     triggered_outreach: Mapped[bool] = mapped_column(Boolean, default=False)
     sequence_step: Mapped[int] = mapped_column(Integer, default=0)

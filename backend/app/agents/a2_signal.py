@@ -59,11 +59,11 @@ class SignalAgent:
         self._currents_disabled = False
         self._newsapi_disabled = False
 
-    async def run(self, contact_ids: Optional[List[str]] = None) -> Dict[str, Any]:
-        logger.info("A2 starting")
+    async def run(self, contact_ids: Optional[List[str]] = None, user_input_id: Optional[int] = None) -> Dict[str, Any]:
+        logger.info("A2 starting", user_input_id=user_input_id)
 
         weights = await self._load_registry()
-        contacts = await self._get_contacts(contact_ids)
+        contacts = await self._get_contacts(contact_ids, user_input_id=user_input_id)
         logger.info("Scanning contacts", count=len(contacts))
 
         all_signals: List[Dict[str, Any]] = []
@@ -127,19 +127,30 @@ class SignalAgent:
         self._registry_cache = weights
         return weights
 
-    async def _get_contacts(self, contact_ids: Optional[List[str]]) -> List[Contact]:
+    async def _get_contacts(self, contact_ids: Optional[List[str]], user_input_id: Optional[int] = None) -> List[Contact]:
         if contact_ids:
             result = await self.db.execute(
                 select(Contact).where(
                     and_(Contact.id.in_(contact_ids), Contact.do_not_contact.is_(False))
                 )
             )
+        elif user_input_id is not None:
+            result = await self.db.execute(
+                select(Contact).where(
+                    and_(
+                        Contact.user_input_id == user_input_id,
+                        Contact.do_not_contact.is_(False),
+                        or_(Contact.icp_score.is_(None), Contact.icp_score >= 40),
+                        Contact.email_valid.is_not(False),
+                    )
+                ).limit(500)
+            )
         else:
             result = await self.db.execute(
                 select(Contact).where(
                     and_(
                         Contact.do_not_contact.is_(False),
-                        Contact.icp_score >= settings.ICP_SCORE_THRESHOLD,
+                        or_(Contact.icp_score.is_(None), Contact.icp_score >= 40),
                         Contact.email_valid.is_not(False),
                     )
                 ).limit(500)
@@ -162,6 +173,7 @@ class SignalAgent:
                 signals.extend(result)
             elif isinstance(result, Exception):
                 logger.warning("Signal detector error", error=str(result))
+
         return signals
 
     def _get_company_domain(self, contact: Contact) -> str:
@@ -825,6 +837,47 @@ class SignalAgent:
             logger.warning("Apify check failed", company=company, error=str(exc))
             return []
 
+    async def _generate_2_line_signal_summary(self, company_name: str, signals: List[Dict[str, Any]]) -> str:
+        """Use LLM to generate a concise 2-sentence summary of detected buying signals."""
+        if not signals:
+            return ""
+
+        signal_descriptions = []
+        for sig in signals:
+            sig_type = sig.get("signal_type")
+            type_str = sig_type.value if hasattr(sig_type, "value") else str(sig_type)
+            raw = sig.get("raw_data") or {}
+            headline = raw.get("headline") or raw.get("title") or raw.get("job_title") or raw.get("name") or type_str
+            signal_descriptions.append(f"- {type_str}: {headline}")
+
+        signals_text = "\n".join(signal_descriptions[:5])
+
+        system_prompt = (
+            "You are an expert B2B Signal Intelligence Analyst. Your job is to synthesize raw company buying signals "
+            "into a concise 2-sentence summary (under 40 words total).\n"
+            "Rules:\n"
+            "1. Write EXACTLY TWO sentences.\n"
+            "2. Sentence 1: Highlight key buying triggers (e.g. leadership hires, job openings, tech expansion).\n"
+            "3. Sentence 2: Explain what this indicates about their current business priorities or GTM readiness.\n"
+            "4. Do NOT include markdown code blocks, prefixes, or bullet points."
+        )
+
+        user_prompt = f"Company: {company_name or 'Target Account'}\nSignals Detected:\n{signals_text}"
+
+        try:
+            from app.services.llm_service import LLMService
+            llm = LLMService()
+            res = await llm.complete(system=system_prompt, user=user_prompt, max_tokens=150)
+            if isinstance(res, dict):
+                summary_text = res.get("summary") or res.get("content") or res.get("text") or str(res)
+            else:
+                summary_text = str(res)
+            return summary_text.strip()
+        except Exception as exc:
+            logger.warning("Failed to generate 2-line LLM signal summary", company=company_name, error=str(exc))
+            types = list(set(s.get("signal_type").value if hasattr(s.get("signal_type"), "value") else str(s.get("signal_type")) for s in signals))
+            return f"Detected {len(signals)} buying signal(s) for {company_name} including {', '.join(types[:3])}. Indicates active growth and expansion initiative."
+
     async def _save_signals(self, signals: List[Dict[str, Any]]) -> int:
         saved = 0
         for signal in signals:
@@ -864,13 +917,17 @@ class SignalAgent:
                 if existing_article.scalar_one_or_none():
                     continue
 
+            sig_type_val = signal["signal_type"].value if hasattr(signal["signal_type"], "value") else str(signal["signal_type"])
+            summary_desc = headline or f"Detected {sig_type_val} signal via {signal['signal_source']}."
+
             self.db.add(SignalEvent(
                 contact_id=signal["contact_id"],
-                signal_type=signal["signal_type"].value,
+                signal_type=sig_type_val,
                 signal_source=signal["signal_source"],
                 confidence=signal["confidence"],
                 conversion_weight=signal["confidence"],
                 raw_data=signal.get("raw_data"),
+                summary=summary_desc,
             ))
             saved += 1
 
@@ -894,10 +951,16 @@ class SignalAgent:
                 contact.signal_score = best_sig["confidence"] * 100
                 
                 # Combine unique signal types as comma-separated
-                sig_types = sorted(list(set(s["signal_type"].value for s in sigs)))
+                sig_types = sorted(list(set(s["signal_type"].value if hasattr(s["signal_type"], "value") else str(s["signal_type"]) for s in sigs)))
                 contact.signal_type = ",".join(sig_types)
                 
                 contact.latest_signal_at = datetime.utcnow()
+                
+                # Generate 2-line LLM signal summary for the contact
+                summary = await self._generate_2_line_signal_summary(contact.company or contact.first_name or "Prospect", sigs)
+                if summary:
+                    contact.signal_summary = summary
+
                 updated += 1
 
         await self.db.commit()

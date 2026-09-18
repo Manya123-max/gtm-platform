@@ -157,9 +157,11 @@ def run_agent_node(
                         or previous.get("inserted_contact_ids")
                         or []
                     )
+                    user_input_id = payload_data.get("user_input_id") or previous.get("user_input_id")
 
                     raw_result = await SignalAgent(db).run(
-                        contact_ids
+                        contact_ids,
+                        user_input_id=user_input_id
                     )
 
                 elif current_agent_id == "A3":

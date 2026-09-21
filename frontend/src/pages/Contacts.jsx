@@ -11,6 +11,33 @@ function ScorePill({ score }) {
   return <span className={`badge ${color}`}>{score?.toFixed(0) ?? '—'}</span>
 }
 
+function InterestPill({ score, status }) {
+  let color = 'bg-gray-800 text-gray-400 border border-gray-700'
+  let label = status || 'INACTIVE'
+  if (status === 'HIGH_INTEREST' || score >= 80) {
+    color = 'bg-emerald-500/20 text-emerald-400 border border-emerald-500/30 font-bold'
+    label = '🔥 High'
+  } else if (status === 'WARM_ENGAGED' || score >= 50) {
+    color = 'bg-blue-500/20 text-blue-400 border border-blue-500/30 font-medium'
+    label = '⚡ Warm'
+  } else if (status === 'PASSIVE' || score >= 25) {
+    color = 'bg-amber-500/20 text-amber-400 border border-amber-500/30'
+    label = '💬 Passive'
+  } else if (status === 'REJECTED') {
+    color = 'bg-red-500/20 text-red-400 border border-red-500/30'
+    label = '⛔ Rejected'
+  }
+
+  return (
+    <div className="flex items-center gap-1.5">
+      <span className={`text-xs px-2 py-0.5 rounded-full ${color}`}>
+        {score?.toFixed(0) ?? 0}/100
+      </span>
+      <span className="text-[10px] text-gray-400 hidden lg:inline">{label}</span>
+    </div>
+  )
+}
+
 function SignalBadge({ type }) {
   if (!type) return <span className="text-gray-600 text-xs">—</span>
   const map = {
@@ -101,6 +128,7 @@ export default function Contacts() {
               onChange={e => setSortBy(e.target.value)}
             >
               <option value="newest">Sort: Newest</option>
+              <option value="interest_score">Sort: Interest Score</option>
               <option value="score">Sort: ICP Score</option>
               <option value="signal_score">Sort: Signal Score</option>
             </select>
@@ -122,6 +150,7 @@ export default function Contacts() {
             <tr>
               <th className="th">Contact</th>
               <th className="th">Company</th>
+              <th className="th">Interest Score</th>
               <th className="th">ICP Score</th>
               <th className="th">Signal Score</th>
               <th className="th">Readiness</th>
@@ -131,9 +160,9 @@ export default function Contacts() {
           </thead>
           <tbody>
             {isLoading ? (
-              <tr><td colSpan={7} className="td text-center text-gray-600 py-12">Loading…</td></tr>
+              <tr><td colSpan={8} className="td text-center text-gray-600 py-12">Loading…</td></tr>
             ) : filtered.length === 0 ? (
-              <tr><td colSpan={7} className="td text-center text-gray-600 py-12">No contacts found</td></tr>
+              <tr><td colSpan={8} className="td text-center text-gray-600 py-12">No contacts found</td></tr>
             ) : filtered.map(c => (
               <tr key={c.id} className="table-row cursor-pointer" onClick={() => navigate(`/contacts/${c.id}`)}>
                 <td className="td">
@@ -170,6 +199,7 @@ export default function Contacts() {
                   <div className="text-gray-300">{c.company || '—'}</div>
                   {c.industry && <div className="text-xs text-gray-600">{c.industry}</div>}
                 </td>
+                <td className="td"><InterestPill score={c.interest_score} status={c.interest_status} /></td>
                 <td className="td"><ScorePill score={c.icp_score} /></td>
                 <td className="td"><ScorePill score={c.signal_score} /></td>
                 <td className="td">

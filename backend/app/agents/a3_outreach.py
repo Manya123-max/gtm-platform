@@ -660,6 +660,9 @@ class DraftManager:
             )
             self.db.add(log)
 
+            contact.last_outreach_at = datetime.utcnow()
+            contact.outreach_count = (contact.outreach_count or 0) + 1
+
             # Record outbound outreach email in ConversationThread history
             from app.models.models import ConversationThread
             outbound_thread = ConversationThread(

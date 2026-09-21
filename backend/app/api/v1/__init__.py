@@ -37,6 +37,15 @@ class ContactOut(BaseModel):
     icp_score: Optional[float] = None
     signal_score: Optional[float] = None
     readiness_score: float = 0.0
+    interest_score: float = 0.0
+    interest_status: str = "INACTIVE"
+    interest_score_breakdown: Optional[dict] = None
+    conversation_summary: Optional[str] = None
+    last_response_at: Optional[datetime] = None
+    last_outreach_at: Optional[datetime] = None
+    response_count: int = 0
+    outreach_count: int = 0
+    interest_updated_at: Optional[datetime] = None
     do_not_contact: bool = False
     email_valid: Optional[bool] = None
     signal_type: Optional[str] = None
@@ -234,6 +243,21 @@ async def get_dashboard_overview(
         select(RevenueForecast).order_by(desc(RevenueForecast.calculated_at)).limit(1))
     forecast = forecast_result.scalar_one_or_none()
 
+    # Interest metrics
+    high_interest_count = await db.scalar(
+        select(func.count(Contact.id)).where(
+            and_(*contact_filter, Contact.interest_status == "HIGH_INTEREST")
+        )
+    ) or 0
+    warm_engaged_count = await db.scalar(
+        select(func.count(Contact.id)).where(
+            and_(*contact_filter, Contact.interest_status == "WARM_ENGAGED")
+        )
+    ) or 0
+    avg_interest_score = await db.scalar(
+        select(func.avg(Contact.interest_score)).where(and_(*contact_filter))
+    ) or 0.0
+
     return {
         "prospects": {"total": total_contacts, "qualified": qualified, "active_signals": active_signals},
         "outreach_30d": {
@@ -246,6 +270,11 @@ async def get_dashboard_overview(
             "forecast_30d": float(forecast.forecast_30d or 0) if forecast else 0,
             "bottleneck": forecast.bottleneck_stage if forecast else None,
         },
+        "interest": {
+            "high_interest_count": high_interest_count,
+            "warm_engaged_count": warm_engaged_count,
+            "avg_interest_score": round(float(avg_interest_score or 0), 1),
+        },
         "pending_actions": pending_actions,
     }
 
@@ -257,6 +286,7 @@ async def list_contacts(
     skip: int = 0, limit: int = 100,
     min_score: Optional[float] = None,
     has_signal: Optional[bool] = None,
+    interest_status: Optional[str] = None,
     do_not_contact: Optional[bool] = False,
     sort_by: str = "newest",
     sort_order: str = "desc",
@@ -268,11 +298,15 @@ async def list_contacts(
         q = q.where(Contact.user_input_id == user_input_id)
     if min_score is not None:
         q = q.where(Contact.icp_score >= min_score)
+    if interest_status:
+        q = q.where(Contact.interest_status == interest_status)
     if has_signal:
         q = q.where(Contact.signal_score.isnot(None))
     order_func = desc if sort_order == "desc" else asc
     if sort_by == "score":
         q = q.order_by(order_func(Contact.icp_score), desc(Contact.created_at))
+    elif sort_by == "interest_score":
+        q = q.order_by(order_func(Contact.interest_score), desc(Contact.created_at))
     elif sort_by == "signal_score":
         q = q.order_by(order_func(Contact.signal_score), desc(Contact.created_at))
     else:
@@ -288,6 +322,64 @@ async def get_contact(contact_id: UUID, db: AsyncSession = Depends(get_db)):
     contact = result.scalar_one_or_none()
     if not contact:
         raise HTTPException(status_code=404, detail="Contact not found")
+    return contact
+
+
+@router.post("/contacts/{contact_id}/recalculate-interest", response_model=ContactOut)
+async def recalculate_contact_interest(contact_id: UUID, db: AsyncSession = Depends(get_db)):
+    result = await db.execute(select(Contact).where(Contact.id == contact_id))
+    contact = result.scalar_one_or_none()
+    if not contact:
+        raise HTTPException(status_code=404, detail="Contact not found")
+    
+    from app.services.interest_scoring_service import InterestScorer, InterestStatus
+    scorer = InterestScorer()
+    
+    t_res = await db.execute(
+        select(ConversationThread)
+        .where(ConversationThread.contact_id == contact.id)
+        .order_by(ConversationThread.occurred_at.asc())
+    )
+    threads = t_res.scalars().all()
+    thread_dicts = [
+        {"direction": t.direction, "content": t.content, "intent": t.intent, "occurred_at": t.occurred_at}
+        for t in threads
+    ]
+    
+    o_res = await db.execute(
+        select(OutreachLog)
+        .where(OutreachLog.contact_id == contact.id)
+        .order_by(OutreachLog.sent_at.asc())
+    )
+    outreaches = o_res.scalars().all()
+    outreach_dicts = [{"sent_at": o.sent_at} for o in outreaches]
+    
+    contact_dict = {
+        "do_not_contact": contact.do_not_contact,
+        "last_response_at": contact.last_response_at,
+        "last_outreach_at": contact.last_outreach_at,
+        "response_count": contact.response_count or len([t for t in thread_dicts if t["direction"] == "inbound"]),
+        "outreach_count": contact.outreach_count or len(outreach_dicts) or 1,
+        "first_name": contact.first_name,
+        "last_name": contact.last_name,
+        "company": contact.company,
+        "title": contact.title,
+    }
+    
+    score, status, breakdown = scorer.score(contact_dict, thread_dicts, outreach_dicts)
+    summary = await scorer.generate_conversation_summary(contact_dict, thread_dicts)
+    
+    contact.interest_score = score
+    contact.interest_status = status
+    contact.interest_score_breakdown = breakdown
+    contact.conversation_summary = summary
+    contact.interest_updated_at = datetime.utcnow()
+    
+    if status == InterestStatus.REJECTED:
+        contact.do_not_contact = True
+        
+    await db.commit()
+    await db.refresh(contact)
     return contact
 
 

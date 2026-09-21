@@ -1,26 +1,50 @@
 import { useState } from 'react'
 import { useQuery } from '@tanstack/react-query'
 import { useParams, useNavigate } from 'react-router-dom'
-import { fetchContact, fetchThread, fetchSignals, fetchDeals } from '../api'
-import { ArrowLeft, Mail, Building2, MapPin, Zap, MessageSquare, X, Link, TrendingUp, CheckCircle2, Clock, Sparkles, ExternalLink, ShieldCheck, UserCheck, Briefcase } from 'lucide-react'
+import { fetchContact, fetchThread, fetchSignals, fetchDeals, recalculateInterestScore } from '../api'
+import { ArrowLeft, Mail, Building2, MapPin, Zap, MessageSquare, X, Link, TrendingUp, CheckCircle2, Clock, Sparkles, ExternalLink, ShieldCheck, UserCheck, Briefcase, RefreshCw, Flame, AlertCircle } from 'lucide-react'
 import DealDetailModal from '../components/DealDetailModal'
+import { useQueryClient } from '@tanstack/react-query'
 
 export default function ContactDetail() {
   const { id } = useParams()
   const navigate = useNavigate()
+  const queryClient = useQueryClient()
   const [selectedSignal, setSelectedSignal] = useState(null)
   const [selectedDeal, setSelectedDeal] = useState(null)
+  const [isRecalculating, setIsRecalculating] = useState(false)
 
   const { data: contact, isLoading } = useQuery({ queryKey: ['contact', id], queryFn: () => fetchContact(id) })
   const { data: thread = [] } = useQuery({ queryKey: ['thread', id], queryFn: () => fetchThread(id) })
   const { data: signals = [] } = useQuery({ queryKey: ['signals', id], queryFn: () => fetchSignals(id) })
   const { data: deals = [] } = useQuery({ queryKey: ['deals', 'contact', id], queryFn: () => fetchDeals({ contact_id: id }) })
 
+  const handleRecalculate = async () => {
+    try {
+      setIsRecalculating(true)
+      await recalculateInterestScore(id)
+      await queryClient.invalidateQueries(['contact', id])
+    } catch (err) {
+      console.error('Failed to recalculate interest score', err)
+    } finally {
+      setIsRecalculating(false)
+    }
+  }
+
   if (isLoading) return <div className="text-gray-600 text-sm p-8">Loading…</div>
   if (!contact) return <div className="text-gray-600 text-sm p-8">Contact not found</div>
 
   const scoreColor = (contact.icp_score || 0) >= 80 ? 'text-emerald-400'
     : (contact.icp_score || 0) >= 60 ? 'text-blue-400' : 'text-amber-400'
+
+  const interestScore = contact.interest_score || 0
+  const interestStatus = contact.interest_status || 'INACTIVE'
+  const breakdown = contact.interest_score_breakdown || {}
+
+  const interestColor = interestStatus === 'HIGH_INTEREST' || interestScore >= 80 ? 'text-emerald-400'
+    : interestStatus === 'WARM_ENGAGED' || interestScore >= 50 ? 'text-blue-400'
+    : interestStatus === 'PASSIVE' || interestScore >= 25 ? 'text-amber-400'
+    : interestStatus === 'REJECTED' ? 'text-red-400' : 'text-gray-400'
 
   return (
     <div className="max-w-4xl mx-auto">
@@ -77,6 +101,14 @@ export default function ContactDetail() {
           </div>
 
           <div className="mt-4 pt-4 border-t border-[#1F2937] space-y-2">
+            <div className="flex justify-between items-center text-xs">
+              <span className="text-gray-400 font-medium">Interest Score</span>
+              <span className={`font-bold ${interestColor}`}>{interestScore.toFixed(0)}/100</span>
+            </div>
+            <div className="flex justify-between text-xs">
+              <span className="text-gray-600">Interest Status</span>
+              <span className={`font-semibold capitalize ${interestColor}`}>{interestStatus.replace('_', ' ')}</span>
+            </div>
             <div className="flex justify-between text-xs">
               <span className="text-gray-600">ICP Score</span>
               <span className={`font-semibold ${scoreColor}`}>{contact.icp_score?.toFixed(0) ?? '—'}</span>
@@ -155,6 +187,100 @@ export default function ContactDetail() {
         </div>
 
         <div className="lg:col-span-2 space-y-4">
+          {/* Prospect Interest Engine Card */}
+          <div className="card border border-gray-800 bg-[#111827]/80">
+            <div className="flex items-center justify-between mb-3 border-b border-gray-800 pb-3">
+              <div className="flex items-center gap-2">
+                <Flame size={16} className={interestScore >= 80 ? "text-emerald-400 animate-pulse" : "text-amber-400"} />
+                <span className="text-sm font-semibold text-gray-100">Prospect Interest & Engagement Engine</span>
+                <span className={`text-xs px-2 py-0.5 rounded-full font-bold ${
+                  interestStatus === 'HIGH_INTEREST' ? 'bg-emerald-500/20 text-emerald-400 border border-emerald-500/30'
+                  : interestStatus === 'WARM_ENGAGED' ? 'bg-blue-500/20 text-blue-400 border border-blue-500/30'
+                  : interestStatus === 'PASSIVE' ? 'bg-amber-500/20 text-amber-400 border border-amber-500/30'
+                  : interestStatus === 'REJECTED' ? 'bg-red-500/20 text-red-400 border border-red-500/30'
+                  : 'bg-gray-800 text-gray-400 border border-gray-700'
+                }`}>
+                  {interestStatus.replace('_', ' ')}
+                </span>
+              </div>
+              <button
+                onClick={handleRecalculate}
+                disabled={isRecalculating}
+                className="flex items-center gap-1.5 text-xs text-blue-400 hover:text-blue-300 transition-colors bg-blue-950/40 px-2.5 py-1 rounded-lg border border-blue-800/40 disabled:opacity-50"
+              >
+                <RefreshCw size={12} className={isRecalculating ? "animate-spin" : ""} />
+                {isRecalculating ? 'Recalculating…' : 'Recalculate Score'}
+              </button>
+            </div>
+
+            {/* Score Bar & Summary */}
+            <div className="space-y-3">
+              <div>
+                <div className="flex justify-between items-center text-xs mb-1">
+                  <span className="text-gray-400 font-medium">Interest Score Gauge</span>
+                  <span className={`font-mono font-bold ${interestColor}`}>{interestScore.toFixed(0)} / 100</span>
+                </div>
+                <div className="w-full h-2.5 bg-gray-800 rounded-full overflow-hidden">
+                  <div
+                    className={`h-full transition-all duration-500 ${
+                      interestScore >= 80 ? 'bg-gradient-to-r from-emerald-500 to-teal-400'
+                      : interestScore >= 50 ? 'bg-gradient-to-r from-blue-500 to-cyan-400'
+                      : interestScore >= 25 ? 'bg-gradient-to-r from-amber-500 to-yellow-400'
+                      : 'bg-gray-600'
+                    }`}
+                    style={{ width: `${Math.max(3, interestScore)}%` }}
+                  />
+                </div>
+              </div>
+
+              {/* Sub-score Breakdown Grid */}
+              <div className="grid grid-cols-2 sm:grid-cols-5 gap-2 pt-2">
+                <div className="bg-[#1F2937]/60 p-2 rounded border border-gray-800 text-center">
+                  <div className="text-[10px] text-gray-500 font-medium">Intent</div>
+                  <div className="text-xs font-bold text-gray-200 mt-0.5">{breakdown.intent_score ?? 0} / 35</div>
+                </div>
+                <div className="bg-[#1F2937]/60 p-2 rounded border border-gray-800 text-center">
+                  <div className="text-[10px] text-gray-500 font-medium">Recency</div>
+                  <div className="text-xs font-bold text-gray-200 mt-0.5">{breakdown.recency_score ?? 0} / 25</div>
+                </div>
+                <div className="bg-[#1F2937]/60 p-2 rounded border border-gray-800 text-center">
+                  <div className="text-[10px] text-gray-500 font-medium">Frequency</div>
+                  <div className="text-xs font-bold text-gray-200 mt-0.5">{breakdown.frequency_score ?? 0} / 20</div>
+                </div>
+                <div className="bg-[#1F2937]/60 p-2 rounded border border-gray-800 text-center">
+                  <div className="text-[10px] text-gray-500 font-medium">Response Rate</div>
+                  <div className="text-xs font-bold text-gray-200 mt-0.5">{breakdown.response_rate_score ?? 0} / 20</div>
+                </div>
+                <div className="bg-[#1F2937]/60 p-2 rounded border border-gray-800 text-center">
+                  <div className="text-[10px] text-gray-500 font-medium">Decay Penalty</div>
+                  <div className={`text-xs font-bold mt-0.5 ${(breakdown.inactivity_decay || 0) < 0 ? 'text-red-400' : 'text-gray-400'}`}>
+                    {breakdown.inactivity_decay ?? 0} pts
+                  </div>
+                </div>
+              </div>
+
+              {breakdown.explanation && (
+                <div className="text-[11px] text-gray-400 bg-gray-900/50 p-2 rounded border border-gray-800/80 flex items-start gap-1.5">
+                  <AlertCircle size={13} className="text-blue-400 shrink-0 mt-0.5" />
+                  <span>{breakdown.explanation}</span>
+                </div>
+              )}
+            </div>
+          </div>
+
+          {/* AI Executive Conversation Summary */}
+          {contact.conversation_summary && (
+            <div className="card bg-gradient-to-r from-blue-950/20 to-purple-950/20 border border-blue-900/30">
+              <div className="flex items-center gap-2 mb-2 text-xs font-semibold text-blue-300">
+                <Sparkles size={14} className="text-purple-400" />
+                <span>AI Executive Conversation Summary</span>
+              </div>
+              <p className="text-xs text-gray-300 leading-relaxed italic">
+                "{contact.conversation_summary}"
+              </p>
+            </div>
+          )}
+
           {/* Signals */}
           <div className="card">
             <div className="flex items-center gap-2 mb-3">

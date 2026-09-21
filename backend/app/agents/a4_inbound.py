@@ -21,6 +21,7 @@ from app.services.slack_service import SlackService
 from app.services.cal_service import CalService
 from app.services.notification_service import NtfyService 
 from app.services.resend_service import ResendService
+from app.services.interest_scoring_service import InterestScorer, InterestStatus
 
 logger = structlog.get_logger()
 
@@ -67,7 +68,7 @@ class InboundAgent:
     Flow:
     1. Load full conversation thread for context
     2. Classify reply intent (7 classes) using Claude Haiku
-    3. Update readiness score
+    3. Update readiness score & Interest Engine score/status/summary
     4. If score >= threshold: generate draft response, send to Slack for approval
     5. On approval: send reply + Cal.com booking link
     6. On 2h timeout: send safe default response
@@ -81,6 +82,7 @@ class InboundAgent:
         self.ntfy = NtfyService() 
         self.cal = CalService()
         self.resend = ResendService()
+        self.interest_scorer = InterestScorer()
 
     async def handle_reply(self, webhook_payload: Dict[str, Any]) -> Dict[str, Any]:
         """
@@ -113,11 +115,12 @@ class InboundAgent:
             delta = READINESS_DELTAS["reply_unsubscribe"]
             new_score = max(0, (contact.readiness_score or 0) + delta)
             contact.readiness_score = new_score
-            await self.db.commit()
             await self._record_thread_event(
                 contact.id, reply_text, intent, confidence,
                 delta=delta, score_after=new_score
             )
+            await self._update_prospect_interest(contact, intent)
+            await self.db.commit()
             logger.info("A4: Unsubscribe reply auto-suppressed", contact_id=contact.id, email=email, readiness_score=new_score)
             return {"status": "unsubscribed", "email": email, "readiness_score": new_score}
 
@@ -125,8 +128,9 @@ class InboundAgent:
             delta = READINESS_DELTAS["reply_not_interested"]
             new_score = max(0, (contact.readiness_score or 0) + delta)
             contact.readiness_score = new_score
-            await self.db.commit()
             await self._record_thread_event(contact.id, reply_text, intent, confidence, delta=delta, score_after=new_score)
+            await self._update_prospect_interest(contact, intent)
+            await self.db.commit()
             logger.info("A4: Not interested reply auto-suppressed", contact_id=contact.id, email=email, readiness_score=new_score)
             return {"status": "not_interested", "readiness_score": new_score}
 
@@ -134,6 +138,8 @@ class InboundAgent:
             delta = READINESS_DELTAS["reply_unknown"]
             new_score = contact.readiness_score or 0
             await self._record_thread_event(contact.id, reply_text, intent, confidence, delta=delta, score_after=new_score)
+            await self._update_prospect_interest(contact, intent)
+            await self.db.commit()
             logger.info("A4: Unknown reply intent, logged for manual review", contact_id=contact.id, email=email)
             return {"status": "unknown_intent", "queued_for_review": True}
 
@@ -179,6 +185,9 @@ class InboundAgent:
             contact.id, reply_text, intent, confidence,
             delta=delta, score_after=new_score, draft=draft
         )
+
+        # Update Prospect Interest Score, Status, Breakdown, and AI Executive Summary
+        await self._update_prospect_interest(contact, intent)
 
         # Log funnel event
         await self._log_funnel_event("reply_received", contact.id, {
@@ -632,3 +641,93 @@ Return only the email body text, no subject line."""
         )
         self.db.add(event)
         await self.db.commit()
+
+    async def _update_prospect_interest(self, contact: Contact, intent: str) -> Dict[str, Any]:
+        """Calculates interest score, updates contact fields, generates AI summary, and sends alerts."""
+        contact.last_response_at = datetime.utcnow()
+        contact.response_count = (contact.response_count or 0) + 1
+
+        # Fetch conversation threads and outreach logs for contact
+        threads_res = await self.db.execute(
+            select(ConversationThread)
+            .where(ConversationThread.contact_id == contact.id)
+            .order_by(ConversationThread.occurred_at.asc())
+        )
+        threads = threads_res.scalars().all()
+        thread_dicts = [
+            {
+                "direction": t.direction,
+                "content": t.content,
+                "intent": t.intent,
+                "occurred_at": t.occurred_at,
+            }
+            for t in threads
+        ]
+
+        outreach_res = await self.db.execute(
+            select(OutreachLog)
+            .where(OutreachLog.contact_id == contact.id)
+            .order_by(OutreachLog.sent_at.asc())
+        )
+        outreaches = outreach_res.scalars().all()
+        outreach_dicts = [{"sent_at": o.sent_at} for o in outreaches]
+
+        contact_dict = {
+            "do_not_contact": contact.do_not_contact,
+            "last_response_at": contact.last_response_at,
+            "last_outreach_at": contact.last_outreach_at,
+            "response_count": contact.response_count,
+            "outreach_count": contact.outreach_count,
+            "first_name": contact.first_name,
+            "last_name": contact.last_name,
+            "company": contact.company,
+            "title": contact.title,
+        }
+
+        prev_score = contact.interest_score or 0.0
+        prev_status = contact.interest_status or InterestStatus.INACTIVE
+
+        score, status, breakdown = self.interest_scorer.score(
+            contact_dict, thread_dicts, outreach_dicts
+        )
+
+        contact.interest_score = score
+        contact.interest_status = status
+        contact.interest_score_breakdown = breakdown
+        contact.interest_updated_at = datetime.utcnow()
+
+        if status == InterestStatus.REJECTED:
+            contact.do_not_contact = True
+
+        # Generate AI Conversation Summary
+        summary = await self.interest_scorer.generate_conversation_summary(
+            contact_dict, thread_dicts
+        )
+        contact.conversation_summary = summary
+
+        await self.db.commit()
+
+        # Trigger notifications if HIGH_INTEREST or score jumped +25 pts
+        score_jump = score - prev_score
+        if (score >= 80.0 and prev_status != InterestStatus.HIGH_INTEREST) or score_jump >= 25.0:
+            alert_msg = (
+                f"🔥 *HIGH PROSPECT INTEREST ALERT*\n"
+                f"*Contact:* {contact.first_name or ''} {contact.last_name or ''} ({contact.email})\n"
+                f"*Company:* {contact.company or 'Unknown'} | *Title:* {contact.title or 'N/A'}\n"
+                f"*Interest Score:* {score:.0f}/100 ({status}) | *Jump:* +{score_jump:.0f} pts\n"
+                f"*Latest Intent:* `{intent}`\n"
+                f"*AI Summary:* {summary}"
+            )
+            try:
+                await self.slack.send_alert(alert_msg)
+                await self.ntfy.send_alert(f"HIGH INTEREST: {contact.email} ({contact.company}) - Score {score:.0f}/100")
+            except Exception as e:
+                logger.warning("A4: Failed to send high-interest notification", error=str(e))
+
+        return {
+            "interest_score": score,
+            "interest_status": status,
+            "breakdown": breakdown,
+            "summary": summary,
+        }
+

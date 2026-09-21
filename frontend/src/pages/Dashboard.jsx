@@ -175,11 +175,13 @@ export default function Dashboard() {
       </div>
 
       {/* Top stats */}
-      <div className="grid grid-cols-2 lg:grid-cols-4 gap-4 mb-6">
+      <div className="grid grid-cols-2 lg:grid-cols-5 gap-4 mb-6">
         <StatCard label="Total Contacts" value={(p.total || 0).toLocaleString()}
           sub={`${p.qualified || 0} qualified`} icon={Users} accent="blue" />
+        <StatCard label="High Interest" value={(o.interest?.high_interest_count || 0).toLocaleString()}
+          sub={`Avg score: ${o.interest?.avg_interest_score || 0}/100`} icon={Flame} accent="green" />
         <StatCard label="Emails Sent (30d)" value={(out.sent || 0).toLocaleString()}
-          sub={`${pct(out.reply_rate)} reply rate`} icon={Send} accent="green" />
+          sub={`${pct(out.reply_rate)} reply rate`} icon={Send} accent="blue" />
         <StatCard label="Meetings Booked" value={out.meetings || 0}
           sub={`${pct(out.meeting_rate)} from sends`} icon={Calendar} accent="purple" />
         <StatCard label="Active Signals" value={p.active_signals || 0}

@@ -104,6 +104,17 @@ class Contact(Base):
     # Readiness  A4
     readiness_score: Mapped[float] = mapped_column(Float, default=0.0)
 
+    # Prospect Interest & Engagement Detection Engine
+    interest_score: Mapped[float] = mapped_column(Float, default=0.0, index=True)
+    interest_status: Mapped[str] = mapped_column(String(50), default="INACTIVE", index=True)
+    interest_score_breakdown: Mapped[Optional[dict]] = mapped_column(JSONB, nullable=True)
+    conversation_summary: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    last_response_at: Mapped[Optional[datetime]] = mapped_column(DateTime, nullable=True)
+    last_outreach_at: Mapped[Optional[datetime]] = mapped_column(DateTime, nullable=True)
+    response_count: Mapped[int] = mapped_column(Integer, default=0)
+    outreach_count: Mapped[int] = mapped_column(Integer, default=0)
+    interest_updated_at: Mapped[Optional[datetime]] = mapped_column(DateTime, nullable=True)
+
     # Status flags
     do_not_contact: Mapped[bool] = mapped_column(Boolean, default=False, index=True)
     email_verified: Mapped[bool] = mapped_column(Boolean, default=False)

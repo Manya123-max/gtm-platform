@@ -60,43 +60,6 @@ app.include_router(api_router, prefix="/api/v1")
 app.include_router(auth_router, prefix="/api/v1")
  
  
-# ── Input Schema (new) ───────────────────────────────────────────────────
- 
-class InputData(BaseModel):
-    our_company_name:    str
-    our_services:        str
-    target_location:     str
-    target_industries:   str = ""
-    target_company_size: str
-    target_keywords:     str = ""
-    target_job_titles:   str
-
-
-@app.post("/submit-input")
-async def submit_input(data: InputData, current_user=Depends(get_current_user)):
-    """
-    Accepts structured company/lead input from the frontend and persists it.
-    Requires authentication — the record is stamped with the caller's user_id.
-    """
-    from app.core.database import AsyncSessionLocal
-    from app.models.models import UserInput
-
-    async with AsyncSessionLocal() as db:
-        record = UserInput(
-            our_company_name=    data.our_company_name,
-            our_services=        data.our_services,
-            target_location=     data.target_location,
-            target_industries=   data.target_industries or None,
-            target_company_size= data.target_company_size,
-            target_keywords=     data.target_keywords or None,
-            target_job_titles=   data.target_job_titles,
-            user_id=             current_user.id if current_user is not None else None,
-        )
-        db.add(record)
-        await db.commit()
-        await db.refresh(record)
-
-    return {"message": "Input received", "id": record.id}
 
 # ── Webhook Routes ────────────────────────────────────────────────────────
  

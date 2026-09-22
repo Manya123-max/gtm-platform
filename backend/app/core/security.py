@@ -101,29 +101,26 @@ async def get_current_user(
 ):
     """
     Resolves the authenticated User from the Bearer token.
-
-    Returns None only when AUTH_ENABLED=false (legacy/dev mode — endpoints then
-    behave as they did before multi-user support). Otherwise raises 401 when
-    the token is missing/invalid/expired or the user no longer exists.
+    Raises 401 when the token is missing/invalid/expired or the user no longer exists.
     """
-    if not settings.AUTH_ENABLED:
-        return None
+    if credentials is not None:
+        from app.models.models import User
 
-    if credentials is None:
-        raise HTTPException(
-            status_code=status.HTTP_401_UNAUTHORIZED,
-            detail="Not authenticated",
-            headers={"WWW-Authenticate": "Bearer"},
-        )
-
-    from app.models.models import User
-
-    user_id = decode_token(credentials.credentials, expected_type="access")
-    user = await db.get(User, user_id)
-    if user is None or not user.is_active:
+        user_id = decode_token(credentials.credentials, expected_type="access")
+        user = await db.get(User, user_id)
+        if user is not None and user.is_active:
+            return user
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail="Could not validate credentials",
             headers={"WWW-Authenticate": "Bearer"},
         )
-    return user
+
+    if not settings.AUTH_ENABLED:
+        return None
+
+    raise HTTPException(
+        status_code=status.HTTP_401_UNAUTHORIZED,
+        detail="Not authenticated",
+        headers={"WWW-Authenticate": "Bearer"},
+    )

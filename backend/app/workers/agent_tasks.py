@@ -50,12 +50,13 @@ def run_prospect_agent(icp_config: Optional[Dict] = None, config: Optional[Dict]
 def run_signal_agent(contact_ids: Optional[List[str]] = None, config: Optional[Dict] = None):
     async def _run():
         from app.agents.a2_signal import SignalAgent
+        user_input_id = config.get("user_input_id") if config else None
         async with AsyncSessionLocal() as db:
             agent = SignalAgent(db)
-            result = await agent.run(contact_ids)
+            result = await agent.run(contact_ids, user_input_id=user_input_id)
             logger.info("A2 complete", **result)
             if result.get("high_score_signals", 0) > 0:
-                run_outreach_agent.delay()
+                run_outreach_agent.delay(config=config)
             return result
     return run_async(_run())
 

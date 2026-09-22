@@ -11,10 +11,22 @@ export default function ContactDetail() {
   const [selectedSignal, setSelectedSignal] = useState(null)
   const [selectedDeal, setSelectedDeal] = useState(null)
 
-  const { data: contact, isLoading } = useQuery({ queryKey: ['contact', id], queryFn: () => fetchContact(id) })
+  const { data: contact, isLoading, refetch: refetchContact } = useQuery({ queryKey: ['contact', id], queryFn: () => fetchContact(id) })
   const { data: thread = [] } = useQuery({ queryKey: ['thread', id], queryFn: () => fetchThread(id) })
   const { data: signals = [] } = useQuery({ queryKey: ['signals', id], queryFn: () => fetchSignals(id) })
   const { data: deals = [] } = useQuery({ queryKey: ['deals', 'contact', id], queryFn: () => fetchDeals({ contact_id: id }) })
+
+  const handleSummarize = async () => {
+    setIsSummarizing(true)
+    try {
+      await summarizeSignals(id)
+      await refetchContact()
+    } catch (err) {
+      console.error(err)
+    } finally {
+      setIsSummarizing(false)
+    }
+  }
 
   if (isLoading) return <div className="text-gray-600 text-sm p-8">Loading…</div>
   if (!contact) return <div className="text-gray-600 text-sm p-8">Contact not found</div>
@@ -155,15 +167,37 @@ export default function ContactDetail() {
         </div>
 
         <div className="lg:col-span-2 space-y-4">
-          {/* Signals */}
+          {/* Signals & 2-Line LLM Summary */}
           <div className="card">
-            <div className="flex items-center gap-2 mb-3">
-              <Zap size={13} className="text-amber-400" />
-              <span className="text-sm font-medium text-gray-200">Signal History</span>
-              <span className="badge badge-amber">{signals.length}</span>
+            <div className="flex items-center justify-between gap-2 mb-3">
+              <div className="flex items-center gap-2">
+                <Zap size={14} className="text-amber-500" />
+                <span className="text-sm font-semibold text-slate-800">Signal Intelligence</span>
+                <span className="badge badge-amber">{signals.length}</span>
+              </div>
+              <button
+                onClick={handleSummarize}
+                disabled={isSummarizing}
+                className="flex items-center gap-1.5 text-xs font-medium text-amber-800 bg-amber-50 hover:bg-amber-100 border border-amber-200 px-3 py-1.5 rounded-lg transition-all shadow-2xs disabled:opacity-50"
+              >
+                <Sparkles size={12} className={`text-amber-600 ${isSummarizing ? "animate-spin" : ""}`} />
+                {isSummarizing ? "Summarizing..." : "Refresh AI Summary"}
+              </button>
             </div>
+
+            {/* Signal Summary Box — Light UI Theme */}
+            <div className="mb-4 p-4 rounded-xl bg-amber-50/70 border border-amber-200/80 shadow-2xs">
+              <div className="flex items-center gap-1.5 text-xs font-bold text-amber-900 mb-1.5">
+                <Sparkles size={13} className="text-amber-600 shrink-0" />
+                <span>Signal Summary</span>
+              </div>
+              <p className="text-xs text-slate-700 leading-relaxed font-normal">
+                {contact.signal_summary || (signals.length > 0 ? "Click 'Refresh Summary' to generate a breakdown of active signals." : "No signals detected yet to summarize.")}
+              </p>
+            </div>
+
             {signals.length === 0 ? (
-              <div className="text-xs text-gray-600 py-4 text-center">No signals detected yet</div>
+              <div className="text-xs text-slate-500 py-4 text-center">No signals detected yet</div>
             ) : (
               <div className="space-y-2">
                 {signals.slice(0, 5).map(s => {
@@ -171,15 +205,15 @@ export default function ContactDetail() {
                     <div
                       key={s.id}
                       onClick={() => setSelectedSignal(s)}
-                      className="p-3 rounded-lg bg-[#1F2937] hover:bg-[#374151]/50 cursor-pointer transition-colors"
+                      className="p-3 rounded-lg bg-slate-50 hover:bg-slate-100/80 border border-slate-200/60 cursor-pointer transition-colors"
                     >
                       <div className="flex items-start gap-3">
                         <div className="flex-1">
-                          <div className="text-xs font-medium text-gray-300 capitalize">
+                          <div className="text-xs font-semibold text-slate-800 capitalize">
                             {s.signal_type?.replace(/_/g,' ')}
                           </div>
-                          <div className="text-[10px] text-gray-600 mt-0.5">
-                            Source: {s.signal_source} · {new Date(s.detected_at).toLocaleDateString()}
+                          <div className="text-[11px] text-slate-500 mt-0.5">
+                            Source: <span className="font-medium text-slate-600">{s.signal_source}</span> · {new Date(s.detected_at).toLocaleDateString()}
                           </div>
                         </div>
                       </div>
@@ -244,6 +278,91 @@ export default function ContactDetail() {
                               {t.channel && <span>· Via {t.channel.toUpperCase()}</span>}
                             </div>
                           </div>
+                        </div>
+                      ) : (
+                        /* ── Inbound (Received) Message Bubble — BLUE ── */
+                        <div className="space-y-3">
+                          <div className="flex items-start gap-2.5 max-w-[90%]">
+                            <div className="w-8 h-8 rounded-full bg-blue-600 text-white font-bold text-xs flex items-center justify-center shrink-0 border border-blue-500 shadow-sm">
+                              {prospectInitials}
+                            </div>
+                            <div className="space-y-1 w-full">
+                              <div className="p-3.5 rounded-2xl rounded-tl-none bg-[#EFF6FF] text-[#1E3A8A] border border-[#BFDBFE] shadow-xs text-xs leading-relaxed">
+                                <div className="flex items-center justify-between gap-2 pb-1.5 mb-1.5 border-b border-blue-200/80 text-[11px] font-semibold text-blue-900">
+                                  <span className="inline-flex items-center gap-1">
+                                    <span className="w-1.5 h-1.5 rounded-full bg-blue-600"></span>
+                                    Received Email
+                                  </span>
+                                  <span className="text-[10px] text-blue-700 font-normal">
+                                    {t.occurred_at ? new Date(t.occurred_at).toLocaleDateString([], { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' }) : ''}
+                                  </span>
+                                </div>
+                                <div className="text-slate-800 whitespace-pre-line">
+                                  {t.content}
+                                </div>
+                              </div>
+                              <div className="flex items-center gap-2 text-[10px] text-slate-500 px-1 flex-wrap">
+                                <span className="font-semibold text-blue-900">{prospectName}</span>
+                                {t.intent && (
+                                  <>
+                                    <span>·</span>
+                                    <span className="text-blue-800 bg-blue-100/80 border border-blue-300/80 px-1.5 py-0.2 rounded capitalize font-medium">
+                                      {t.intent.replace(/_/g, ' ')}
+                                    </span>
+                                  </>
+                                )}
+                                {t.readiness_score_after != null && (
+                                  <>
+                                    <span>·</span>
+                                    <span>Score: <strong className="text-blue-600 font-bold">{t.readiness_score_after.toFixed(0)}%</strong></span>
+                                  </>
+                                )}
+                              </div>
+                            </div>
+                          </div>
+
+                          {/* Outbound AI Draft Reply for Received Email — GREEN */}
+                          {t.draft_content && (
+                            <div className="flex items-start gap-2.5 max-w-[90%] ml-auto flex-row-reverse">
+                              <div className="w-8 h-8 rounded-full bg-emerald-600 text-white font-bold text-xs flex items-center justify-center shrink-0 border border-emerald-500 shadow-sm">
+                                You
+                              </div>
+                              <div className="space-y-1.5 text-right w-full">
+                                <div className="p-3.5 rounded-2xl rounded-tr-none bg-[#ECFDF5] text-[#064E3B] border border-[#A7F3D0] shadow-xs text-xs leading-relaxed text-left whitespace-pre-line font-normal">
+                                  <div className="flex items-center justify-between gap-2 pb-1 mb-1 border-b border-emerald-200/80 text-[11px] font-semibold text-emerald-800">
+                                    <span>AI Suggested Reply</span>
+                                    {t.approved_at ? (
+                                      <span className="text-[10px] text-emerald-700 font-medium">Approved</span>
+                                    ) : (
+                                      <span className="text-[10px] text-amber-700 font-medium">Pending Approval</span>
+                                    )}
+                                  </div>
+                                  <div className="text-slate-800 whitespace-pre-line">
+                                    {t.draft_content}
+                                  </div>
+                                </div>
+                                <div className="flex items-center justify-end gap-2 text-[11px] px-1 flex-wrap">
+                                  {t.approved_at ? (
+                                    <span className="inline-flex items-center gap-1 text-emerald-800 font-semibold bg-emerald-50 border border-emerald-300 px-2.5 py-0.5 rounded-full shadow-xs">
+                                      <CheckCircle2 size={11} className="text-emerald-600" /> Approved by {t.approved_by || 'Rep'}
+                                    </span>
+                                  ) : (
+                                    <span className="inline-flex items-center gap-1 text-amber-800 font-semibold bg-amber-50 border border-amber-300 px-2.5 py-0.5 rounded-full shadow-xs">
+                                      <Clock size={11} className="text-amber-600" /> Pending Slack Approval
+                                    </span>
+                                  )}
+                                  <a
+                                    href={gmailComposeUrl}
+                                    target="_blank"
+                                    rel="noopener noreferrer"
+                                    className="inline-flex items-center gap-1 text-white font-semibold bg-emerald-600 hover:bg-emerald-700 active:bg-emerald-800 px-3 py-0.5 rounded-full shadow-sm transition-all text-[11px]"
+                                  >
+                                    <ExternalLink size={11} /> Send via Gmail Web
+                                  </a>
+                                </div>
+                              </div>
+                            </div>
+                          )}
                         </div>
                       ) : (
                         /* ── Inbound (Received) Message Bubble — BLUE ── */

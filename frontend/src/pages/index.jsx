@@ -784,7 +784,8 @@ export function Agents() {
         }))
         return
       }
-      const response = await runOrchestratorAgent(agentId, {})
+      const payload = activeSessionId != null ? { user_input_id: activeSessionId } : {}
+      const response = await runOrchestratorAgent(agentId, payload)
       setResults(current => ({
         ...current,
         [agentId]: `Queued — workflow ${response.workflow_run_id?.slice(0, 8) || 'created'}`,

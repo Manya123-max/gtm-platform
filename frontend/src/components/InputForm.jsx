@@ -1,6 +1,7 @@
 import React, { useState } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { useSession } from '../context/SessionContext';
+import { submitInput } from '../api';
 
 function InputForm() {
     const navigate = useNavigate();
@@ -39,17 +40,7 @@ function InputForm() {
         };
 
         try {
-            const response = await fetch('/api/v1/submit-input', {
-                method: 'POST',
-                headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify(payload),
-            });
-
-            if (!response.ok) {
-                throw new Error(`Request failed: ${response.status}`);
-            }
-
-            const data = await response.json();
+            const data = await submitInput(payload);
             console.log('Saved:', data);
             if (data.user_input_id && setActiveSessionId) {
                 setActiveSessionId(data.user_input_id);

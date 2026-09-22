@@ -166,6 +166,7 @@ def resolve_industries_and_terms(industry_str: str) -> Tuple[List[str], List[str
         clean_term = term.strip()
         if not clean_term:
             continue
+        normalized = clean_term.lower()
         if normalized in INDUSTRY_TAG_MAP:
             tag_id = INDUSTRY_TAG_MAP[normalized]
             if tag_id not in tag_ids:

@@ -420,6 +420,25 @@ async def summarize_contact_signals(contact_id: str, db: AsyncSession = Depends(
     return {"contact_id": contact_id, "signal_summary": summary}
 
 
+@router.post("/contacts/{contact_id}/sync-salesforce")
+async def sync_contact_to_salesforce(contact_id: UUID, current_user=Depends(get_current_user), db: AsyncSession = Depends(get_db)):
+    """Sync/upsert an enriched prospect to Salesforce Lead."""
+    stmt = select(Contact).where(Contact.id == contact_id)
+    if current_user is not None:
+        stmt = stmt.where(Contact.user_id == current_user.id)
+    result = await db.execute(stmt)
+    contact = result.scalar_one_or_none()
+    if not contact:
+        raise HTTPException(status_code=404, detail="Contact not found")
+
+    from app.services import SalesforceSyncService
+    sf_service = SalesforceSyncService()
+    res = sf_service.sync_contact_model(contact)
+    if not res.get("success"):
+        raise HTTPException(status_code=400, detail=res.get("error", "Salesforce sync failed"))
+    return res
+
+
 # ── Deals ──────────────────────────────────────────────────────────────────
 
 @router.get("/deals", response_model=List[DealOut])

@@ -603,3 +603,4 @@ class EmbeddingService:
 
 
 from app.services.gmail_imap_service import GmailIMAPService
+from app.services.salesforce_service import SalesforceSyncService

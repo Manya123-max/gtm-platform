@@ -55,3 +55,4 @@ orjson==3.10.12
 python-dateutil==2.9.0
 pytz==2024.2
 psycopg2-binary
+simple-salesforce==1.12.9

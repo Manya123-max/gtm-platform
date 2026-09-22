@@ -86,8 +86,15 @@ class Settings(BaseSettings):
     CURRENTS_API_KEY:       str = ""
 
     # ── CRM / calendar / email ────────────────────────────────────────────
-    HUBSPOT_ACCESS_TOKEN: str = ""
-    GMAIL_CLIENT_ID:      str = ""
+    HUBSPOT_ACCESS_TOKEN:      str = ""
+    SALESFORCE_USERNAME:       str = ""
+    SALESFORCE_PASSWORD:       str = ""
+    SALESFORCE_CLIENT_ID:      str = ""
+    SALESFORCE_CLIENT_SECRET:  str = ""
+    SALESFORCE_SECURITY_TOKEN: str = ""
+    SALESFORCE_REFRESH_TOKEN:  str = ""
+    SALESFORCE_DOMAIN:         str = "login"  # 'login' for Production, 'test' for Sandbox
+    GMAIL_CLIENT_ID:           str = ""
     GMAIL_CLIENT_SECRET:  str = ""
     GMAIL_REDIRECT_URI:   str = "http://localhost:8000/api/v1/auth/gmail/callback"
     CAL_COM_API_KEY:      str = ""

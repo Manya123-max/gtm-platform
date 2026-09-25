@@ -3,6 +3,7 @@ import { useNavigate } from 'react-router-dom'
 import { History as HistoryIcon, Building2, MapPin, Briefcase, Tag, ChevronRight } from 'lucide-react'
 import { fetchInputHistory } from '../api'
 import { useSession } from '../context/SessionContext'
+import { useAuth } from '../context/AuthContext'
 
 function FieldChip({ icon: Icon, label, value }) {
   if (!value) return null
@@ -21,9 +22,10 @@ function FieldChip({ icon: Icon, label, value }) {
 
 export default function History() {
   const navigate = useNavigate()
+  const { user } = useAuth()
   const { activeSessionId, setActiveSessionId } = useSession()
   const { data: history = [], isLoading, isError } = useQuery({
-    queryKey: ['input-history'],
+    queryKey: ['input-history', user?.id],
     queryFn: fetchInputHistory,
     refetchInterval: 10_000,
   })

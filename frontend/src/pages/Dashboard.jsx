@@ -45,6 +45,7 @@ function StatCard({ label, value, sub, icon: Icon, accent = 'blue', trend }) {
 
 function AgentTrigger() {
   const queryClient = useQueryClient()
+  const { activeSessionId } = useSession()
   const [running, setRunning] = useState(null)
   const agents = [
     { id: 'A1', label: 'Prospect', desc: 'Find new contacts' },
@@ -58,7 +59,8 @@ function AgentTrigger() {
   const trigger = async (agentId) => {
     setRunning(agentId)
     try {
-      const queued = await runOrchestratorAgent(agentId, {})
+      const payload = activeSessionId != null ? { user_input_id: activeSessionId } : {}
+      const queued = await runOrchestratorAgent(agentId, payload)
       await waitForWorkflowCompletion(queued.workflow_run_id)
       await Promise.all([
         queryClient.invalidateQueries({ queryKey: ['overview'] }),

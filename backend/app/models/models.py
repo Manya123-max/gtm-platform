@@ -85,7 +85,7 @@ class Contact(Base):
     __tablename__ = "contacts"
 
     id: Mapped[str] = mapped_column(UUID(as_uuid=False), primary_key=True, default=generate_uuid)
-    email: Mapped[str] = mapped_column(String(255), unique=True, nullable=False, index=True)
+    email: Mapped[str] = mapped_column(String(255), nullable=False, index=True)
     first_name: Mapped[Optional[str]] = mapped_column(String(100))
     last_name: Mapped[Optional[str]] = mapped_column(String(100))
     title: Mapped[Optional[str]] = mapped_column(String(200))
@@ -111,6 +111,7 @@ class Contact(Base):
     signal_type: Mapped[Optional[str]] = mapped_column(String(255))
     signal_score: Mapped[Optional[float]] = mapped_column(Float)
     latest_signal_at: Mapped[Optional[datetime]] = mapped_column(DateTime)
+    signal_summary: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
 
     # Readiness  A4
     readiness_score: Mapped[float] = mapped_column(Float, default=0.0)
@@ -132,6 +133,10 @@ class Contact(Base):
     apollo_id: Mapped[Optional[str]] = mapped_column(String(100))
     user_input_id: Mapped[Optional[int]] = mapped_column(Integer, ForeignKey("user_inputs.id"), nullable=True, index=True)
 
+    # Ownership — which platform user this contact belongs to.
+    # Nullable for legacy/pre-migration rows; enforced at the API layer.
+    user_id: Mapped[Optional[str]] = mapped_column(UUID(as_uuid=False), ForeignKey("users.id"), nullable=True, index=True)
+
     # Relationships
     signals: Mapped[List["SignalEvent"]] = relationship("SignalEvent", back_populates="contact")
     outreach_logs: Mapped[List["OutreachLog"]] = relationship("OutreachLog", back_populates="contact")
@@ -142,6 +147,7 @@ class Contact(Base):
     __table_args__ = (
         Index("ix_contacts_icp_score_dnc", "icp_score", "do_not_contact"),
         Index("ix_contacts_user_input_id", "user_input_id"),
+        UniqueConstraint("user_id", "email", name="uq_contacts_user_email"),
     )
 
 
@@ -159,6 +165,7 @@ class SignalEvent(Base):
     confidence: Mapped[float] = mapped_column(Float, default=0.5)
     conversion_weight: Mapped[Optional[float]] = mapped_column(Float)
     raw_data: Mapped[Optional[dict]] = mapped_column(JSONB)
+    summary: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
     processed: Mapped[bool] = mapped_column(Boolean, default=False)
     triggered_outreach: Mapped[bool] = mapped_column(Boolean, default=False)
     sequence_step: Mapped[int] = mapped_column(Integer, default=0)
@@ -208,9 +215,7 @@ class OutreachLog(Base):
     linkedin_note: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
     # Opaque message/lead id returned by the email provider (Resend message id)
     outreach_provider_message_id: Mapped[Optional[str]] = mapped_column(String(100))
-    sequence_step: Mapped[int] = mapped_column(Integer, default=0)
-    call_script: Mapped[Optional[str]] = mapped_column(Text)
-    linkedin_note: Mapped[Optional[str]] = mapped_column(Text)
+
 
     # Engagement tracking
     opened: Mapped[bool] = mapped_column(Boolean, default=False)
@@ -455,6 +460,10 @@ class RevenueForecast(Base):
     recommended_lever: Mapped[Optional[str]] = mapped_column(Text)
     stage_conversion_rates: Mapped[Optional[dict]] = mapped_column(JSONB)
     stage_velocity_days: Mapped[Optional[dict]] = mapped_column(JSONB)
+
+    # Ownership — user whose pipeline this forecast describes (nullable for legacy rows)
+    user_id: Mapped[Optional[str]] = mapped_column(UUID(as_uuid=False), ForeignKey("users.id"), nullable=True, index=True)
+
     calculated_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow, index=True)
 
 class WorkflowRun(Base):
@@ -472,6 +481,9 @@ class WorkflowRun(Base):
 
     error_message: Mapped[Optional[str]] = mapped_column(Text)
     current_agent: Mapped[Optional[str]] = mapped_column(String(10))
+
+    # Ownership — user who triggered this workflow run (nullable for legacy rows)
+    user_id: Mapped[Optional[str]] = mapped_column(UUID(as_uuid=False), ForeignKey("users.id"), nullable=True, index=True)
 
     created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
 
@@ -573,6 +585,33 @@ class UserInput(Base):
     target_keywords: Mapped[Optional[str]]   = mapped_column(Text, nullable=True)
     target_job_titles: Mapped[str]     = mapped_column(Text, nullable=False)
     created_at: Mapped[datetime]       = mapped_column(DateTime, default=datetime.utcnow)
+
+    # Ownership — the user who submitted this intake form.
+    # Nullable for legacy/pre-migration rows; backfilled via migration owner.
+    user_id: Mapped[Optional[str]] = mapped_column(UUID(as_uuid=False), ForeignKey("users.id"), nullable=True, index=True)
+
+    user: Mapped[Optional["User"]] = relationship("User", back_populates="user_inputs")
+
+
+class User(Base):
+    """
+    Platform user account. Every account is a normal user — there is no
+    admin role or admin panel. All user-owned GTM data links to users.id.
+    """
+    __tablename__ = "users"
+
+    id: Mapped[str] = mapped_column(UUID(as_uuid=False), primary_key=True, default=generate_uuid)
+    name: Mapped[str] = mapped_column(String(200), nullable=False)
+    email: Mapped[str] = mapped_column(String(255), unique=True, nullable=False, index=True)
+    password_hash: Mapped[str] = mapped_column(String(255), nullable=False)
+    is_active: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)
+
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime, default=datetime.utcnow, onupdate=datetime.utcnow
+    )
+
+    user_inputs: Mapped[List["UserInput"]] = relationship("UserInput", back_populates="user")
 
 
 class Notification(Base):

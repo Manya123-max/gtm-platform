@@ -19,9 +19,23 @@ function errorMessage(error) {
   return error?.response?.data?.message || error?.message || 'Unexpected API error'
 }
 
+// Attach the Bearer token to every request
+api.interceptors.request.use(config => {
+  const token = localStorage.getItem('gtm_access_token')
+  if (token) config.headers.Authorization = `Bearer ${token}`
+  return config
+})
+
 api.interceptors.response.use(
   response => response,
   error => {
+    // Session expired / invalid → clear local session and let the router
+    // redirect to /login. Auth endpoints themselves don't use this instance.
+    if (error?.response?.status === 401) {
+      localStorage.removeItem('gtm_access_token')
+      localStorage.removeItem('gtm_refresh_token')
+      window.dispatchEvent(new CustomEvent('auth:unauthorized'))
+    }
     const normalized = new Error(errorMessage(error))
     normalized.status = error?.response?.status
     normalized.data = error?.response?.data
@@ -36,6 +50,7 @@ export const fetchContacts = (params = {}) => unwrap(api.get('/contacts', { para
 export const fetchContact = id => unwrap(api.get(`/contacts/${id}`))
 export const fetchThread = id => unwrap(api.get(`/contacts/${id}/thread`))
 export const fetchSignals = id => unwrap(api.get(`/contacts/${id}/signals`))
+export const summarizeSignals = id => unwrap(api.post(`/contacts/${id}/summarize-signals`))
 export const fetchDeals = (params = {}) => unwrap(api.get('/deals', { params }))
 export const fetchDeal = id => unwrap(api.get(`/deals/${id}`))
 export const fetchPipelineSummary = (user_input_id) => unwrap(api.get('/deals/pipeline-summary', { params: user_input_id ? { user_input_id } : {} }))
@@ -118,4 +133,5 @@ export const updateAgentSchedule = (agent, enabled, cron = null) =>
 export const fetchNotifications = (user_input_id) =>
   unwrap(api.get('/notifications', { params: user_input_id ? { user_input_id } : {} }))
 export const markNotificationRead = id =>
-  unwrap(api.post(`/notifications/${id}/read`))
+  unwrap(api.post(`/notifications/${id}/read`))
+

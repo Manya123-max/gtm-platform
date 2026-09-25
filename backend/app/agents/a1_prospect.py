@@ -58,7 +58,7 @@ class ProspectAgent:
         contacts_to_save = qualified if qualified else scored
 
         save_result = await self._save_contacts(
-            contacts_to_save, icp_config.get("user_input_id")
+            contacts_to_save, icp_config.get("user_input_id"), icp_config.get("user_id")
         )
 
         reason = self._reason(raw_contacts, scored, qualified, save_result, provider_meta)
@@ -649,6 +649,7 @@ class ProspectAgent:
         self,
         contacts: List[Dict[str, Any]],
         user_input_id: Optional[int] = None,
+        user_id: Optional[str] = None,
     ) -> Dict[str, Any]:
         inserted_ids: List[str] = []
         all_existing_emails = await self._get_all_existing_emails()
@@ -692,6 +693,7 @@ class ProspectAgent:
                 source="apollo",
                 apollo_id=apollo_id,
                 user_input_id=user_input_id,
+                user_id=user_id,
             )
             self.db.add(contact)
             await self.db.flush()

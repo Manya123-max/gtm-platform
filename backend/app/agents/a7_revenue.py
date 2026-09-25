@@ -76,6 +76,22 @@ class RevenueAgent:
         self.resend = ResendService()
         self.llm = LLMService()
 
+    async def _resolve_owner_user_id(self) -> Optional[str]:
+        """
+        Stamp the forecast with the owner of the most recently submitted
+        intake session (the platform's 'active user' concept). Legacy rows
+        without a user keep NULL.
+        """
+        from sqlalchemy import select, desc
+        from app.models.models import UserInput
+        result = await self.db.execute(
+            select(UserInput.user_id)
+            .where(UserInput.user_id.isnot(None))
+            .order_by(desc(UserInput.id))
+            .limit(1)
+        )
+        return result.scalar_one_or_none()
+
     async def run(self) -> Dict[str, Any]:
         logger.info("A7 starting predictive revenue forecast")
 
@@ -108,6 +124,7 @@ class RevenueAgent:
             recommended_lever=constraint.get("lever"),
             stage_conversion_rates=conversion_rates,
             stage_velocity_days=velocity,
+            user_id=await self._resolve_owner_user_id(),
             calculated_at=datetime.utcnow(),
         )
         self.db.add(forecast_record)

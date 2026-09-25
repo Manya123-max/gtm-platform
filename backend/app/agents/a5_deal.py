@@ -1267,6 +1267,94 @@ Return ONLY valid JSON. Do not write markdown blocks or text wrapper."""
         await self.db.commit()
         logger.info("A5: Deal signals updated successfully", deal_id=deal.id)
 
+    async def _resolve_deal_owner_email(
+        self,
+        contact: Optional[Contact] = None,
+        attendee_emails: Optional[List[str]] = None,
+    ) -> Optional[str]:
+        """
+        Dynamically resolves the Deal Owner email from the authenticated user context.
+        Priority:
+        1. If attendee_emails are provided from the call transcript (e.g. Fireflies),
+           check if any attendee matches an active registered User in the platform.
+        2. If contact is linked to a user (contact.user_id), look up that User's email.
+        3. If contact is linked to a user_input (contact.user_input_id), look up the User's email for that intake form.
+        4. Look up the user who submitted the most recent UserInput session.
+        5. Look up the most recently registered active User in the database.
+        6. Explicit configured environment fallback (settings.DEAL_OWNER_EMAIL or settings.NOTIFICATION_EMAIL).
+        7. If none found, log a warning and return None (never invent placeholder fallbacks).
+        """
+        from app.models.models import User, UserInput
+
+        # 1. Check if any attendee in the meeting transcript is an active registered platform user (e.g. rep on the call)
+        if attendee_emails:
+            clean_emails = [e.strip().lower() for e in attendee_emails if e and "@" in e]
+            if clean_emails:
+                res = await self.db.execute(
+                    select(User.email).where(
+                        User.email.in_(clean_emails),
+                        User.is_active == True,
+                    ).limit(1)
+                )
+                user_email = res.scalar_one_or_none()
+                if user_email:
+                    logger.info("A5: Resolved deal owner from call attendee", email=user_email)
+                    return user_email
+
+        # 2. Check if contact is owned by a specific user
+        if contact and getattr(contact, "user_id", None):
+            res = await self.db.execute(
+                select(User.email).where(User.id == contact.user_id, User.is_active == True)
+            )
+            user_email = res.scalar_one_or_none()
+            if user_email:
+                logger.info("A5: Resolved deal owner from contact.user_id", email=user_email)
+                return user_email
+
+        # 3. Check if contact is associated with a user_input that has an owner
+        if contact and getattr(contact, "user_input_id", None):
+            res = await self.db.execute(
+                select(User.email)
+                .join(UserInput, UserInput.user_id == User.id)
+                .where(UserInput.id == contact.user_input_id, User.is_active == True)
+            )
+            user_email = res.scalar_one_or_none()
+            if user_email:
+                logger.info("A5: Resolved deal owner from contact.user_input_id", email=user_email)
+                return user_email
+
+        # 4. Check the latest UserInput session that has an owner
+        res = await self.db.execute(
+            select(User.email)
+            .join(UserInput, UserInput.user_id == User.id)
+            .where(User.is_active == True)
+            .order_by(UserInput.id.desc())
+            .limit(1)
+        )
+        user_email = res.scalar_one_or_none()
+        if user_email:
+            logger.info("A5: Resolved deal owner from latest active UserInput", email=user_email)
+            return user_email
+
+        # 5. Check the most recent active User
+        res = await self.db.execute(
+            select(User.email).where(User.is_active == True).order_by(User.created_at.desc()).limit(1)
+        )
+        user_email = res.scalar_one_or_none()
+        if user_email:
+            logger.info("A5: Resolved deal owner from latest active User", email=user_email)
+            return user_email
+
+        # 6. Check environment settings fallback
+        env_fallback = getattr(settings, "DEAL_OWNER_EMAIL", None) or getattr(settings, "NOTIFICATION_EMAIL", None)
+        if env_fallback and env_fallback.strip():
+            logger.info("A5: Resolved deal owner from environment settings", email=env_fallback)
+            return env_fallback.strip()
+
+        # 7. Safe fail: log warning, do not invent placeholder
+        logger.warning("A5: Unable to resolve authenticated deal owner; setting owner_email to None")
+        return None
+
     async def _match_to_deal(
         self, attendees: List[Dict], title: str
     ) -> Tuple[Optional[Deal], Optional[Contact]]:
@@ -1306,7 +1394,7 @@ Return ONLY valid JSON. Do not write markdown blocks or text wrapper."""
                     contact_id=contact.id,
                     stage=DealStage.DISCOVERY,
                     amount=50000.0,
-                    owner_email=getattr(settings, "NOTIFICATION_EMAIL", None) or "sales@example.com",
+                    owner_email=await self._resolve_deal_owner_email(contact=contact, attendee_emails=emails),
                 )
                 self.db.add(new_deal)
                 await self.db.commit()

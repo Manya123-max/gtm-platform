@@ -172,12 +172,10 @@ export default function DealDetailModal({ selectedDeal, onClose, actions = [], a
             </h1>
 
             <div className="flex items-center gap-3 text-xs text-gray-500 mt-1 flex-wrap">
-              {deal.owner_email && (
-                <span className="flex items-center gap-1">
-                  <User size={11} className="text-gray-400" />
-                  <span>Owner: <strong className="text-gray-700">{deal.owner_email}</strong></span>
-                </span>
-              )}
+              <span className="flex items-center gap-1">
+                <User size={11} className="text-gray-400" />
+                <span>Owner: <strong className="text-gray-700">{deal.owner_email || 'Not assigned'}</strong></span>
+              </span>
               <span className="flex items-center gap-1">
                 <Clock size={11} className="text-gray-400" />
                 <span>Stage Age: <strong className="text-gray-700">{deal.days_in_current_stage ?? 0} days</strong></span>

@@ -104,6 +104,10 @@ class Settings(BaseSettings):
     INSTANTLY_CAMPAIGN_ID: str  = ""
 
     # ── Notifications ─────────────────────────────────────────────────────
+    # Deal ownership & notifications
+    DEAL_OWNER_EMAIL:       Optional[str] = None
+    NOTIFICATION_EMAIL:     Optional[str] = None
+
     NOTIFICATION_PROVIDER:  str = "ntfy"
     NTFY_BASE_URL:          str = "https://ntfy.sh"
     NTFY_APPROVAL_TOPIC:    str = ""

@@ -38,22 +38,28 @@ async def _owned_input_ids(db: AsyncSession, user):
 
 
 async def _ensure_owned_input(db: AsyncSession, user, user_input_id: int) -> None:
-    """404 if the requested session is not owned by the current user."""
+    """404 if the requested session is not owned by the current user (allows legacy unowned sessions)."""
     if user is None or user_input_id is None:
         return
     row = await db.get(UserInput, user_input_id)
-    if not row or row.user_id != user.id:
+    if not row or (row.user_id is not None and row.user_id != user.id):
         raise HTTPException(status_code=404, detail="Session not found")
 
 
 def _own_contact_ids_q(user):
-    """Subquery: contact ids owned by the user."""
-    return select(Contact.id).where(Contact.user_id == user.id)
+    """Subquery: contact ids owned by the user or legacy pre-auth contacts."""
+    return select(Contact.id).where(or_(Contact.user_id == user.id, Contact.user_id.is_(None)))
 
 
 def _own_deal_ids_q(user):
-    """Subquery: deal ids whose contact is owned by the user."""
-    return select(Deal.id).where(Deal.contact_id.in_(_own_contact_ids_q(user)))
+    """Subquery: deal ids owned by user, unassigned legacy deals, or linked to user's contacts."""
+    return select(Deal.id).where(
+        or_(
+            Deal.contact_id.in_(_own_contact_ids_q(user)),
+            Deal.contact_id.is_(None),
+            Deal.owner_email == getattr(user, "email", None),
+        )
+    )
 
 
 # ── Pydantic response models ───────────────────────────────────────────────
@@ -542,7 +548,13 @@ async def get_deal(deal_id: str, current_user=Depends(get_current_user), db: Asy
         .where(Deal.id == deal_id)
     )
     if current_user is not None:
-        stmt = stmt.where(Deal.contact_id.in_(_own_contact_ids_q(current_user)))
+        stmt = stmt.where(
+            or_(
+                Deal.contact_id.in_(_own_contact_ids_q(current_user)),
+                Deal.contact_id.is_(None),
+                Deal.owner_email == current_user.email,
+            )
+        )
     result = await db.execute(stmt)
     deal = result.scalar_one_or_none()
     if not deal:

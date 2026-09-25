@@ -116,7 +116,6 @@ export default function Layout() {
       navigate(notif.action_url)
     }
   }
-  }
 
   return (
     <div

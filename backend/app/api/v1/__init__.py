@@ -1262,7 +1262,6 @@ async def submit_input(data: InputData, current_user=Depends(get_current_user), 
             "candidate_pool_size": getattr(settings, "APOLLO_CANDIDATE_POOL_SIZE", 150),
             "include_similar_titles": getattr(settings, "APOLLO_INCLUDE_SIMILAR_TITLES", False),
         }
-        }
         normalized = normalize_icp_input(raw_icp_dict)
         payload = {"icp_config": normalized.to_dict()}
 

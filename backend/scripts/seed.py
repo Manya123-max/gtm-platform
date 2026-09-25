@@ -75,7 +75,7 @@ async def seed():
                 email_valid=True, email_verified=True,
                 verified_at=datetime.utcnow() - timedelta(days=random.randint(1, 30)),
                 enriched_at=datetime.utcnow() - timedelta(days=random.randint(1, 14)),
-                readiness_score=random.uniform(10, 75),
+                readiness_score=0.0,
                 source="apollo",
             )
             db.add(c)

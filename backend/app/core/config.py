@@ -117,7 +117,7 @@ class Settings(BaseSettings):
 
     AGENT3_TEST_MODE: bool = False
     TEST_MODE_ICP_SCORE_THRESHOLD: int = 60
-    TEST_EMAIL_OVERRIDE: Optional[str] = "ibmsuriya@gmail.com"
+    TEST_EMAIL_OVERRIDE: Optional[str] = "shreelakshmipp2003@gmail.com"
 
     # ── SMTP / Gmail ──────────────────────────────────────────────────────
     SMTP_HOST: str = "smtp.gmail.com"

@@ -11,8 +11,18 @@ export default function ContactDetail() {
   const [selectedSignal, setSelectedSignal] = useState(null)
   const [selectedDeal, setSelectedDeal] = useState(null)
 
-  const { data: contact, isLoading } = useQuery({ queryKey: ['contact', id], queryFn: () => fetchContact(id) })
-  const { data: thread = [] } = useQuery({ queryKey: ['thread', id], queryFn: () => fetchThread(id) })
+  const { data: contact, isLoading } = useQuery({
+    queryKey: ['contact', id],
+    queryFn: () => fetchContact(id),
+    refetchInterval: 10_000,
+    refetchOnWindowFocus: true,
+  })
+  const { data: thread = [] } = useQuery({
+    queryKey: ['thread', id],
+    queryFn: () => fetchThread(id),
+    refetchInterval: 5_000,
+    refetchOnWindowFocus: true,
+  })
   const { data: signals = [] } = useQuery({ queryKey: ['signals', id], queryFn: () => fetchSignals(id) })
   const { data: deals = [] } = useQuery({ queryKey: ['deals', 'contact', id], queryFn: () => fetchDeals({ contact_id: id }) })
 
@@ -217,6 +227,7 @@ export default function ContactDetail() {
                   const gmailComposeUrl = `https://mail.google.com/mail/?view=cm&fs=1&to=${encodeURIComponent(contact.email)}&su=${encodeURIComponent(`Re: Discussion with ${contact.company || 'Galvin Technologies'}`)}&body=${encodeURIComponent(t.draft_content || '')}`
 
                   return (
+                    <div key={t.id || idx} className="space-y-3 pt-3 border-t border-gray-200/60 first:border-0 first:pt-0">
                       {isOutbound ? (
                         /* ── Outbound (Sent) Message Bubble — GREEN ── */
                         <div className="flex items-start gap-2.5 max-w-[90%] ml-auto flex-row-reverse">

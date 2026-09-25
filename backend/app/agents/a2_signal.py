@@ -14,16 +14,21 @@ Sources for this deployment:
 """
 import asyncio
 import re
+import xml.etree.ElementTree as ET
 from datetime import datetime, timedelta
 from typing import Any, Dict, List, Optional
 
+import hashlib
 import httpx
 import structlog
 from sqlalchemy import and_, or_, func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.config import settings
-from app.models.models import Contact, FunnelEvent, SignalConversionRegistry, SignalEvent, SignalType
+from app.models.models import (
+    Contact, FunnelEvent, SignalConversionRegistry, SignalEvent, SignalType,
+    Notification, ContactUserInputAssociation, UserInput
+)
 
 logger = structlog.get_logger()
 
@@ -153,6 +158,8 @@ class SignalAgent:
             self._check_currents(contact, weights),
             self._check_news(contact, weights),
             self._check_apify(contact, weights),
+            self._check_google_news_rss(contact, weights),
+            self._check_website_tech_stack(contact, weights),
         ]
 
         signals: List[Dict[str, Any]] = []
@@ -842,6 +849,191 @@ class SignalAgent:
             logger.warning("Apify check failed", company=company, error=str(exc))
             return []
 
+    async def _check_google_news_rss(self, contact: Contact, weights: Dict[SignalType, float]) -> List[Dict[str, Any]]:
+        """Free, no-API-key Google News RSS scanner for 90-day press releases, funding, and hiring news."""
+        company = self._clean_company_name(contact.company)
+        if not company:
+            return []
+
+        try:
+            # Query Google News RSS for company with high-intent keywords over last 90 days
+            query = f'"{company}" (funding OR expansion OR hired OR partnership OR launch OR earnings OR "series") when:90d'
+            async with httpx.AsyncClient(timeout=15, follow_redirects=True) as client:
+                response = await client.get(
+                    "https://news.google.com/rss/search",
+                    params={
+                        "q": query,
+                        "hl": "en-US",
+                        "gl": "US",
+                        "ceid": "US:en",
+                    },
+                    headers={
+                        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+                    }
+                )
+                if response.status_code != 200:
+                    return []
+
+            root = ET.fromstring(response.text)
+            items = root.findall(".//item")
+            if not items:
+                return []
+
+            signals: List[Dict[str, Any]] = []
+            detected_types = set()
+
+            for item in items[:15]:
+                title_elem = item.find("title")
+                title = title_elem.text if title_elem is not None and title_elem.text else ""
+
+                if not self._is_headline_relevant(title, company, contact.company):
+                    continue
+
+                desc_elem = item.find("description")
+                description = desc_elem.text if desc_elem is not None and desc_elem.text else ""
+                link_elem = item.find("link")
+                article_url = link_elem.text if link_elem is not None and link_elem.text else ""
+
+                article_text = f"{title} {description}".lower()
+
+                if SignalType.FUNDING_ROUND not in detected_types:
+                    if _has_keyword(article_text, ["funding", "raised", "series a", "series b", "series c", "investment", "venture", "round", "ipo", "capital"]):
+                        signals.append({
+                            "contact_id": contact.id,
+                            "signal_type": SignalType.FUNDING_ROUND,
+                            "signal_source": "google_news_rss",
+                            "confidence": weights.get(SignalType.FUNDING_ROUND, DEFAULT_WEIGHTS[SignalType.FUNDING_ROUND]),
+                            "raw_data": {
+                                "headline": title,
+                                "description": description[:300],
+                                "url": article_url,
+                                "source": "Google News RSS",
+                            },
+                        })
+                        detected_types.add(SignalType.FUNDING_ROUND)
+
+                if SignalType.NEWS_EXPANSION not in detected_types:
+                    if _has_keyword(article_text, ["expansion", "new market", "launch", "opens office", "acquires", "acquisition", "partnership", "collaboration", "growth", "unveils new product", "launches new platform"]):
+                        signals.append({
+                            "contact_id": contact.id,
+                            "signal_type": SignalType.NEWS_EXPANSION,
+                            "signal_source": "google_news_rss",
+                            "confidence": weights.get(SignalType.NEWS_EXPANSION, DEFAULT_WEIGHTS[SignalType.NEWS_EXPANSION]),
+                            "raw_data": {
+                                "headline": title,
+                                "description": description[:300],
+                                "url": article_url,
+                                "source": "Google News RSS",
+                            },
+                        })
+                        detected_types.add(SignalType.NEWS_EXPANSION)
+
+                if SignalType.EARNINGS_CALL not in detected_types:
+                    if _has_keyword(article_text, ["earnings call", "quarterly results", "financial report", "q1 results", "q2 results", "q3 results", "q4 results", "net income", "revenue reports", "financial results"]):
+                        signals.append({
+                            "contact_id": contact.id,
+                            "signal_type": SignalType.EARNINGS_CALL,
+                            "signal_source": "google_news_rss",
+                            "confidence": weights.get(SignalType.EARNINGS_CALL, DEFAULT_WEIGHTS[SignalType.EARNINGS_CALL]),
+                            "raw_data": {
+                                "headline": title,
+                                "description": description[:300],
+                                "url": article_url,
+                                "source": "Google News RSS",
+                            },
+                        })
+                        detected_types.add(SignalType.EARNINGS_CALL)
+
+                if SignalType.NEW_HIRE not in detected_types:
+                    if _has_keyword(article_text, ["appoints", "joins as", "hires new", "c-level", "chief executive", "cfo", "cto", "vice president", "executive team", "executive appointment", "welcomes new"]):
+                        signals.append({
+                            "contact_id": contact.id,
+                            "signal_type": SignalType.NEW_HIRE,
+                            "signal_source": "google_news_rss",
+                            "confidence": weights.get(SignalType.NEW_HIRE, DEFAULT_WEIGHTS[SignalType.NEW_HIRE]),
+                            "raw_data": {
+                                "headline": title,
+                                "description": description[:300],
+                                "url": article_url,
+                                "source": "Google News RSS",
+                            },
+                        })
+                        detected_types.add(SignalType.NEW_HIRE)
+
+            return signals
+        except Exception as exc:
+            logger.warning("Google News RSS check failed", company=company, error=str(exc))
+            return []
+
+    async def _check_website_tech_stack(self, contact: Contact, weights: Dict[SignalType, float]) -> List[Dict[str, Any]]:
+        """Direct website HTML fingerprinting for enterprise CRM, sales, and analytics stack detection."""
+        domain = self._get_company_domain(contact)
+        if not domain:
+            return []
+
+        TECH_SIGNATURES = {
+            "Salesforce": ["salesforce.com", "force.com", "pi.pardot.com", "pardot.com"],
+            "HubSpot": ["js.hs-scripts.com", "hs-analytics", "hubspot.com"],
+            "Marketo": ["marketo.net", "munchkin.marketo.net"],
+            "Gong": ["gong.io", "web.gong.io"],
+            "Intercom": ["widget.intercom.io", "intercomcdn.com"],
+            "Drift": ["js.driftt.com"],
+            "Segment": ["cdn.segment.com/analytics.js"],
+            "Google Tag Manager": ["googletagmanager.com/gtm.js"],
+            "Zendesk": ["static.zdassets.com", "ekr.zdassets.com"],
+            "Apollo.io": ["apollo.io", "assets.apollo.io"],
+            "Mixpanel": ["cdn.mxpnl.com"],
+            "Stripe": ["js.stripe.com"],
+            "6sense": ["6sc.co", "6sense.com"],
+            "Demandbase": ["demandbase.com", "tag.demandbase.com"],
+            "ZoomInfo": ["ws.zoominfo.com"],
+        }
+
+        try:
+            target_url = f"https://{domain}"
+            headers = {
+                "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+                "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+            }
+            async with httpx.AsyncClient(timeout=10, follow_redirects=True, verify=False) as client:
+                try:
+                    response = await client.get(target_url, headers=headers)
+                except httpx.RequestError:
+                    response = await client.get(f"http://{domain}", headers=headers)
+
+            if response.status_code != 200:
+                return []
+
+            html_lower = response.text.lower()
+            detected_techs = []
+
+            for tech_name, signatures in TECH_SIGNATURES.items():
+                for sig in signatures:
+                    if sig.lower() in html_lower:
+                        detected_techs.append(tech_name)
+                        break
+
+            if not detected_techs:
+                return []
+
+            primary_techs = ", ".join(detected_techs[:4])
+            return [{
+                "contact_id": contact.id,
+                "signal_type": SignalType.TECH_STACK_CHANGE,
+                "signal_source": "website_fingerprint",
+                "confidence": weights.get(SignalType.TECH_STACK_CHANGE, DEFAULT_WEIGHTS[SignalType.TECH_STACK_CHANGE]),
+                "raw_data": {
+                    "tech_count": len(detected_techs),
+                    "technologies": detected_techs,
+                    "headline": f"Tech stack detected on {domain}: {primary_techs}",
+                    "description": f"Live website fingerprinting identified {len(detected_techs)} enterprise tool(s): {', '.join(detected_techs)}.",
+                    "url": target_url,
+                },
+            }]
+        except Exception as exc:
+            logger.debug("Website tech stack fingerprinting skipped or failed", domain=domain, error=str(exc))
+            return []
+
     async def _save_signals(self, signals: List[Dict[str, Any]]) -> int:
         saved = 0
         for signal in signals:
@@ -855,7 +1047,7 @@ class SignalAgent:
                     )
                 )
             )
-            if existing_time.scalar_one_or_none():
+            if existing_time.scalars().first():
                 continue
 
             # 2. Article-based deduplication (same headline or url regardless of time window)
@@ -878,18 +1070,67 @@ class SignalAgent:
                         )
                     )
                 )
-                if existing_article.scalar_one_or_none():
+                if existing_article.scalars().first():
                     continue
 
-            self.db.add(SignalEvent(
+            sig_event = SignalEvent(
                 contact_id=signal["contact_id"],
                 signal_type=signal["signal_type"].value,
                 signal_source=signal["signal_source"],
                 confidence=signal["confidence"],
                 conversion_weight=signal["confidence"],
                 raw_data=signal.get("raw_data"),
-            ))
+            )
+            self.db.add(sig_event)
+            await self.db.flush()
             saved += 1
+
+            # Create new_signal notification ONLY if contact belongs to active search
+            try:
+                active_user_input_id = await self.db.scalar(
+                    select(UserInput.id).order_by(UserInput.id.desc()).limit(1)
+                )
+                if active_user_input_id:
+                    contact = await self.db.get(Contact, signal["contact_id"])
+                    is_in_active_search = False
+                    if contact and contact.user_input_id == active_user_input_id:
+                        is_in_active_search = True
+                    else:
+                        assoc_check = await self.db.scalar(
+                            select(ContactUserInputAssociation.contact_id).where(
+                                ContactUserInputAssociation.contact_id == signal["contact_id"],
+                                ContactUserInputAssociation.user_input_id == active_user_input_id,
+                            )
+                        )
+                        if assoc_check:
+                            is_in_active_search = True
+
+                    if is_in_active_search and contact:
+                        # Strengthened reference_id for notification dedup
+                        identifier = (url or headline or str(sig_event.id))
+                        ref_hash = hashlib.sha256(str(identifier).encode()).hexdigest()[:16]
+                        ref_id = f"signal_{signal['contact_id']}_{signal['signal_type'].value}_{ref_hash}"
+
+                        existing_notif = await self.db.execute(
+                            select(Notification.id).where(Notification.reference_id == ref_id)
+                        )
+                        if not existing_notif.scalar_one_or_none():
+                            c_name = contact.first_name or "Prospect"
+                            comp_name = contact.company or "Company"
+                            sig_label = signal["signal_type"].value.replace("_", " ")
+                            notif = Notification(
+                                type="new_signal",
+                                contact_id=contact.id,
+                                user_input_id=active_user_input_id,
+                                message=f"New {sig_label} signal for {c_name} at {comp_name}",
+                                action_url=f"/contacts/{contact.id}",
+                                reference_id=ref_id,
+                                expires_at=datetime.utcnow() + timedelta(days=30),
+                            )
+                            self.db.add(notif)
+                            logger.info("A2: Created new_signal notification", contact_id=contact.id, user_input_id=active_user_input_id, ref_id=ref_id)
+            except Exception as notif_err:
+                logger.warning("A2: Failed to create signal notification", error=str(notif_err))
 
         await self.db.commit()
         return saved
@@ -981,16 +1222,8 @@ class SignalAgent:
     def _result_reason(self, contacts: List[Contact], signals: List[Dict[str, Any]], saved: int) -> str:
         if not contacts:
             return "No eligible contacts found for signal scanning"
-        any_source_configured = any([
-            settings.ADZUNA_APP_ID,
-            settings.PREDICTLEADS_API_KEY,
-            settings.CURRENTS_API_KEY,
-            settings.NEWS_API_KEY,
-        ])
-        if not any_source_configured:
-            return "A2 skipped external checks because no signal source (Adzuna / PredictLeads / Currents / NewsAPI) is configured"
         if not signals:
-            return "No qualifying buying signals found across configured sources"
+            return "No qualifying buying signals found across configured sources (including Google News RSS and Website Fingerprinting)"
         if saved == 0:
             return "Signals were detected but all were duplicates inside the dedupe window"
         return f"Saved {saved} new buying signal(s)"

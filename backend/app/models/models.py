@@ -573,3 +573,26 @@ class UserInput(Base):
     target_keywords: Mapped[Optional[str]]   = mapped_column(Text, nullable=True)
     target_job_titles: Mapped[str]     = mapped_column(Text, nullable=False)
     created_at: Mapped[datetime]       = mapped_column(DateTime, default=datetime.utcnow)
+
+
+class Notification(Base):
+    """
+    In-app notifications for genuine events: inbound replies and new buying signals.
+    Scoped to user_input_id (search context).
+    """
+    __tablename__ = "notifications"
+
+    id: Mapped[str] = mapped_column(UUID(as_uuid=False), primary_key=True, default=generate_uuid)
+    type: Mapped[str] = mapped_column(String(50), nullable=False, index=True)  # "reply_received" | "new_signal"
+    contact_id: Mapped[str] = mapped_column(UUID(as_uuid=False), ForeignKey("contacts.id", ondelete="CASCADE"), nullable=False, index=True)
+    user_input_id: Mapped[int] = mapped_column(Integer, ForeignKey("user_inputs.id", ondelete="CASCADE"), nullable=False, index=True)
+    message: Mapped[str] = mapped_column(Text, nullable=False)
+    action_url: Mapped[Optional[str]] = mapped_column(String(255), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow, index=True)
+    read_at: Mapped[Optional[datetime]] = mapped_column(DateTime, nullable=True, index=True)
+    expires_at: Mapped[Optional[datetime]] = mapped_column(DateTime, nullable=True, index=True)
+    reference_id: Mapped[Optional[str]] = mapped_column(String(150), nullable=True, unique=True, index=True)
+
+    contact: Mapped["Contact"] = relationship("Contact")
+    user_input: Mapped["UserInput"] = relationship("UserInput")
+

@@ -114,3 +114,8 @@ export default api
 export const fetchAgentSchedules = () => unwrap(api.get('/agents/schedule'))
 export const updateAgentSchedule = (agent, enabled, cron = null) =>
   unwrap(api.post('/agents/schedule', { agent, enabled, cron }))
+
+export const fetchNotifications = (user_input_id) =>
+  unwrap(api.get('/notifications', { params: user_input_id ? { user_input_id } : {} }))
+export const markNotificationRead = id =>
+  unwrap(api.post(`/notifications/${id}/read`))

@@ -807,7 +807,7 @@ class OutreachAgent:
                     ContactUserInputAssociation.user_input_id == active_session_id
                 )
             )
-            if not assoc_check.scalar_one_or_none():
+            if not assoc_check.scalars().first() and contact.user_input_id != active_session_id:
                 skip_reasons["inactive_session"] += 1
                 logger.info(
                     "Outreach skipped: contact does not belong to active session",
@@ -1042,13 +1042,13 @@ class OutreachAgent:
         if active_session_id is None:
             return []
 
+        assoc_ids_q = select(ContactUserInputAssociation.contact_id).where(ContactUserInputAssociation.user_input_id == active_session_id)
         result = await self.db.execute(
             select(Contact, SignalEvent)
             .join(SignalEvent, SignalEvent.contact_id == Contact.id)
-            .join(ContactUserInputAssociation, Contact.id == ContactUserInputAssociation.contact_id)
             .where(
                 and_(
-                    ContactUserInputAssociation.user_input_id == active_session_id,
+                    or_(Contact.user_input_id == active_session_id, Contact.id.in_(assoc_ids_q)),
                     Contact.do_not_contact == False,
                     SignalEvent.confidence >= settings.SIGNAL_SCORE_THRESHOLD / 100,
                     SignalEvent.processed == False,

@@ -7,7 +7,7 @@ from uuid import UUID
 
 from fastapi import APIRouter, Depends, HTTPException, Query, BackgroundTasks
 from sqlalchemy.ext.asyncio import AsyncSession
-from sqlalchemy import select, and_, func, desc, asc
+from sqlalchemy import select, and_, or_, func, desc, asc
 from sqlalchemy.orm import selectinload
 from pydantic import BaseModel
 
@@ -18,7 +18,7 @@ from app.models.models import (
     Deal, DealStageHistory, FunnelEvent, GeneratedContent, RevenueForecast,
     PendingAction, ActionStatus, SignalConversionRegistry,
     PromptVariant, WorkflowRun, AgentSchedule, OutreachDraft,
-    ContactUserInputAssociation
+    ContactUserInputAssociation, Notification
 )
 
 router = APIRouter()
@@ -45,6 +45,26 @@ class ContactOut(BaseModel):
     created_at: datetime
     class Config:
         from_attributes = True
+
+
+class NotificationOut(BaseModel):
+    id: str
+    type: str
+    message: str
+    contact_id: str
+    user_input_id: int
+    action_url: Optional[str] = None
+    created_at: datetime
+    read_at: Optional[datetime] = None
+    expires_at: Optional[datetime] = None
+
+    class Config:
+        from_attributes = True
+
+
+class NotificationsResponse(BaseModel):
+    notifications: List[NotificationOut]
+    unread_count: int
 
 
 class DealContactOut(BaseModel):
@@ -174,30 +194,28 @@ async def get_dashboard_overview(
 ):
     thirty_days_ago = datetime.utcnow() - timedelta(days=30)
 
-    # Base contact filter
-    contact_filter = [Contact.do_not_contact == False]
+    from app.models.models import UserInput
+    if user_input_id is None:
+        user_input_id = await db.scalar(select(UserInput.id).order_by(UserInput.id.desc()).limit(1))
+
+    # Base contact filter (strictly exclude seeded mock data)
+    contact_filter = [Contact.do_not_contact == False, Contact.source != "seeded"]
     if user_input_id is not None:
+        assoc_ids_q = select(ContactUserInputAssociation.contact_id).where(ContactUserInputAssociation.user_input_id == user_input_id)
+        user_filter = or_(Contact.user_input_id == user_input_id, Contact.id.in_(assoc_ids_q))
         total_contacts = await db.scalar(
             select(func.count(Contact.id))
-            .join(ContactUserInputAssociation, Contact.id == ContactUserInputAssociation.contact_id)
-            .where(and_(*contact_filter, ContactUserInputAssociation.user_input_id == user_input_id))
+            .where(and_(*contact_filter, user_filter))
         ) or 0
         qualified = await db.scalar(
             select(func.count(Contact.id))
-            .join(ContactUserInputAssociation, Contact.id == ContactUserInputAssociation.contact_id)
-            .where(and_(*contact_filter, ContactUserInputAssociation.user_input_id == user_input_id, Contact.icp_score >= settings.ICP_SCORE_THRESHOLD))
+            .where(and_(*contact_filter, user_filter, Contact.icp_score >= settings.ICP_SCORE_THRESHOLD))
         ) or 0
-        contact_ids_q = select(ContactUserInputAssociation.contact_id).where(ContactUserInputAssociation.user_input_id == user_input_id)
+        contact_ids_q = select(Contact.id).where(and_(*contact_filter, user_filter))
     else:
-        total_contacts = await db.scalar(
-            select(func.count(Contact.id)).where(and_(*contact_filter))
-        ) or 0
-        qualified = await db.scalar(
-            select(func.count(Contact.id)).where(
-                and_(*contact_filter, Contact.icp_score >= settings.ICP_SCORE_THRESHOLD)
-            )
-        ) or 0
-        contact_ids_q = select(Contact.id).where(and_(*contact_filter))
+        total_contacts = 0
+        qualified = 0
+        contact_ids_q = select(Contact.id).where(Contact.id == "00000000-0000-0000-0000-000000000000")
     active_signals = await db.scalar(
         select(func.count(SignalEvent.id)).where(
             and_(SignalEvent.processed == False,
@@ -272,9 +290,25 @@ async def list_contacts(
     user_input_id: Optional[int] = None,
     db: AsyncSession = Depends(get_db),
 ):
-    q = select(Contact).where(Contact.do_not_contact == do_not_contact)
-    if user_input_id is not None:
-        q = q.join(ContactUserInputAssociation, Contact.id == ContactUserInputAssociation.contact_id).where(ContactUserInputAssociation.user_input_id == user_input_id)
+    from app.models.models import UserInput
+    # 1. Default to the most recent search if user_input_id is not passed
+    if user_input_id is None:
+        user_input_id = await db.scalar(select(UserInput.id).order_by(UserInput.id.desc()).limit(1))
+
+    # If no searches exist in the database, return empty list
+    if user_input_id is None:
+        return []
+
+    # 2. Exclude seeded mock contacts
+    q = select(Contact).where(
+        Contact.do_not_contact == do_not_contact,
+        Contact.source != "seeded",
+    )
+
+    # 3. Scope strictly to the specified search
+    assoc_ids_q = select(ContactUserInputAssociation.contact_id).where(ContactUserInputAssociation.user_input_id == user_input_id)
+    q = q.where(or_(Contact.user_input_id == user_input_id, Contact.id.in_(assoc_ids_q)))
+
     if min_score is not None:
         q = q.where(Contact.icp_score >= min_score)
     if has_signal:
@@ -288,11 +322,8 @@ async def list_contacts(
         q = q.order_by(order_func(Contact.created_at), desc(Contact.icp_score))
     q = q.offset(skip).limit(limit)
     result = await db.execute(q)
-    contacts = result.scalars().all()
-    if user_input_id is not None:
-        for c in contacts:
-            c.user_input_id = user_input_id
-    return contacts
+    return result.scalars().all()
+
 
 
 @router.get("/contacts/{contact_id}", response_model=ContactOut)
@@ -341,8 +372,9 @@ async def list_deals(
     if contact_id is not None:
         q = q.where(Deal.contact_id == contact_id)
     if user_input_id is not None:
-        contact_ids_q = select(ContactUserInputAssociation.contact_id).where(ContactUserInputAssociation.user_input_id == user_input_id)
-        q = q.where((Deal.contact_id.in_(contact_ids_q)) | (Deal.contact_id.is_(None)))
+        assoc_ids_q = select(ContactUserInputAssociation.contact_id).where(ContactUserInputAssociation.user_input_id == user_input_id)
+        matching_contacts = select(Contact.id).where(or_(Contact.user_input_id == user_input_id, Contact.id.in_(assoc_ids_q)))
+        q = q.where((Deal.contact_id.in_(matching_contacts)) | (Deal.contact_id.is_(None)))
     if stage:
         q = q.where(Deal.stage == stage)
     if min_risk is not None:
@@ -359,8 +391,9 @@ async def get_pipeline_summary(
 ):
     where_clauses = [Deal.outcome.is_(None)]
     if user_input_id is not None:
-        contact_ids_q = select(ContactUserInputAssociation.contact_id).where(ContactUserInputAssociation.user_input_id == user_input_id)
-        where_clauses.append((Deal.contact_id.in_(contact_ids_q)) | (Deal.contact_id.is_(None)))
+        assoc_ids_q = select(ContactUserInputAssociation.contact_id).where(ContactUserInputAssociation.user_input_id == user_input_id)
+        matching_contacts = select(Contact.id).where(or_(Contact.user_input_id == user_input_id, Contact.id.in_(assoc_ids_q)))
+        where_clauses.append((Deal.contact_id.in_(matching_contacts)) | (Deal.contact_id.is_(None)))
     result = await db.execute(
         select(Deal.stage, func.count(Deal.id).label("count"),
                func.sum(Deal.amount).label("value"),
@@ -550,12 +583,12 @@ async def list_content(
                     industries.add(val.lower())
                     
         # 2. Fetch distinct industries from active contacts associated with this user_input_id
+        assoc_ids_q = select(ContactUserInputAssociation.contact_id).where(ContactUserInputAssociation.user_input_id == user_input_id)
         contact_res = await db.execute(
             select(Contact.industry)
-            .join(ContactUserInputAssociation, Contact.id == ContactUserInputAssociation.contact_id)
             .where(
                 and_(
-                    ContactUserInputAssociation.user_input_id == user_input_id,
+                    or_(Contact.user_input_id == user_input_id, Contact.id.in_(assoc_ids_q)),
                     Contact.industry.isnot(None),
                     Contact.industry != ""
                 )
@@ -831,7 +864,9 @@ async def get_outreach_drafts(
              OutreachLog.sent_at >= datetime.utcnow() - timedelta(days=7))
     )
     if user_input_id is not None:
-        q = q.join(Contact).join(ContactUserInputAssociation, Contact.id == ContactUserInputAssociation.contact_id).where(ContactUserInputAssociation.user_input_id == user_input_id)
+        assoc_ids_q = select(ContactUserInputAssociation.contact_id).where(ContactUserInputAssociation.user_input_id == user_input_id)
+        matching_contacts = select(Contact.id).where(or_(Contact.user_input_id == user_input_id, Contact.id.in_(assoc_ids_q)))
+        q = q.where(OutreachLog.contact_id.in_(matching_contacts))
     result = await db.execute(q.order_by(desc(OutreachLog.sent_at)).limit(50))
     return result.scalars().all()
 
@@ -1024,18 +1059,21 @@ async def submit_input(data: InputData, db: AsyncSession = Depends(get_db)):
 
         keyword_list = []
         target_kw = getattr(data, "target_keywords", getattr(data, "keywords", None))
-        our_serv = getattr(data, "our_services", getattr(data, "services", None))
         if target_kw:
-           keyword_list.extend([k.strip() for k in target_kw.split(",") if k.strip()])
-        if our_serv:
-           keyword_list.extend([s.strip() for s in our_serv.split(",") if s.strip()])
+            keyword_list.extend([k.strip() for k in target_kw.split(",") if k.strip()])
+        industry_tag_ids, industry_kw_fallback = resolve_industries(getattr(data, "target_industries", "") or "")
+        if industry_kw_fallback:
+            keyword_list.extend(industry_kw_fallback)
 
         payload = {
             "icp_config": {
                 "titles": titles,
                 "geographies": geographies,
+                "organization_locations": geographies,
                 "employee_ranges": employee_ranges,
+                "industry_tag_ids": industry_tag_ids if industry_tag_ids else None,
                 "keywords": " ".join(keyword_list) if keyword_list else None,
+                "org_keyword_tags": keyword_list if keyword_list else None,
                 # company_name intentionally omitted — that's YOUR company, not the target
                 "threshold": settings.ICP_SCORE_THRESHOLD,
                 "limit": 25,
@@ -1089,7 +1127,9 @@ async def get_drafts(
 ):
     q = select(OutreachDraft)
     if user_input_id is not None:
-        q = q.join(Contact).join(ContactUserInputAssociation, Contact.id == ContactUserInputAssociation.contact_id).where(ContactUserInputAssociation.user_input_id == user_input_id)
+        assoc_ids_q = select(ContactUserInputAssociation.contact_id).where(ContactUserInputAssociation.user_input_id == user_input_id)
+        matching_contacts = select(Contact.id).where(or_(Contact.user_input_id == user_input_id, Contact.id.in_(assoc_ids_q)))
+        q = q.where(OutreachDraft.contact_id.in_(matching_contacts))
     result = await db.execute(
         q.order_by(OutreachDraft.created_at.desc())
     )
@@ -1347,4 +1387,82 @@ async def poll_gmail_inbox_endpoint():
     from app.workers.agent_tasks import poll_gmail_inbox
     task = poll_gmail_inbox.apply_async(queue="webhooks")
     return {"status": "queued", "task_id": task.id}
+
+
+# ── Notifications ─────────────────────────────────────────────────────────
+
+@router.get("/notifications", response_model=NotificationsResponse)
+async def list_notifications(
+    user_input_id: Optional[int] = None,
+    unread_only: bool = False,
+    db: AsyncSession = Depends(get_db)
+):
+    """
+    Returns notifications scoped to the currently active or specified search/user_input.
+    Ordered newest first, excluding expired signal notifications.
+    """
+    from app.models.models import UserInput
+
+    if user_input_id is None:
+        user_input_id = await db.scalar(select(UserInput.id).order_by(UserInput.id.desc()).limit(1))
+
+    if user_input_id is None:
+        return {"notifications": [], "unread_count": 0}
+
+    now = datetime.utcnow()
+    not_expired_filter = or_(Notification.expires_at.is_(None), Notification.expires_at > now)
+
+    unread_count = await db.scalar(
+        select(func.count(Notification.id)).where(
+            Notification.user_input_id == user_input_id,
+            Notification.read_at.is_(None),
+            not_expired_filter,
+        )
+    ) or 0
+
+    q = (
+        select(Notification)
+        .where(
+            Notification.user_input_id == user_input_id,
+            not_expired_filter,
+        )
+        .order_by(desc(Notification.created_at))
+        .limit(50)
+    )
+
+    if unread_only:
+        q = q.where(Notification.read_at.is_(None))
+
+    result = await db.execute(q)
+    notifications = result.scalars().all()
+
+    return {
+        "notifications": notifications,
+        "unread_count": unread_count,
+    }
+
+
+@router.post("/notifications/{notification_id}/read")
+async def mark_notification_read(
+    notification_id: str,
+    db: AsyncSession = Depends(get_db)
+):
+    """
+    Marks a single notification as read.
+    """
+    result = await db.execute(select(Notification).where(Notification.id == notification_id))
+    notif = result.scalar_one_or_none()
+    if not notif:
+        raise HTTPException(status_code=404, detail="Notification not found")
+
+    if not notif.read_at:
+        notif.read_at = datetime.utcnow()
+        await db.commit()
+
+    return {
+        "status": "ok",
+        "id": str(notif.id),
+        "read_at": notif.read_at,
+    }
+
 

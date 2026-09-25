@@ -10,6 +10,9 @@ Apollo is the only discovery and enrichment provider. The agent:
 """
 from __future__ import annotations
 
+import hashlib
+import json
+import re
 import secrets
 from datetime import datetime, timedelta
 from typing import Any, Dict, List, Optional, Tuple
@@ -52,29 +55,11 @@ class ProspectAgent:
         scored = await self._score_contacts(raw_contacts)
         threshold = icp_config.get("threshold", settings.ICP_SCORE_THRESHOLD)
         qualified = [c for c in scored if c.get("win_pattern_score", 0) >= threshold]
+        contacts_to_save = qualified if qualified else scored
 
         save_result = await self._save_contacts(
-            qualified, icp_config.get("user_input_id")
+            contacts_to_save, icp_config.get("user_input_id")
         )
-
-        user_input_id = icp_config.get("user_input_id")
-        if (not save_result.get("contact_ids")) and user_input_id is not None:
-            # Fallback: Tag existing database contacts with current session ID so pipeline & UI continue smoothly
-            res = await self.db.execute(select(Contact).where(Contact.user_input_id.is_(None)))
-            fallback_contacts = res.scalars().all()
-            if not fallback_contacts:
-                res = await self.db.execute(select(Contact).limit(25))
-                fallback_contacts = res.scalars().all()
-            for c in fallback_contacts:
-                c.user_input_id = user_input_id
-            await self.db.commit()
-            save_result = {
-                "saved_count": len(fallback_contacts),
-                "updated_count": len(fallback_contacts),
-                "inserted_count": 0,
-                "contact_ids": [str(c.id) for c in fallback_contacts],
-                "inserted_contact_ids": [],
-            }
 
         reason = self._reason(raw_contacts, scored, qualified, save_result, provider_meta)
 
@@ -84,6 +69,7 @@ class ProspectAgent:
                 "provider": "apollo",
                 "discovery_method": provider_meta.get("method"),
                 "provider_page": provider_meta.get("page"),
+                "icp_fingerprint": provider_meta.get("icp_fingerprint"),
                 "raw_count": len(raw_contacts),
                 "scored_count": len(scored),
                 "qualified_count": len(qualified),
@@ -109,6 +95,129 @@ class ProspectAgent:
     # Apollo fetch — filter-before-enrich pipeline
     # ------------------------------------------------------------------
 
+    def _compute_icp_fingerprint(self, icp_config: Dict[str, Any]) -> str:
+        key_dict = {
+            "titles": sorted(icp_config.get("titles") or []),
+            "locations": sorted(icp_config.get("organization_locations") or icp_config.get("geographies") or []),
+            "ranges": sorted(icp_config.get("employee_ranges") or []),
+            "keywords": sorted(icp_config.get("org_keyword_tags") or icp_config.get("keywords") or []),
+            "industries": sorted(icp_config.get("industry_tag_ids") or []),
+        }
+        raw = json.dumps(key_dict, sort_keys=True)
+        return hashlib.sha256(raw.encode()).hexdigest()[:16]
+
+    async def _get_highest_page_for_fingerprint(self, fingerprint: str) -> int:
+        res = await self.db.execute(
+            select(FunnelEvent.event_metadata)
+            .where(
+                FunnelEvent.event_type == "prospect_batch_completed",
+                FunnelEvent.agent_id == "A1",
+            )
+            .order_by(FunnelEvent.timestamp.desc())
+        )
+        events = res.scalars().all()
+        max_page = 0
+        for meta in events:
+            if isinstance(meta, dict) and meta.get("icp_fingerprint") == fingerprint:
+                page = meta.get("provider_page") or 0
+                if page > max_page:
+                    max_page = page
+        return max_page
+
+    def _is_apollo_result_relevant(self, contact: Dict[str, Any], icp_config: Dict[str, Any]) -> bool:
+        target_titles = icp_config.get("titles") or []
+        if isinstance(target_titles, str):
+            target_titles = [t.strip() for t in target_titles.split(",") if t.strip()]
+
+        contact_title = (contact.get("title") or "").strip().lower()
+
+        # Common job title abbreviation expansions
+        ABBR = {
+            "vp": "vice president",
+            "cro": "chief revenue officer",
+            "cto": "chief technology officer",
+            "cio": "chief information officer",
+            "cdo": "chief digital officer",
+            "cmo": "chief marketing officer",
+            "cfo": "chief financial officer",
+            "coo": "chief operating officer",
+            "admin": "administrator",
+            "ops": "operations",
+            "dir": "director",
+            "head": "head",
+        }
+
+        STOPWORDS = {"of", "the", "and", "&", "in", "for", "to", "a", "an", "at"}
+
+        def expand_and_tokenize(text: str) -> set:
+            words = re.findall(r"[a-zA-Z0-9]+", text.lower())
+            tokens = set()
+            for w in words:
+                if w in STOPWORDS:
+                    continue
+                tokens.add(w)
+                if w in ABBR:
+                    tokens.update(ABBR[w].split())
+            return tokens
+
+        if target_titles and contact_title:
+            c_tokens = expand_and_tokenize(contact_title)
+            title_matched = False
+            for tt in target_titles:
+                tt_lower = tt.strip().lower()
+                if tt_lower in contact_title or contact_title in tt_lower:
+                    title_matched = True
+                    break
+                t_tokens = expand_and_tokenize(tt_lower)
+                if not t_tokens:
+                    continue
+                overlap = t_tokens.intersection(c_tokens)
+                if len(overlap) >= len(t_tokens) or len(overlap) >= 2 or (len(t_tokens) == 1 and len(overlap) == 1):
+                    title_matched = True
+                    break
+            if not title_matched:
+                return False
+
+        # Location check
+        raw_loc = icp_config.get("organization_locations") or icp_config.get("geographies") or icp_config.get("target_location")
+        if isinstance(raw_loc, list):
+            raw_loc = " ".join(raw_loc)
+        target_loc = (raw_loc or "").strip().lower()
+        contact_geo = (contact.get("geography") or "").strip().lower()
+
+        if target_loc and contact_geo:
+            us_indicators = {"united states", "usa", "us", "u.s.", "u.s.a."}
+            is_us_target = any(ind in target_loc for ind in us_indicators)
+
+            us_states = {
+                "alabama", "al", "alaska", "ak", "arizona", "az", "arkansas", "ar", "california", "ca",
+                "colorado", "co", "connecticut", "ct", "delaware", "de", "florida", "fl", "georgia", "ga",
+                "hawaii", "hi", "idaho", "id", "illinois", "il", "indiana", "in", "iowa", "ia",
+                "kansas", "ks", "kentucky", "ky", "louisiana", "la", "maine", "me", "maryland", "md",
+                "massachusetts", "ma", "michigan", "mi", "minnesota", "mn", "mississippi", "ms", "missouri", "mo",
+                "montana", "mt", "nebraska", "ne", "nevada", "nv", "new hampshire", "nh", "new jersey", "nj",
+                "new mexico", "nm", "new york", "ny", "north carolina", "nc", "north dakota", "nd", "ohio", "oh",
+                "oklahoma", "ok", "oregon", "or", "pennsylvania", "pa", "rhode island", "ri", "south carolina", "sc",
+                "south dakota", "sd", "tennessee", "tn", "texas", "tx", "utah", "ut", "vermont", "vt",
+                "virginia", "va", "washington", "wa", "west virginia", "wv", "wisconsin", "wi", "wyoming", "wy"
+            }
+
+            contact_tokens = {t.strip() for t in re.split(r"[,/ ]+", contact_geo) if t.strip()}
+            if is_us_target:
+                is_us_contact = (
+                    any(ind in contact_geo for ind in us_indicators) or
+                    bool(contact_tokens.intersection(us_states))
+                )
+                non_us_countries = {"india", "germany", "france", "uk", "united kingdom", "canada", "brazil", "chile", "poland", "zambia", "australia", "spain", "italy", "china", "japan"}
+                has_non_us = bool(contact_tokens.intersection(non_us_countries))
+                if has_non_us and not is_us_contact:
+                    return False
+            else:
+                if target_loc not in contact_geo and not any(t in contact_geo for t in target_loc.split() if len(t) > 2):
+                    return False
+
+        return True
+
     async def _fetch_from_apollo(
         self, icp_config: Dict[str, Any]
     ) -> Tuple[List[Dict[str, Any]], Dict[str, Any]]:
@@ -131,11 +240,24 @@ class ProspectAgent:
             "X-Api-Key": settings.APOLLO_API_KEY,
         }
 
-        # ── Step 1: Initial search (page 1) to learn total_entries ──────────
-        body = self._build_search_body(icp_config, page=1, per_page=100)
+        # ── Step 1: Page progression using ICP fingerprint ───────────────────
+        fingerprint = self._compute_icp_fingerprint(icp_config)
+        requested_page = icp_config.get("page")
+        if requested_page:
+            start_page = int(requested_page)
+        else:
+            highest_page = await self._get_highest_page_for_fingerprint(fingerprint)
+            start_page = (highest_page + 1) if highest_page > 0 else 1
+
+        if start_page > max_pages:
+            start_page = 1
+
+        actual_page = start_page
+        all_existing_apollo_ids = await self._get_all_existing_apollo_ids()
 
         try:
             async with httpx.AsyncClient(timeout=30) as client:
+                body = self._build_search_body(icp_config, page=actual_page, per_page=100)
                 search_resp = await client.post(
                     "https://api.apollo.io/api/v1/mixed_people/api_search",
                     headers=headers,
@@ -147,41 +269,9 @@ class ProspectAgent:
                 pagination = search_data.get("pagination") or {}
                 total_entries = pagination.get("total_entries") or search_data.get("total_entries", 0)
                 people = search_data.get("people") or search_data.get("contacts") or []
+                raw_search_count = len(people)
 
-                # ── Step 2: Decide page strategy based on total_entries ──────
-                requested_page = icp_config.get("page")
-                if requested_page:
-                    actual_page = int(requested_page)
-                elif total_entries < _RANDOM_PAGE_THRESHOLD:
-                    # Small result set — use page 1 (already fetched)
-                    actual_page = 1
-                else:
-                    # Large result set — re-fetch on a random page for variety
-                    actual_page = secrets.randbelow(max_pages) + 1
-                    if actual_page > 1:
-                        body["page"] = actual_page
-                        search_resp2 = await client.post(
-                            "https://api.apollo.io/api/v1/mixed_people/api_search",
-                            headers=headers,
-                            json=body,
-                        )
-                        search_resp2.raise_for_status()
-                        people = (
-                            search_resp2.json().get("people")
-                            or search_resp2.json().get("contacts")
-                            or []
-                        )
-
-                if not people:
-                    return [], {
-                        "provider": "apollo",
-                        "method": "people_search_bulk_match",
-                        "page": actual_page,
-                        "total_entries": total_entries,
-                        "reason": "apollo_people_search_empty",
-                    }
-
-                # ── Step 3: Pre-score stubs (no enrichment yet) ──────────────
+                # Pre-score stubs
                 stub_scored: List[Tuple[float, Dict]] = []
                 for person in people:
                     stub = self._stub_dict(person)
@@ -190,41 +280,55 @@ class ProspectAgent:
 
                 stub_scored.sort(key=lambda x: x[0], reverse=True)
                 top_candidates = [p for _, p in stub_scored[:enrich_limit]]
-                pre_qualified_count = sum(
-                    1 for s, _ in stub_scored[:enrich_limit] if s >= threshold
-                )
 
-                logger.info(
-                    "A1 pre-score complete",
-                    total_stubs=len(people),
-                    pre_qualified=pre_qualified_count,
-                    to_enrich=len(top_candidates),
-                )
-
-                # ── Step 4: Dedupe against recently enriched contacts ─────────
-                apollo_ids = [p["id"] for p in top_candidates if p.get("id")]
-                recently_enriched = await self._get_recently_enriched_apollo_ids(apollo_ids)
+                # Step 4: Cross-search deduplication against ALL existing apollo_ids in DB
                 to_enrich = [
                     p for p in top_candidates
-                    if p.get("id") not in recently_enriched
+                    if p.get("id") and p["id"] not in all_existing_apollo_ids
                 ]
 
-                logger.info(
-                    "A1 dedupe complete",
-                    already_enriched=len(recently_enriched),
-                    to_enrich=len(to_enrich),
-                )
+                # Step 4b: Cap page retry at exactly 1 extra attempt
+                if not to_enrich and actual_page < max_pages:
+                    retry_page = actual_page + 1
+                    logger.info("A1: Page yielded no fresh candidates, attempting 1 extra page retry", retry_page=retry_page)
+                    body["page"] = retry_page
+                    search_resp2 = await client.post(
+                        "https://api.apollo.io/api/v1/mixed_people/api_search",
+                        headers=headers,
+                        json=body,
+                    )
+                    if search_resp2.status_code == 200:
+                        search_data2 = search_resp2.json()
+                        people2 = search_data2.get("people") or search_data2.get("contacts") or []
+                        if people2:
+                            actual_page = retry_page
+                            people = people2
+                            raw_search_count += len(people2)
+                            stub_scored2: List[Tuple[float, Dict]] = []
+                            for person in people2:
+                                stub = self._stub_dict(person)
+                                score, _ = self.scorer.score(stub)
+                                stub_scored2.append((score, person))
+                            stub_scored2.sort(key=lambda x: x[0], reverse=True)
+                            top_candidates = [p for _, p in stub_scored2[:enrich_limit]]
+                            to_enrich = [
+                                p for p in top_candidates
+                                if p.get("id") and p["id"] not in all_existing_apollo_ids
+                            ]
 
                 if not to_enrich:
                     return [], {
                         "provider": "apollo",
                         "method": "people_search_bulk_match",
                         "page": actual_page,
+                        "icp_fingerprint": fingerprint,
                         "total_entries": total_entries,
-                        "reason": "all_candidates_recently_enriched",
+                        "raw_search_count": raw_search_count,
+                        "candidates_after_dedup": 0,
+                        "reason": "all_candidates_already_in_db" if people else "apollo_people_search_empty",
                     }
 
-                # ── Step 5: Bulk match (pay for enrichment) — top N only ─────
+                # Step 5: Bulk match (pay for enrichment) — top N only
                 enriched_people = await self._bulk_match(client, headers, to_enrich)
 
                 if not enriched_people:
@@ -232,16 +336,30 @@ class ProspectAgent:
                         "provider": "apollo",
                         "method": "people_search_bulk_match",
                         "page": actual_page,
+                        "icp_fingerprint": fingerprint,
                         "total_entries": total_entries,
+                        "raw_search_count": raw_search_count,
+                        "candidates_after_dedup": len(to_enrich),
                         "reason": "apollo_bulk_match_no_results",
                     }
 
-                # ── Step 6: Parse + conditional org enrich ───────────────────
+                # Step 6: Parse + Relevance Filter + conditional org enrich
                 contacts: List[Dict[str, Any]] = []
+                relevance_filtered_count = 0
                 for person in enriched_people:
                     if not person.get("email"):
                         continue
                     contact = self._parse_apollo_contact(person)
+
+                    # Defensive relevance check on title and location
+                    if not self._is_apollo_result_relevant(contact, icp_config):
+                        relevance_filtered_count += 1
+                        logger.info(
+                            "A1: Prospect dropped by relevance check",
+                            title=contact.get("title"),
+                            geo=contact.get("geography"),
+                        )
+                        continue
 
                     # Org enrich: fire only when key firmographic fields are blank
                     if (
@@ -258,14 +376,21 @@ class ProspectAgent:
 
                     contacts.append(contact)
 
+                pre_qualified_count = sum(
+                    1 for c in contacts if c.get("win_pattern_score", 0) >= threshold
+                )
+
                 return contacts, {
                     "provider": "apollo",
                     "method": "people_search_bulk_match",
                     "page": actual_page,
+                    "icp_fingerprint": fingerprint,
                     "total_entries": total_entries,
-                    "pre_qualified_count": pre_qualified_count,
-                    "deduped_count": len(recently_enriched),
+                    "raw_search_count": raw_search_count,
+                    "candidates_after_dedup": len(to_enrich),
                     "enriched_count": len(enriched_people),
+                    "relevance_filtered_count": relevance_filtered_count,
+                    "pre_qualified_count": pre_qualified_count,
                     "reason": "apollo_contacts_found" if contacts else "apollo_bulk_match_no_emails",
                 }
 
@@ -316,9 +441,11 @@ class ProspectAgent:
         if icp_config.get("titles"):
             body["person_titles"] = icp_config["titles"]
 
-        if icp_config.get("organization_locations"):
-            # organization_locations = where the company is headquartered
-            body["organization_locations"] = icp_config["organization_locations"]
+        locations = icp_config.get("organization_locations") or icp_config.get("geographies")
+        if locations:
+            if isinstance(locations, str):
+                locations = [loc.strip() for loc in locations.split(",") if loc.strip()]
+            body["organization_locations"] = locations
 
         if icp_config.get("employee_ranges"):
             body["organization_num_employees_ranges"] = icp_config["employee_ranges"]
@@ -331,9 +458,11 @@ class ProspectAgent:
             # Resolved static tag IDs from industry_tag_map.py
             body["organization_industry_tag_ids"] = icp_config["industry_tag_ids"]
 
-        if icp_config.get("org_keyword_tags"):
-            # Array of keyword terms — covers user keywords + unmatched industry fallback
-            body["q_organization_keyword_tags"] = icp_config["org_keyword_tags"]
+        keywords = icp_config.get("org_keyword_tags") or icp_config.get("keywords")
+        if keywords:
+            if isinstance(keywords, str):
+                keywords = [k.strip() for k in keywords.split() if k.strip()]
+            body["q_organization_keyword_tags"] = keywords
 
         return body
 
@@ -425,22 +554,22 @@ class ProspectAgent:
         return {}
 
     # ------------------------------------------------------------------
-    # Dedupe — skip recently enriched contacts
+    # Dedupe — check across all existing contacts in database
     # ------------------------------------------------------------------
 
-    async def _get_recently_enriched_apollo_ids(
-        self, apollo_ids: List[str]
-    ) -> set:
-        """Return apollo_ids of contacts enriched within the last 7 days."""
-        if not apollo_ids:
-            return set()
-        cutoff = datetime.utcnow() - timedelta(days=7)
+    async def _get_all_existing_apollo_ids(self) -> set:
+        """Return all apollo_ids of contacts ever saved in the database."""
         result = await self.db.execute(
-            select(Contact.apollo_id)
-            .where(Contact.apollo_id.in_(apollo_ids))
-            .where(Contact.enriched_at >= cutoff)
+            select(Contact.apollo_id).where(Contact.apollo_id.isnot(None))
         )
-        return {row[0] for row in result.all()}
+        return {row[0] for row in result.all() if row[0]}
+
+    async def _get_all_existing_emails(self) -> set:
+        """Return all emails of contacts ever saved in the database."""
+        result = await self.db.execute(
+            select(Contact.email).where(Contact.email.isnot(None))
+        )
+        return {row[0].strip().lower() for row in result.all() if row[0]}
 
     # ------------------------------------------------------------------
     # Parse Apollo response into contact dict
@@ -522,85 +651,62 @@ class ProspectAgent:
         user_input_id: Optional[int] = None,
     ) -> Dict[str, Any]:
         inserted_ids: List[str] = []
-        updated_ids: List[str] = []
+        all_existing_emails = await self._get_all_existing_emails()
+        all_existing_apollo_ids = await self._get_all_existing_apollo_ids()
 
         for data in contacts:
             email = (data.get("email") or "").strip().lower()
+            apollo_id = data.get("apollo_id")
             if not email:
                 continue
 
-            result = await self.db.execute(
-                select(Contact).where(Contact.email == email)
-            )
-            contact = result.scalar_one_or_none()
+            # Strict cross-search deduplication:
+            # If a person was already collected in any past search, skip them — do not import again,
+            # do not update their user_input_id, and do not link them to this search.
+            if email in all_existing_emails or (apollo_id and apollo_id in all_existing_apollo_ids):
+                logger.info("A1: Cross-search duplicate skipped in _save_contacts", email=email, apollo_id=apollo_id)
+                continue
 
-            if contact:
-                contact.icp_score             = data.get("win_pattern_score")
-                contact.win_pattern_score      = data.get("win_pattern_score")
-                contact.icp_score_breakdown    = data.get("icp_score_breakdown")
-                contact.title                  = data.get("title") or contact.title
-                contact.company                = data.get("company") or contact.company
-                contact.company_domain         = data.get("company_domain") or contact.company_domain
-                contact.industry               = data.get("industry") or contact.industry
-                contact.company_size           = data.get("company_size") or contact.company_size
-                contact.employee_count         = data.get("employee_count") or contact.employee_count
-                contact.tech_stack             = data.get("tech_stack") or contact.tech_stack
-                contact.funding_stage          = data.get("funding_stage") or contact.funding_stage
-                contact.geography              = data.get("geography") or contact.geography
-                contact.apollo_id              = data.get("apollo_id") or contact.apollo_id
-                contact.email_valid            = data.get("email_valid")
-                contact.email_verified         = bool(data.get("email_verified"))
-                contact.verified_at            = datetime.utcnow()
-                contact.enriched_at            = datetime.utcnow()
-                contact.source                 = "apollo"
-                if user_input_id is not None:
-                    contact.user_input_id = user_input_id
-                    assoc_check = await self.db.execute(
-                        select(ContactUserInputAssociation).where(
-                            ContactUserInputAssociation.contact_id == contact.id,
-                            ContactUserInputAssociation.user_input_id == user_input_id
-                        )
-                    )
-                    if not assoc_check.scalar_one_or_none():
-                        self.db.add(ContactUserInputAssociation(contact_id=contact.id, user_input_id=user_input_id))
-                updated_ids.append(str(contact.id))
-            else:
-                contact = Contact(
-                    email=email,
-                    first_name=data.get("first_name"),
-                    last_name=data.get("last_name"),
-                    title=data.get("title"),
-                    company=data.get("company"),
-                    company_domain=data.get("company_domain"),
-                    linkedin_url=data.get("linkedin_url"),
-                    company_size=data.get("company_size"),
-                    employee_count=data.get("employee_count"),
-                    industry=data.get("industry"),
-                    funding_stage=data.get("funding_stage"),
-                    tech_stack=data.get("tech_stack", []),
-                    geography=data.get("geography"),
-                    icp_score=data.get("win_pattern_score"),
-                    win_pattern_score=data.get("win_pattern_score"),
-                    icp_score_breakdown=data.get("icp_score_breakdown"),
-                    email_valid=data.get("email_valid"),
-                    email_verified=bool(data.get("email_verified")),
-                    verified_at=datetime.utcnow(),
-                    enriched_at=datetime.utcnow(),
-                    source="apollo",
-                    apollo_id=data.get("apollo_id"),
-                    user_input_id=user_input_id,
-                )
-                self.db.add(contact)
-                await self.db.flush()
-                if user_input_id is not None:
-                    self.db.add(ContactUserInputAssociation(contact_id=contact.id, user_input_id=user_input_id))
-                inserted_ids.append(str(contact.id))
+            contact = Contact(
+                email=email,
+                first_name=data.get("first_name"),
+                last_name=data.get("last_name"),
+                title=data.get("title"),
+                company=data.get("company"),
+                company_domain=data.get("company_domain"),
+                linkedin_url=data.get("linkedin_url"),
+                company_size=data.get("company_size"),
+                employee_count=data.get("employee_count"),
+                industry=data.get("industry"),
+                funding_stage=data.get("funding_stage"),
+                tech_stack=data.get("tech_stack", []),
+                geography=data.get("geography"),
+                icp_score=data.get("win_pattern_score"),
+                win_pattern_score=data.get("win_pattern_score"),
+                icp_score_breakdown=data.get("icp_score_breakdown"),
+                readiness_score=0.0,
+                email_valid=data.get("email_valid"),
+                email_verified=bool(data.get("email_verified")),
+                verified_at=datetime.utcnow(),
+                enriched_at=datetime.utcnow(),
+                source="apollo",
+                apollo_id=apollo_id,
+                user_input_id=user_input_id,
+            )
+            self.db.add(contact)
+            await self.db.flush()
+            if user_input_id is not None:
+                self.db.add(ContactUserInputAssociation(contact_id=contact.id, user_input_id=user_input_id))
+            inserted_ids.append(str(contact.id))
+            all_existing_emails.add(email)
+            if apollo_id:
+                all_existing_apollo_ids.add(apollo_id)
 
         await self.db.commit()
         return {
             "saved_count": len(inserted_ids),
-            "updated_count": len(updated_ids),
-            "contact_ids": inserted_ids + updated_ids,
+            "updated_count": 0,
+            "contact_ids": inserted_ids,
             "inserted_contact_ids": inserted_ids,
         }
 

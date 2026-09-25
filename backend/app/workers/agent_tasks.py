@@ -239,13 +239,20 @@ def poll_gmail_inbox(config: Optional[Dict] = None):
     async def _run():
         from app.services.gmail_imap_service import GmailIMAPService
         from app.agents.a4_inbound import InboundAgent
+        from app.models.models import Contact
+        from sqlalchemy import select
 
         service = GmailIMAPService()
-        unread = service.fetch_unread_replies()
-        logger.info("Gmail IMAP poller fetched replies", count=len(unread))
 
         processed = []
         async with AsyncSessionLocal() as db:
+            # Query known prospect emails to enforce production safety
+            c_res = await db.execute(select(Contact.email).where(Contact.email.is_not(None)))
+            known_emails = {row[0].strip().lower() for row in c_res.all() if row[0]}
+
+            unread = service.fetch_unread_replies(known_emails=known_emails)
+            logger.info("Gmail IMAP poller fetched replies", count=len(unread))
+
             agent = InboundAgent(db)
             for item in unread:
                 payload = {
@@ -253,6 +260,7 @@ def poll_gmail_inbox(config: Optional[Dict] = None):
                     "from_address": item["from_address"],
                     "reply_text": item["reply_text"],
                     "subject": item.get("subject", ""),
+                    "message_id": item.get("message_id") or item.get("msg_id"),
                 }
                 res = await agent.handle_reply(payload)
                 processed.append({"from": item["from_address"], "res": res})

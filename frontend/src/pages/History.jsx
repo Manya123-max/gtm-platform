@@ -1,4 +1,5 @@
 import { useQuery } from '@tanstack/react-query'
+import { useNavigate } from 'react-router-dom'
 import { History as HistoryIcon, Building2, MapPin, Briefcase, Tag, ChevronRight } from 'lucide-react'
 import { fetchInputHistory } from '../api'
 import { useSession } from '../context/SessionContext'
@@ -19,6 +20,7 @@ function FieldChip({ icon: Icon, label, value }) {
 }
 
 export default function History() {
+  const navigate = useNavigate()
   const { activeSessionId, setActiveSessionId } = useSession()
   const { data: history = [], isLoading, isError } = useQuery({
     queryKey: ['input-history'],
@@ -139,7 +141,10 @@ export default function History() {
                     </span>
                   ) : (
                     <button
-                      onClick={() => setActiveSessionId(item.id)}
+                      onClick={() => {
+                        setActiveSessionId(item.id)
+                        navigate('/contacts')
+                      }}
                       style={{
                         fontSize: '10px', color: 'var(--c-blue)', fontWeight: 600,
                         background: 'rgba(10,103,255,0.08)', border: '1px solid rgba(10,103,255,0.22)',

@@ -1,4 +1,5 @@
 import { createContext, useContext, useState, useEffect, useCallback } from 'react'
+import { useQueryClient } from '@tanstack/react-query'
 import axios from 'axios'
 
 const API_BASE = '/api/v1'
@@ -35,6 +36,7 @@ const AuthContext = createContext(null)
 export function AuthProvider({ children }) {
   const [user, setUser] = useState(null)
   const [initializing, setInitializing] = useState(true)
+  const queryClient = useQueryClient()
 
   // Restore session from a persisted token on first load
   useEffect(() => {
@@ -57,19 +59,22 @@ export function AuthProvider({ children }) {
     const onUnauthorized = () => {
       clearTokens()
       setUser(null)
+      queryClient.clear()
     }
     window.addEventListener('auth:unauthorized', onUnauthorized)
     return () => window.removeEventListener('auth:unauthorized', onUnauthorized)
-  }, [])
+  }, [queryClient])
 
   const login = useCallback(async (email, password) => {
+    queryClient.clear()
     const res = await http.post('/auth/login', { email, password })
     storeTokens(res.data)
     setUser(res.data.user)
     return res.data.user
-  }, [])
+  }, [queryClient])
 
   const register = useCallback(async (name, email, password, confirmPassword) => {
+    queryClient.clear()
     const res = await http.post('/auth/register', {
       name,
       email,
@@ -79,12 +84,13 @@ export function AuthProvider({ children }) {
     storeTokens(res.data)
     setUser(res.data.user)
     return res.data.user
-  }, [])
+  }, [queryClient])
 
   const logout = useCallback(async () => {
     const token = localStorage.getItem(TOKEN_KEY)
     clearTokens()
     setUser(null)
+    queryClient.clear()
     if (token) {
       try {
         await http.post('/auth/logout', {}, { headers: { Authorization: `Bearer ${token}` } })
@@ -92,7 +98,7 @@ export function AuthProvider({ children }) {
         /* token already invalid — nothing else to do */
       }
     }
-  }, [])
+  }, [queryClient])
 
   return (
     <AuthContext.Provider value={{ user, initializing, login, register, logout, authError }}>

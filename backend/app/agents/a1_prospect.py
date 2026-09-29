@@ -796,9 +796,17 @@ class ProspectAgent:
             if not email:
                 continue
 
-            result = await self.db.execute(
-                select(Contact).where(Contact.email == email)
-            )
+            if user_id:
+                result = await self.db.execute(
+                    select(Contact).where(
+                        Contact.email == email,
+                        Contact.user_id == user_id,
+                    )
+                )
+            else:
+                result = await self.db.execute(
+                    select(Contact).where(Contact.email == email)
+                )
             contact = result.scalar_one_or_none()
 
             if contact:
@@ -822,8 +830,7 @@ class ProspectAgent:
                 contact.source = "apollo"
                 if user_input_id is not None:
                     contact.user_input_id = user_input_id
-                # Preserve existing user_id if already owned; assign if unowned
-                if user_id is not None and not contact.user_id:
+                if user_id is not None:
                     contact.user_id = user_id
                 updated_ids.append(str(contact.id))
             else:

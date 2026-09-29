@@ -1,19 +1,21 @@
 import React, { useState } from 'react';
 import { useNavigate } from 'react-router-dom';
+import { useQueryClient } from '@tanstack/react-query';
 import { useSession } from '../context/SessionContext';
-import { submitInput } from '../api';
+import api from '../api';
 
 function InputForm() {
     const navigate = useNavigate();
+    const queryClient = useQueryClient();
     const { setActiveSessionId } = useSession();
     const [formData, setFormData] = useState({
-        ourCompanyName:     '',
-        ourServices:        '',
-        targetLocation:     '',
-        targetIndustries:   '',   // optional
-        targetCompanySize:  '',
-        targetKeywords:     '',   // optional
-        targetJobTitles:    '',
+        ourCompanyName: '',
+        ourServices: '',
+        targetLocation: '',
+        targetIndustries: '',   // optional
+        targetCompanySize: '',
+        targetKeywords: '',   // optional
+        targetJobTitles: '',
     });
     const [status, setStatus] = useState({ type: '', message: '' });
     const [submitting, setSubmitting] = useState(false);
@@ -30,32 +32,36 @@ function InputForm() {
 
         // Convert camelCase form state -> snake_case expected by FastAPI
         const payload = {
-            our_company_name:    formData.ourCompanyName,
-            our_services:        formData.ourServices,
-            target_location:     formData.targetLocation,
-            target_industries:   formData.targetIndustries,   // may be ""
+            our_company_name: formData.ourCompanyName,
+            our_services: formData.ourServices,
+            target_location: formData.targetLocation,
+            target_industries: formData.targetIndustries,   // may be ""
             target_company_size: formData.targetCompanySize,
-            target_keywords:     formData.targetKeywords,     // may be ""
-            target_job_titles:   formData.targetJobTitles,
+            target_keywords: formData.targetKeywords,     // may be ""
+            target_job_titles: formData.targetJobTitles,
         };
 
         try {
-            const data = await submitInput(payload);
+            const res = await api.post('/submit-input', payload);
+            const data = res.data;
             console.log('Saved:', data);
             if (data.user_input_id && setActiveSessionId) {
                 setActiveSessionId(data.user_input_id);
             }
+            queryClient.invalidateQueries({ queryKey: ['input-history'] });
+            queryClient.invalidateQueries({ queryKey: ['active-session'] });
+
             setStatus({ type: 'success', message: 'Details submitted! Redirecting to Agent Control...' });
 
             // Reset form
             setFormData({
-                ourCompanyName:     '',
-                ourServices:        '',
-                targetLocation:     '',
-                targetIndustries:   '',
-                targetCompanySize:  '',
-                targetKeywords:     '',
-                targetJobTitles:    '',
+                ourCompanyName: '',
+                ourServices: '',
+                targetLocation: '',
+                targetIndustries: '',
+                targetCompanySize: '',
+                targetKeywords: '',
+                targetJobTitles: '',
             });
 
             setTimeout(() => {

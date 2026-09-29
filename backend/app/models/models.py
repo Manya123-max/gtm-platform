@@ -74,7 +74,7 @@ class Contact(Base):
     __tablename__ = "contacts"
 
     id: Mapped[str] = mapped_column(UUID(as_uuid=False), primary_key=True, default=generate_uuid)
-    email: Mapped[str] = mapped_column(String(255), unique=True, nullable=False, index=True)
+    email: Mapped[str] = mapped_column(String(255), nullable=False, index=True)
     first_name: Mapped[Optional[str]] = mapped_column(String(100))
     last_name: Mapped[Optional[str]] = mapped_column(String(100))
     title: Mapped[Optional[str]] = mapped_column(String(200))
@@ -136,6 +136,7 @@ class Contact(Base):
     __table_args__ = (
         Index("ix_contacts_icp_score_dnc", "icp_score", "do_not_contact"),
         Index("ix_contacts_user_input_id", "user_input_id"),
+        UniqueConstraint("user_id", "email", name="uq_contacts_user_email"),
     )
 
 

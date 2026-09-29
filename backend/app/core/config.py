@@ -93,7 +93,11 @@ class Settings(BaseSettings):
     SALESFORCE_CLIENT_SECRET:  str = ""
     SALESFORCE_SECURITY_TOKEN: str = ""
     SALESFORCE_REFRESH_TOKEN:  str = ""
-    SALESFORCE_DOMAIN:         str = "login"  # 'login' for Production, 'test' for Sandbox
+    SALESFORCE_DOMAIN:         str = "login"
+    SF_CLIENT_ID:              str = ""
+    SF_CLIENT_SECRET:          str = ""
+    SF_USERNAME:               str = ""
+    SF_DOMAIN:                 str = ""
     GMAIL_CLIENT_ID:           str = ""
     GMAIL_CLIENT_SECRET:  str = ""
     GMAIL_REDIRECT_URI:   str = "http://localhost:8000/api/v1/auth/gmail/callback"

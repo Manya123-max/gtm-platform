@@ -30,13 +30,13 @@ class SalesforceSyncService:
     """Salesforce Lead Upsert & Synchronization Service."""
 
     def __init__(self):
-        self.username = getattr(settings, "SALESFORCE_USERNAME", "")
+        self.username = getattr(settings, "SF_USERNAME", "") or getattr(settings, "SALESFORCE_USERNAME", "")
         self.password = getattr(settings, "SALESFORCE_PASSWORD", "")
-        self.client_id = getattr(settings, "SALESFORCE_CLIENT_ID", "")
-        self.client_secret = getattr(settings, "SALESFORCE_CLIENT_SECRET", "")
+        self.client_id = getattr(settings, "SF_CLIENT_ID", "") or getattr(settings, "SALESFORCE_CLIENT_ID", "")
+        self.client_secret = getattr(settings, "SF_CLIENT_SECRET", "") or getattr(settings, "SALESFORCE_CLIENT_SECRET", "")
         self.security_token = getattr(settings, "SALESFORCE_SECURITY_TOKEN", "")
         self.refresh_token = getattr(settings, "SALESFORCE_REFRESH_TOKEN", "")
-        self.domain = getattr(settings, "SALESFORCE_DOMAIN", "login") or "login"
+        self.domain = getattr(settings, "SF_DOMAIN", "") or getattr(settings, "SALESFORCE_DOMAIN", "login") or "login"
         self._sf = None
 
     def _get_client(self):
@@ -46,7 +46,33 @@ class SalesforceSyncService:
         if not HAS_SIMPLE_SALESFORCE:
             raise RuntimeError("simple-salesforce package is not installed.")
 
-        # Option 1: Direct Login with Username + Password (Primary & Persistent)
+        # Token endpoint always routes through the auth server (login.salesforce.com or test.salesforce.com)
+        auth_domain = "test" if "test" in self.domain.lower() else "login"
+        token_url = f"https://{auth_domain}.salesforce.com/services/oauth2/token"
+
+        # Option 1: Client Credentials Flow (Modern Salesforce External Client App Flow — No Password Needed!)
+        if self.client_id and self.client_secret:
+            data = {
+                "grant_type": "client_credentials",
+                "client_id": self.client_id,
+                "client_secret": self.client_secret,
+            }
+            try:
+                resp = requests.post(token_url, data=data, timeout=15)
+                if resp.status_code == 200:
+                    res_data = resp.json()
+                    access_token = res_data.get("access_token")
+                    instance_url = res_data.get("instance_url")
+                    if access_token and instance_url:
+                        self._sf = Salesforce(instance_url=instance_url, session_id=access_token)
+                        logger.info("Authenticated to Salesforce via Client Credentials Flow", instance_url=instance_url)
+                        return self._sf
+                else:
+                    logger.warning("Salesforce Client Credentials flow returned non-200", status=resp.status_code, text=resp.text)
+            except Exception as e_cc:
+                logger.warning("Salesforce Client Credentials flow attempt failed", error=str(e_cc))
+
+        # Option 2: Direct Password Grant (Fallback)
         if self.username and self.password:
             kwargs = {
                 "username": self.username,
@@ -56,14 +82,14 @@ class SalesforceSyncService:
             if self.client_id and self.client_secret:
                 kwargs["consumer_key"] = self.client_id
                 kwargs["consumer_secret"] = self.client_secret
-            elif self.security_token:
+            if self.security_token:
                 kwargs["security_token"] = self.security_token
 
             self._sf = Salesforce(**kwargs)
             logger.info("Authenticated to Salesforce via Direct Password grant", username=self.username)
             return self._sf
 
-        # Option 2: Refresh Token Grant (Fallback if configured)
+        # Option 3: Refresh Token Grant (Fallback if configured)
         if self.refresh_token and self.client_id and self.client_secret:
             token_domain = self.domain if self.domain in ("login", "test") else "login"
             token_url = f"https://{token_domain}.salesforce.com/services/oauth2/token"
@@ -83,7 +109,7 @@ class SalesforceSyncService:
                     logger.info("Authenticated to Salesforce via Refresh Token grant", instance_url=instance_url)
                     return self._sf
 
-        raise ValueError("Salesforce credentials not configured. Please set SALESFORCE_USERNAME and SALESFORCE_PASSWORD in backend/.env.")
+        raise ValueError("Salesforce credentials not configured. Please enable 'Client Credentials Flow' on your External Client App in Salesforce Settings.")
 
     def sync_agent_prospect(self, prospect_data: Dict[str, Any]) -> Dict[str, Any]:
         """

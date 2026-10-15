@@ -1,6 +1,6 @@
 name: Pre-Deployment Validation
 
-on:
+"on":
   push:
     branches:
       - main
@@ -17,6 +17,21 @@ jobs:
   validate-and-test:
     name: Backend Validation, Tests & Frontend Build
     runs-on: ubuntu-latest
+
+    services:
+      postgres:
+        image: pgvector/pgvector:pg16
+        env:
+          POSTGRES_USER: gtm
+          POSTGRES_PASSWORD: gtmpass
+          POSTGRES_DB: gtm_test
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
 
     steps:
       - name: Check out repository
@@ -53,14 +68,14 @@ jobs:
 
       - name: Run backend automated tests
         env:
-          APP_ENV: test
+          APP_ENV: "test"
           DEBUG: "false"
-          APP_SECRET_KEY: ci-test-secret-key-32-chars-minimum!
-          DATABASE_URL: sqlite+aiosqlite:///:memory:
+          APP_SECRET_KEY: "ci-test-secret-key-32-chars-minimum"
+          DATABASE_URL: "postgresql+asyncpg://gtm:gtmpass@localhost:5432/gtm_test"
           AUTH_ENABLED: "true"
         run: |
           cd backend
-          pytest tests/test_startup_and_deployment_config.py -v
+          pytest tests/test_startup_and_deployment_config.py tests/test_tiering_and_prospect_prioritization.py -v
 
       - name: Install frontend dependencies and build production bundle
         working-directory: frontend

@@ -174,6 +174,15 @@ def check_backend_tests():
     except Exception:
         pass
 
+    if not test_cmd:
+        try:
+            # Check if pytest is available in current Python environment
+            py_res = subprocess.run([sys.executable, "-m", "pytest", "--version"], capture_output=True, text=True, timeout=5)
+            if py_res.returncode == 0:
+                test_cmd = [sys.executable, "-m", "pytest", "backend/tests/test_startup_and_deployment_config.py", "-q"]
+        except Exception:
+            pass
+
     if test_cmd:
         try:
             res = subprocess.run(test_cmd, cwd=str(REPO_ROOT), capture_output=True, text=True, timeout=45)
@@ -184,7 +193,7 @@ def check_backend_tests():
         except Exception as e:
             record_fail("automated backend tests", str(e))
     else:
-        record_warn("automated backend tests", "Docker gtm_backend container not running; tests skipped in this run")
+        record_warn("automated backend tests", "Docker gtm_backend container not running and pytest not found locally; tests skipped in this run")
 
 
 def check_frontend_build():

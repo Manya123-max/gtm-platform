@@ -54,4 +54,5 @@ structlog==24.4.0
 orjson==3.10.12
 python-dateutil==2.9.0
 pytz==2024.2
-psycopg2-binarygooglenewsdecoder==0.2.1
+psycopg2-binary
+googlenewsdecoder==0.2.1

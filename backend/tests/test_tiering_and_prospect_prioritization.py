@@ -20,7 +20,7 @@ Covers all tiering rules and constraints:
 import pytest
 import uuid
 from datetime import datetime, timedelta
-from app.core.database import AsyncSessionLocal
+from app.core.database import AsyncSessionLocal, init_db
 from app.core.security import create_access_token
 from app.models.models import User, Contact, ContactUserInputAssociation, UserInput
 from app.services.tier_service import (
@@ -33,6 +33,7 @@ from app.services.tier_service import (
 )
 from sqlalchemy import select, delete
 import httpx
+from app.main import app
 
 
 # ── Helper Stub Contact ──────────────────────────────────────────────────────
@@ -386,6 +387,7 @@ def test_account_level_tiering_consistency():
 # ── 14. Integration Test: API Tier Filtering and Tier Summary ─────────────────
 @pytest.mark.asyncio
 async def test_api_tier_summary_and_filtering():
+    await init_db()
     async with AsyncSessionLocal() as db:
         user_suffix = uuid.uuid4().hex[:6]
         user = User(
@@ -465,7 +467,9 @@ async def test_api_tier_summary_and_filtering():
         headers = {"Authorization": f"Bearer {token}"}
 
         try:
-            async with httpx.AsyncClient(base_url="http://localhost:8000") as client:
+            async with httpx.AsyncClient(
+                transport=httpx.ASGITransport(app=app), base_url="http://test"
+            ) as client:
                 # 1. Test GET /contacts/tier-summary
                 res_sum = await client.get(f"/api/v1/contacts/tier-summary?user_input_id={u_input.id}", headers=headers)
                 assert res_sum.status_code == 200

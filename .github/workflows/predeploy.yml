@@ -70,6 +70,17 @@ jobs:
         run: |
           python scripts/predeploy_check.py
 
+      - name: Initialize test database schema
+        env:
+          APP_ENV: "test"
+          DEBUG: "false"
+          APP_SECRET_KEY: "ci-test-secret-key-32-chars-minimum"
+          DATABASE_URL: "postgresql+asyncpg://gtm:gtmpass@localhost:5432/gtm_test"
+          PYTHONPATH: "."
+        run: |
+          cd backend
+          python -c "import asyncio; from app.core.database import init_db; asyncio.run(init_db())"
+
       - name: Run backend automated tests
         env:
           APP_ENV: "test"

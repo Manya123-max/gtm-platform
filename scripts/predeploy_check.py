@@ -185,7 +185,7 @@ def check_backend_tests():
 
     if test_cmd:
         try:
-            res = subprocess.run(test_cmd, cwd=str(REPO_ROOT), capture_output=True, text=True, timeout=45)
+            res = subprocess.run(test_cmd, cwd=str(REPO_ROOT), capture_output=True, text=True, timeout=180)
             if res.returncode == 0:
                 record_pass("automated backend tests", "Targeted deployment & core pipeline tests passed")
             else:

@@ -155,7 +155,6 @@ class Contact(Base):
 
     __table_args__ = (
         Index("ix_contacts_icp_score_dnc", "icp_score", "do_not_contact"),
-        Index("ix_contacts_user_input_id", "user_input_id"),
         UniqueConstraint("user_id", "email", name="uq_contacts_user_email"),
     )
 

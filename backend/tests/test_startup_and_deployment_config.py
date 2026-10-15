@@ -4,7 +4,14 @@ Ensures deployment misconfigurations on Render/Netlify are caught during CI/loca
 """
 import os
 import re
+import sys
 from pathlib import Path
+
+# Ensure backend directory is in sys.path regardless of execution working directory
+BACKEND_DIR = Path(__file__).resolve().parent.parent
+if str(BACKEND_DIR) not in sys.path:
+    sys.path.insert(0, str(BACKEND_DIR))
+
 import pytest
 from app.core.config import Settings
 

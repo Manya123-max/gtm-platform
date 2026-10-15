@@ -211,10 +211,20 @@ def check_frontend_build():
         else:
             record_fail("frontend API config", "Missing VITE_API_URL dynamic configuration in src/api/index.js")
 
+    # Ensure dependencies are installed via npm ci before building
+    node_modules_dir = FRONTEND_DIR / "node_modules"
+    is_windows = sys.platform.startswith("win")
+    npm_cmd = "npm.cmd" if is_windows else "npm"
+
+    if not node_modules_dir.exists():
+        print("  Installing frontend dependencies with npm ci...")
+        ci_res = subprocess.run([npm_cmd, "ci"], cwd=str(FRONTEND_DIR), capture_output=True, text=True, timeout=120)
+        if ci_res.returncode != 0:
+            record_fail("frontend npm ci", ci_res.stderr.strip() or ci_res.stdout.strip()[:300])
+            return
+
     # Run npm run build
     try:
-        is_windows = sys.platform.startswith("win")
-        npm_cmd = "npm.cmd" if is_windows else "npm"
         res = subprocess.run([npm_cmd, "run", "build"], cwd=str(FRONTEND_DIR), capture_output=True, text=True, timeout=60)
         if res.returncode == 0:
             record_pass("frontend build", "Vite production build completed successfully with 0 errors")

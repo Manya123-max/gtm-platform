@@ -62,6 +62,10 @@ jobs:
           pip install -r backend/requirements.txt
           pip install pytest pytest-asyncio
 
+      - name: Install frontend dependencies
+        working-directory: frontend
+        run: npm ci
+
       - name: Run Python compilation and pre-deployment checks
         run: |
           python scripts/predeploy_check.py
@@ -73,15 +77,14 @@ jobs:
           APP_SECRET_KEY: "ci-test-secret-key-32-chars-minimum"
           DATABASE_URL: "postgresql+asyncpg://gtm:gtmpass@localhost:5432/gtm_test"
           AUTH_ENABLED: "true"
+          PYTHONPATH: "."
         run: |
           cd backend
-          pytest tests/test_startup_and_deployment_config.py tests/test_tiering_and_prospect_prioritization.py -v
+          python -m pytest tests/test_startup_and_deployment_config.py tests/test_tiering_and_prospect_prioritization.py -v
 
-      - name: Install frontend dependencies and build production bundle
+      - name: Run frontend production build
         working-directory: frontend
-        run: |
-          npm ci
-          npm run build
+        run: npm run build
 
   docker-build:
     name: Backend Docker Image Build Verification

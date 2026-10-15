@@ -37,7 +37,11 @@ services:
       dockerfile: Dockerfile
     container_name: gtm_celery_beat
     restart: unless-stopped
-    env_file: ./backend/.env
+    env_file:
+      - path: ./backend/.env.example
+        required: false
+      - path: ./backend/.env
+        required: false
     environment:
       DATABASE_URL: postgresql+asyncpg://${POSTGRES_USER:-gtm}:${POSTGRES_PASSWORD:-gtmpass}@db:5432/${POSTGRES_DB:-gtm}
       REDIS_URL: redis://redis:6379/0
@@ -78,7 +82,11 @@ services:
       dockerfile: Dockerfile
     container_name: gtm_backend
     restart: unless-stopped
-    env_file: ./backend/.env
+    env_file:
+      - path: ./backend/.env.example
+        required: false
+      - path: ./backend/.env
+        required: false
     environment:
       DATABASE_URL: postgresql+asyncpg://${POSTGRES_USER:-gtm}:${POSTGRES_PASSWORD:-gtmpass}@db:5432/${POSTGRES_DB:-gtm}
       REDIS_URL: redis://redis:6379/0
@@ -103,7 +111,11 @@ services:
       dockerfile: Dockerfile
     container_name: gtm_celery_worker
     restart: unless-stopped
-    env_file: ./backend/.env
+    env_file:
+      - path: ./backend/.env.example
+        required: false
+      - path: ./backend/.env
+        required: false
     environment:
       DATABASE_URL: postgresql+asyncpg://${POSTGRES_USER:-gtm}:${POSTGRES_PASSWORD:-gtmpass}@db:5432/${POSTGRES_DB:-gtm}
       REDIS_URL: redis://redis:6379/0

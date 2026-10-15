@@ -32,7 +32,23 @@ class Settings(BaseSettings):
 
     @property
     def cors_origins_list(self) -> List[str]:
-        return [o.strip() for o in self.CORS_ORIGINS.split(",")]
+        origins = [o.strip() for o in self.CORS_ORIGINS.split(",") if o.strip()]
+        if self.FRONTEND_URL and self.FRONTEND_URL.strip() and self.FRONTEND_URL.strip() not in origins:
+            origins.append(self.FRONTEND_URL.strip())
+        return origins
+
+    def validate_production_readiness(self) -> List[str]:
+        """Validate production configuration and return a list of blocker messages."""
+        errors: List[str] = []
+        is_prod = self.APP_ENV.lower() in {"prod", "production"} or not self.DEBUG
+        if is_prod:
+            if not self.APP_SECRET_KEY or self.APP_SECRET_KEY == "change-me":
+                errors.append("APP_SECRET_KEY must be set to a secure secret in production (cannot be 'change-me')")
+            if not self.DATABASE_URL or "localhost" in self.DATABASE_URL:
+                errors.append("DATABASE_URL must point to a production database, not localhost")
+            if self.AUTH_ENABLED and not (self.JWT_SECRET_KEY or (self.APP_SECRET_KEY and self.APP_SECRET_KEY != "change-me")):
+                errors.append("JWT_SECRET_KEY or a secure APP_SECRET_KEY is required when AUTH_ENABLED=True")
+        return errors
 
     # ── Auth ──────────────────────────────────────────────────────────────────
     AUTH_ENABLED: bool = True          # false = legacy unauthenticated dev mode
@@ -67,7 +83,12 @@ class Settings(BaseSettings):
 
     @property
     def sync_database_url(self) -> str:
-        return self.DATABASE_URL.replace("+asyncpg", "")
+        url = self.DATABASE_URL.replace("+asyncpg", "")
+        if "ssl=require" in url:
+            url = url.replace("ssl=require", "sslmode=require")
+        elif "ssl=prefer" in url:
+            url = url.replace("ssl=prefer", "sslmode=prefer")
+        return url
 
     # ── Redis / Celery ────────────────────────────────────────────────────
     REDIS_URL:              str = "redis://localhost:6379/0"

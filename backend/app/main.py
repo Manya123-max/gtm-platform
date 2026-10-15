@@ -24,6 +24,11 @@ logger = structlog.get_logger()
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """Startup and shutdown."""
+    prod_errors = settings.validate_production_readiness()
+    if prod_errors and (settings.APP_ENV.lower() in {"prod", "production"} or not settings.DEBUG):
+        for err in prod_errors:
+            logger.error("Production configuration error", error=err)
+        raise RuntimeError(f"Production configuration validation failed: {'; '.join(prod_errors)}")
     await init_db()
     logger.info("GTM Platform started", env=settings.APP_ENV)
     yield

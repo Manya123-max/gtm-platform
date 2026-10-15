@@ -48,6 +48,23 @@ class Settings(BaseSettings):
     # ── Database ──────────────────────────────────────────────────────────
     DATABASE_URL: str = "postgresql+asyncpg://gtm:gtmpass@localhost:5432/gtm_platform"
 
+    @field_validator("DATABASE_URL", mode="before")
+    @classmethod
+    def assemble_db_connection(cls, v: Optional[str]) -> str:
+        if isinstance(v, str):
+            if v.startswith("postgres://"):
+                v = v.replace("postgres://", "postgresql+asyncpg://", 1)
+            elif v.startswith("postgresql://") and not v.startswith("postgresql+asyncpg://"):
+                v = v.replace("postgresql://", "postgresql+asyncpg://", 1)
+            if "sslmode=require" in v:
+                v = v.replace("sslmode=require", "ssl=require")
+            elif "sslmode=prefer" in v:
+                v = v.replace("sslmode=prefer", "ssl=prefer")
+            elif "sslmode=disable" in v:
+                v = v.replace("sslmode=disable", "")
+            return v
+        return v or ""
+
     @property
     def sync_database_url(self) -> str:
         return self.DATABASE_URL.replace("+asyncpg", "")
@@ -85,15 +102,48 @@ class Settings(BaseSettings):
     PREDICTLEADS_API_TOKEN: str = ""
     CURRENTS_API_KEY:       str = ""
 
-    # ── CRM / calendar / email ────────────────────────────────────────────
-    HUBSPOT_ACCESS_TOKEN: str = ""
+    # ── Salesforce CRM (Sole CRM Integration) ─────────────────────────────
+    SALESFORCE_INSTANCE_URL:  Optional[str] = None
+    SALESFORCE_ACCESS_TOKEN:  Optional[str] = None
+    SALESFORCE_CLIENT_ID:     Optional[str] = None
+    SALESFORCE_CLIENT_SECRET: Optional[str] = None
+    SALESFORCE_API_VERSION:   str = "v60.0"
+
+    # Deprecated HubSpot setting (kept as None for legacy compatibility)
+    HUBSPOT_ACCESS_TOKEN:     Optional[str] = None
+
+    # ── Google Workspace Integration (Domain-Wide Delegation & OAuth) ──────
+    GOOGLE_CLIENT_ID:          Optional[str] = None
+    GOOGLE_CLIENT_SECRET:      Optional[str] = None
+    GOOGLE_OAUTH_REDIRECT_URI: str = "http://localhost:8000/api/v1/integrations/google/callback"
+    GOOGLE_WORKSPACE_DWD_ENABLED: bool = False
+    GOOGLE_WORKSPACE_SERVICE_ACCOUNT_EMAIL: Optional[str] = None
+    GOOGLE_WORKSPACE_SERVICE_ACCOUNT_KEY: Optional[str] = None
+    GOOGLE_WORKSPACE_DOMAIN: Optional[str] = None
+    GOOGLE_WORKSPACE_ADMIN_EMAIL: Optional[str] = None
     GMAIL_CLIENT_ID:      str = ""
     GMAIL_CLIENT_SECRET:  str = ""
     GMAIL_REDIRECT_URI:   str = "http://localhost:8000/api/v1/auth/gmail/callback"
-    CAL_COM_API_KEY:      str = ""
-    CAL_COM_BASE_URL:     str = "https://api.cal.com/v2"
-    CAL_COM_API_VERSION:  str = "2024-06-14"
-    CAL_COM_EVENT_SLUG:   str = ""
+
+    # Microsoft 365 / Microsoft Graph (Production Company Email)
+    MICROSOFT_CLIENT_ID:          Optional[str] = None
+    MICROSOFT_CLIENT_SECRET:      Optional[str] = None
+    MICROSOFT_TENANT_ID:          Optional[str] = "common"
+    MICROSOFT_REDIRECT_URI:       str = "http://localhost:8000/api/v1/integrations/microsoft/callback"
+    MICROSOFT_AUTHORITY:          str = "https://login.microsoftonline.com"
+    MICROSOFT_GRAPH_ENDPOINT:     str = "https://graph.microsoft.com/v1.0"
+    MICROSOFT_SCOPES:             str = "offline_access User.Read Mail.Send Mail.Read"
+    COMPANY_PRODUCTION_EMAIL:     str = "shree.lakshmi@forcecloudlabs.com"
+
+
+    # ── Cal.com Settings & Automated Resolution ────────────────────────────
+    CAL_COM_API_KEY:            str = ""
+    CAL_COM_BASE_URL:           str = "https://api.cal.com/v2"
+    CAL_COM_API_VERSION:        str = "2024-06-14"
+    CAL_COM_EVENT_SLUG:         str = ""
+    CAL_COM_ORG_SLUG:           Optional[str] = None
+    CAL_COM_DEFAULT_EVENT_SLUG: Optional[str] = "15min"
+    CAL_COM_USER_MAPPINGS:      Optional[str] = '{"shree.lakshmi@forcecloudlabs.com": {"username": "shree-lakshmi-iaqqsz", "event_slug": "15min", "booking_url": "https://cal.com/shree-lakshmi-iaqqsz/15min"}}'
 
     # ── Outreach delivery ─────────────────────────────────────────────────
     RESEND_API_KEY:        str  = ""
@@ -132,9 +182,10 @@ class Settings(BaseSettings):
     ENABLE_SLACK_APPROVALS:    bool = False   # ntfy is the default; flip for Slack
     ALLOW_DEMO_PROSPECTS:      bool = False   # production: False
 
+    A5_SIMULATION_MODE: bool = False  # Production: False. When False, never generate synthetic Fireflies transcripts or fake BANT.
     AGENT3_TEST_MODE: bool = False
     TEST_MODE_ICP_SCORE_THRESHOLD: int = 60
-    TEST_EMAIL_OVERRIDE: Optional[str] = "shreelakshmipp2003@gmail.com"
+    TEST_EMAIL_OVERRIDE: Optional[str] = None  # In production: None. For test mode: set in .env
 
     # ── SMTP / Gmail ──────────────────────────────────────────────────────
     SMTP_HOST: str = "smtp.gmail.com"

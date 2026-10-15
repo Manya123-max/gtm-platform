@@ -11,6 +11,7 @@ import ContactDetail from './pages/ContactDetail'
 import { Deals, Outreach, Content, Revenue, Agents } from './pages/index'
 import InputForm from './components/InputForm'
 import History from './pages/History'
+import Settings from './pages/Settings'
 import Login from './pages/Login'
 import Register from './pages/Register'
 import ProtectedRoute from './components/ProtectedRoute'
@@ -47,6 +48,7 @@ ReactDOM.createRoot(document.getElementById('root')).render(
                 <Route path="revenue"      element={<Revenue />} />
                 <Route path="input"        element={<InputForm />} />
                 <Route path="history"      element={<History />} />
+                <Route path="settings"     element={<Settings />} />
               </Route>
             </Route>
 

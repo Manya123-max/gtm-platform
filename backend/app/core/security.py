@@ -11,7 +11,7 @@ import hmac
 import os
 import secrets
 from datetime import datetime, timedelta, timezone
-from typing import Optional
+from typing import Optional, Any
 
 from fastapi import Depends, HTTPException, status
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
@@ -124,3 +124,25 @@ async def get_current_user(
         detail="Not authenticated",
         headers={"WWW-Authenticate": "Bearer"},
     )
+
+
+async def require_admin(
+    current_user: Optional[Any] = Depends(get_current_user),
+) -> Any:
+    """
+    Enforces that the current authenticated user has the ADMIN role.
+    Raises 401 if unauthenticated, 403 if authenticated but not an ADMIN.
+    """
+    if current_user is None:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Authentication required",
+            headers={"WWW-Authenticate": "Bearer"},
+        )
+    user_role = getattr(current_user, "role", "SALES_REPRESENTATIVE") or "SALES_REPRESENTATIVE"
+    if user_role.upper() != "ADMIN":
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Admin privileges required for this action",
+        )
+    return current_user

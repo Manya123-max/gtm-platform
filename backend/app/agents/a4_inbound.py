@@ -13,7 +13,7 @@ from sqlalchemy import select, and_, asc
 
 from app.core.config import settings
 from app.models.models import (
-    Contact, ConversationThread, OutreachLog,
+    Contact, ConversationThread, User, OutreachLog,
     FunnelEvent, PendingAction, Notification, ContactUserInputAssociation, UserInput
 )
 from app.services.llm_service import LLMService
@@ -82,9 +82,10 @@ class InboundAgent:
         self.cal = CalService()
         self.resend = ResendService()
 
-    async def handle_reply(self, webhook_payload: Dict[str, Any]) -> Dict[str, Any]:
+    async def handle_reply(self, webhook_payload: Dict[str, Any], user_id: Optional[str] = None) -> Dict[str, Any]:
         """
         Entry point. Called by webhook handler or IMAP poller when an inbound reply is received.
+        If user_id is provided, strictly associates reply with contacts owned by that sales rep.
         """
         email = webhook_payload.get("from_address", "")
         reply_text = webhook_payload.get("reply_text", "")
@@ -92,10 +93,10 @@ class InboundAgent:
         subject = webhook_payload.get("subject", "")
         message_id = webhook_payload.get("message_id") or webhook_payload.get("email_id") or webhook_payload.get("id")
 
-        logger.info("A4: Received inbound reply", email=email, subject=subject, reply_text=reply_text[:100])
+        logger.info("A4: Received inbound reply", email=email, subject=subject, reply_text=reply_text[:100], user_id=user_id)
 
-        # Find contact
-        contact = await self._find_contact(email, subject=subject)
+        # Find contact scoped to user if user_id is specified
+        contact = await self._find_contact(email, subject=subject, user_id=user_id)
         if not contact:
             logger.warning("A4: Contact not found for reply email, safely ignoring", email=email)
             return {"status": "contact_not_found", "email": email}
@@ -186,9 +187,11 @@ class InboundAgent:
         # Embed Cal.com link directly in the draft body so it is visible in Slack and in the email
         if should_request_meeting:
             try:
+                rep_user = await self.db.get(User, contact.user_id) if (contact and contact.user_id) else None
                 booking_link = await self.cal.get_booking_link(
                     contact_email=contact.email,
                     contact_name=f"{contact.first_name or ''} {contact.last_name or ''}".strip(),
+                    user=rep_user,
                 )
                 if booking_link and "cal.com" not in draft.lower():
                     draft = draft.rstrip() + f"\n\nHere's my calendar if you'd like to select a date and time that works best: {booking_link}"
@@ -288,9 +291,11 @@ class InboundAgent:
         booking_link = None
         final_response = thread_event.draft_content or ""
         if "cal.com" not in final_response.lower() and (contact and contact.readiness_score >= settings.READINESS_SCORE_MEETING_THRESHOLD):
+            rep_user = await self.db.get(User, contact.user_id) if (contact and contact.user_id) else None
             booking_link = await self.cal.get_booking_link(
                 contact_email=contact.email,
                 contact_name=f"{contact.first_name or ''} {contact.last_name or ''}".strip(),
+                user=rep_user,
             )
             if booking_link:
                 final_response += f"\n\nHere's my calendar if you'd like to select a date and time that works best: {booking_link}"
@@ -522,10 +527,41 @@ Return only the email body text, no subject line."""
         )
         return list(result.scalars().all())
 
-    async def _find_contact(self, email: str, subject: Optional[str] = None) -> Optional[Contact]:
+    async def _find_contact(self, email: str, subject: Optional[str] = None, user_id: Optional[str] = None) -> Optional[Contact]:
         import os
         test_override = (getattr(settings, "TEST_EMAIL_OVERRIDE", "") or os.getenv("TEST_EMAIL_OVERRIDE", "")).strip().lower()
 
+        # When rep user_id is provided, strictly isolate lookup to contacts belonging to this rep
+        if user_id:
+            # 1. Exact match for this rep
+            res = await self.db.execute(
+                select(Contact).where(Contact.email == email, Contact.user_id == user_id)
+            )
+            contact = res.scalar_one_or_none()
+            if contact:
+                return contact
+
+            # 2. Case-insensitive match for this rep
+            res = await self.db.execute(
+                select(Contact).where(Contact.email.ilike(email), Contact.user_id == user_id)
+            )
+            contact = res.scalar_one_or_none()
+            if contact:
+                return contact
+
+            # 3. Test override scoped to this rep
+            if test_override and (email.lower() == test_override or "forcecloudlabs" in email.lower()):
+                res = await self.db.execute(
+                    select(Contact).where(Contact.user_id == user_id).order_by(Contact.updated_at.desc()).limit(1)
+                )
+                contact = res.scalar_one_or_none()
+                if contact:
+                    return contact
+
+            # Unknown sender for this rep's mailbox -> safely reject
+            return None
+
+        # Fallback for global single-mailbox mode (user_id is None):
         # 1. In TEST MODE, if sender is the configured test override, resolve to the intended prospect
         if test_override and (email.lower() == test_override or "forcecloudlabs" in email.lower()):
             # If subject is provided, match by subject against OutreachLog or ConversationThread
@@ -612,11 +648,16 @@ Return only the email body text, no subject line."""
             user_input_id = assoc_res.scalar_one_or_none()
             if not user_input_id:
                 user_input_id = contact.user_input_id
-            if not user_input_id:
-                user_input_id = await self.db.scalar(select(UserInput.id).order_by(UserInput.id.desc()).limit(1))
+            if not user_input_id and contact.user_id:
+                user_input_id = await self.db.scalar(
+                    select(UserInput.id)
+                    .where(UserInput.user_id == contact.user_id)
+                    .order_by(UserInput.id.desc())
+                    .limit(1)
+                )
 
             if not user_input_id:
-                logger.warning("A4: No user_input_id found to scope reply notification", contact_id=contact.id)
+                logger.warning("A4: No user_input_id found to scope reply notification for contact user", contact_id=contact.id)
                 return None
 
             # 2. Duplicate protection: reference_id
@@ -690,7 +731,39 @@ Return only the email body text, no subject line."""
         )
         formatted_html = f"<div style='font-family: -apple-system, BlinkMacSystemFont, Segoe UI, Roboto, Helvetica, Arial, sans-serif; font-size: 15px; line-height: 1.6; color: #1e293b;'>{'<br/>'.join(html_body.splitlines())}</div>"
         
-        target_to = getattr(settings, "TEST_EMAIL_OVERRIDE", "") or (contact.email if contact else "") or "shreelakshmipp2003@gmail.com"
+        target_to = getattr(settings, "TEST_EMAIL_OVERRIDE", "") or (contact.email if contact else "")
+
+        # Priority 1: Rep's authorized Microsoft 365 mailbox via Microsoft Graph
+        if contact and contact.user_id:
+            rep_user = await self.db.get(User, contact.user_id)
+            if rep_user:
+                ms_int_res = await self.db.execute(
+                    select(UserIntegration).where(
+                        UserIntegration.user_id == rep_user.id,
+                        UserIntegration.provider == "microsoft",
+                        UserIntegration.status == "connected",
+                    )
+                )
+                ms_int = ms_int_res.scalar_one_or_none()
+                if ms_int:
+                    from app.services.microsoft_graph_service import MicrosoftGraphService
+                    ms_svc = MicrosoftGraphService()
+                    token = await ms_svc.get_valid_access_token(ms_int, self.db)
+                    if token:
+                        sender_email = ms_int.provider_account_email or rep_user.email
+                        try:
+                            msg_id = await ms_svc.send_mail(
+                                access_token=token,
+                                to_email=target_to,
+                                subject=subject,
+                                html_body=formatted_html,
+                                from_email=sender_email,
+                            )
+                            if msg_id:
+                                logger.info("A4: Reply email dispatched via Microsoft Graph", rep_email=sender_email, to=target_to)
+                                return msg_id
+                        except Exception as ms_err:
+                            logger.error("A4: Failed to send reply via Microsoft Graph", error=str(ms_err))
 
         # 1. Try SMTP if configured
         if getattr(settings, "SMTP_USER", "") and getattr(settings, "SMTP_PASSWORD", ""):

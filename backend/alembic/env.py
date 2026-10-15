@@ -17,6 +17,8 @@ from app.core.config import settings
 db_url = os.environ.get("DATABASE_URL")
 if db_url:
     db_url = db_url.replace("+asyncpg", "")
+    if db_url.startswith("postgres://"):
+        db_url = db_url.replace("postgres://", "postgresql://", 1)
     config.set_main_option("sqlalchemy.url", db_url)
 else:
     config.set_main_option("sqlalchemy.url", settings.sync_database_url)

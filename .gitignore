@@ -51,3 +51,8 @@ celerybeat.pid
 # Local CSV imports
 backend/prospects_export.csv
 prospects_export.csv
+
+# Temporary and Scratch Directories
+scratch/
+backend/scratch/
+*.sql

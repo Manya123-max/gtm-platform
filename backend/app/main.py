@@ -58,6 +58,11 @@ from app.api.v1.auth import auth_router
 app.include_router(api_router, prefix="/api/v1")
 # Public authentication routes (register/login/refresh/me/logout)
 app.include_router(auth_router, prefix="/api/v1")
+from app.api.v1.integrations import integrations_router, user_settings_router
+app.include_router(integrations_router, prefix="/api/v1")
+app.include_router(user_settings_router, prefix="/api/v1")
+from app.api.v1.admin_users import admin_users_router
+app.include_router(admin_users_router, prefix="/api/v1")
  
  
 
@@ -162,6 +167,14 @@ async def slack_actions(request: Request, background_tasks: BackgroundTasks):
         timestamp = request.headers.get("X-Slack-Request-Timestamp", "")
         slack_sig = request.headers.get("X-Slack-Signature", "")
         if timestamp and slack_sig:
+            import time
+            try:
+                if abs(time.time() - float(timestamp)) > 300:
+                    logger.warning("Slack signature timestamp expired")
+                    return JSONResponse({"error": "Request timestamp expired"}, status_code=400)
+            except ValueError:
+                return JSONResponse({"error": "Invalid timestamp format"}, status_code=400)
+
             sig_base = f"v0:{timestamp}:{body_str}"
             expected = "v0=" + hmac.new(
                 settings.SLACK_SIGNING_SECRET.encode(),
@@ -170,6 +183,10 @@ async def slack_actions(request: Request, background_tasks: BackgroundTasks):
             ).hexdigest()
             if not hmac.compare_digest(slack_sig, expected):
                 logger.warning("Invalid Slack signature received")
+                return JSONResponse({"error": "Invalid Slack signature"}, status_code=401)
+        else:
+            logger.warning("Missing Slack signature headers when SLACK_SIGNING_SECRET is configured")
+            return JSONResponse({"error": "Missing Slack signature headers"}, status_code=401)
 
     payload_type = payload.get("type")
     user = (
@@ -192,7 +209,7 @@ async def slack_actions(request: Request, background_tasks: BackgroundTasks):
                     .get("value", "")
             )
             background_tasks.add_task(_approve_reply, thread_event_id, user, edited_text, response_url)
-        return JSONResponse({})  # ack — closes the modal, no further Slack action needed
+        return JSONResponse({"response_action": "clear"})  # ack — closes the modal, no further Slack action needed
 
     actions = payload.get("actions", [])
 

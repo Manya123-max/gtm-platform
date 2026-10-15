@@ -4,6 +4,7 @@ import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
 import {
   LayoutDashboard, Users, Briefcase, Send, FileText,
   TrendingUp, Bot, ChevronRight, Bell, Zap, Clipboard, History,
+  Settings as SettingsIcon,
   Mail, Check, X, LogOut
 } from 'lucide-react'
 import clsx from 'clsx'
@@ -21,6 +22,7 @@ const NAV = [
   { to: '/content',   icon: FileText,        label: 'Content'   },
   { to: '/revenue',   icon: TrendingUp,      label: 'Revenue'   },
   { to: '/history',   icon: History,         label: 'History'   },
+  { to: '/settings',  icon: SettingsIcon,    label: 'Settings'  },
 ]
 
 const AGENT_STATUS = [

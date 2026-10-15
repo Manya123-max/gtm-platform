@@ -53,30 +53,30 @@ export function Deals() {
     },
   })
 
-  const STAGE_ORDER = ['prospecting','discovery','demo','proposal','negotiation']
+  const STAGE_ORDER = ['prospecting', 'discovery', 'demo', 'proposal', 'negotiation']
   const ordered = STAGE_ORDER.map(s => summary.find(r => r.stage === s) || { stage: s, count: 0, value: 0 })
 
   const activeDealIds = new Set(deals.map(d => d.id))
   const dealActions = actions.filter(a => a.entity_type === 'deal' ? (activeDealIds.has(a.entity_id) || activeDealIds.has(a.deal_id)) : true)
   const activePendingDealActions = pendingActions.filter(a => a.entity_type === 'deal' ? (activeDealIds.has(a.entity_id) || activeDealIds.has(a.deal_id)) : true)
 
-  const [isSyncingHubSpot, setIsSyncingHubSpot] = useState(false)
-  const syncHubSpotMut = useMutation({
+  const [isSyncingSalesforce, setIsSyncingSalesforce] = useState(false)
+  const syncSalesforceMut = useMutation({
     mutationFn: () => runAgent('A5', {}),
-    onMutate: () => setIsSyncingHubSpot(true),
+    onMutate: () => setIsSyncingSalesforce(true),
     onSuccess: () => {
       setTimeout(() => {
         qc.invalidateQueries({ queryKey: ['deals'] })
         qc.invalidateQueries({ queryKey: ['pending-actions'] })
-        setIsSyncingHubSpot(false)
+        setIsSyncingSalesforce(false)
       }, 2000)
     },
-    onError: () => setIsSyncingHubSpot(false),
+    onError: () => setIsSyncingSalesforce(false),
   })
 
   // Filter deals based on selected stage
-  const filteredDeals = stageFilter === 'all' 
-    ? deals 
+  const filteredDeals = stageFilter === 'all'
+    ? deals
     : deals.filter(d => (d.stage?.toLowerCase() || '') === stageFilter)
 
   // Handle clicking a deal from CRM action
@@ -104,12 +104,12 @@ export function Deals() {
           <p className="text-sm text-gray-500 mt-0.5">Live CRM pipeline health, Agent 5 deal intelligence & BANT qualification</p>
         </div>
         <button
-          onClick={() => syncHubSpotMut.mutate()}
-          disabled={isSyncingHubSpot}
+          onClick={() => syncSalesforceMut.mutate()}
+          disabled={isSyncingSalesforce}
           className="text-xs font-semibold text-orange-700 hover:text-orange-800 bg-orange-50 border border-orange-200 px-3.5 py-2 rounded-xl transition-all flex items-center gap-1.5 cursor-pointer disabled:opacity-50 shadow-xs hover:shadow-sm"
         >
-          <RefreshCw size={13} className={isSyncingHubSpot ? 'animate-spin' : ''} />
-          <span>{isSyncingHubSpot ? 'Syncing CRM Deals...' : '🔄 Sync with HubSpot'}</span>
+          <RefreshCw size={13} className={isSyncingSalesforce ? 'animate-spin' : ''} />
+          <span>{isSyncingSalesforce ? 'Syncing CRM Deals...' : '🔄 Sync with Salesforce'}</span>
         </button>
       </div>
 
@@ -131,9 +131,9 @@ export function Deals() {
             <Tooltip
               contentStyle={{ background: '#FFFFFF', border: '1px solid #E5E7EB', borderRadius: 8, fontSize: 12, boxShadow: '0 4px 6px -1px rgba(0,0,0,0.1)' }}
               labelStyle={{ color: '#374151', fontWeight: 600 }}
-              formatter={(v, name) => [name === 'value' ? `$${(v/1000).toFixed(0)}k` : v, name]}
+              formatter={(v, name) => [name === 'value' ? `$${(v / 1000).toFixed(0)}k` : v, name]}
             />
-            <Bar dataKey="count" fill="#3B82F6" radius={[4,4,0,0]} name="Deals" />
+            <Bar dataKey="count" fill="#3B82F6" radius={[4, 4, 0, 0]} name="Deals" />
           </BarChart>
         </ResponsiveContainer>
       </div>
@@ -155,11 +155,10 @@ export function Deals() {
           <div className="px-5 py-2.5 bg-white border-b border-gray-100 flex items-center gap-1.5 overflow-x-auto text-xs">
             <button
               onClick={() => setStageFilter('all')}
-              className={`px-2.5 py-1 rounded-lg font-semibold transition-all cursor-pointer ${
-                stageFilter === 'all'
+              className={`px-2.5 py-1 rounded-lg font-semibold transition-all cursor-pointer ${stageFilter === 'all'
                   ? 'bg-blue-600 text-white shadow-xs'
                   : 'text-gray-600 hover:bg-gray-100'
-              }`}
+                }`}
             >
               All ({deals.length})
             </button>
@@ -170,11 +169,10 @@ export function Deals() {
                 <button
                   key={stage}
                   onClick={() => setStageFilter(stage)}
-                  className={`px-2.5 py-1 rounded-lg font-semibold capitalize transition-all cursor-pointer ${
-                    stageFilter === stage
+                  className={`px-2.5 py-1 rounded-lg font-semibold capitalize transition-all cursor-pointer ${stageFilter === stage
                       ? 'bg-blue-600 text-white shadow-xs'
                       : 'text-gray-600 hover:bg-gray-100'
-                  }`}
+                    }`}
                 >
                   {stage} ({count})
                 </button>
@@ -191,14 +189,14 @@ export function Deals() {
             ) : filteredDeals.length === 0 ? (
               <div className="p-10 text-center text-gray-400 text-sm space-y-1">
                 <div className="font-semibold text-gray-600">No active deals found</div>
-                <div className="text-xs">Try selecting a different stage filter or click Sync with HubSpot.</div>
+                <div className="text-xs">Try selecting a different stage filter or click Sync with Salesforce.</div>
               </div>
             ) : filteredDeals.map(d => {
               const contactObj = d.contact || {}
               const cName = [contactObj.first_name, contactObj.last_name].filter(Boolean).join(' ')
               return (
-                <div 
-                  key={d.id} 
+                <div
+                  key={d.id}
                   onClick={() => setSelectedDeal(d)}
                   className="px-5 py-4 hover:bg-blue-50/60 cursor-pointer transition-all group relative border-l-3 border-transparent hover:border-blue-600"
                 >
@@ -208,7 +206,7 @@ export function Deals() {
                         <span>{d.name}</span>
                         <ArrowRight size={12} className="text-blue-500 opacity-0 group-hover:opacity-100 transition-opacity shrink-0" />
                       </div>
-                      
+
                       <div className="flex items-center gap-2 text-xs text-gray-500 mt-1 flex-wrap">
                         <span className="capitalize font-semibold text-blue-700 bg-blue-50 border border-blue-200/60 px-2 py-0.2 rounded-md text-[11px]">
                           {d.stage}
@@ -230,7 +228,7 @@ export function Deals() {
                     <div className="flex flex-col items-end gap-1.5 shrink-0">
                       {d.amount != null && (
                         <span className="text-xs font-extrabold text-gray-900 font-mono bg-gray-50 px-2 py-0.5 rounded border border-gray-200">
-                          ${(d.amount/1000).toFixed(0)}k
+                          ${(d.amount / 1000).toFixed(0)}k
                         </span>
                       )}
                       <div className="flex items-center gap-1.5">
@@ -268,21 +266,19 @@ export function Deals() {
               <div className="flex bg-gray-200/80 p-0.5 rounded-lg text-xs font-medium">
                 <button
                   onClick={() => setActionTab('pending')}
-                  className={`px-2.5 py-1 rounded-md transition-all cursor-pointer ${
-                    actionTab === 'pending'
+                  className={`px-2.5 py-1 rounded-md transition-all cursor-pointer ${actionTab === 'pending'
                       ? 'bg-white text-blue-600 shadow-xs font-semibold'
                       : 'text-gray-600 hover:text-gray-900'
-                  }`}
+                    }`}
                 >
                   Active ({activePendingDealActions.length})
                 </button>
                 <button
                   onClick={() => setActionTab('history')}
-                  className={`px-2.5 py-1 rounded-md transition-all cursor-pointer ${
-                    actionTab === 'history'
+                  className={`px-2.5 py-1 rounded-md transition-all cursor-pointer ${actionTab === 'history'
                       ? 'bg-white text-blue-600 shadow-xs font-semibold'
                       : 'text-gray-600 hover:text-gray-900'
-                  }`}
+                    }`}
                 >
                   History
                 </button>
@@ -318,16 +314,15 @@ export function Deals() {
 
                   <div className="flex items-center gap-1.5">
                     <span className="text-[10px] font-bold text-amber-700 bg-amber-50 border border-amber-200 px-2 py-0.5 rounded-full capitalize">
-                      {a.action_type?.replace(/_/g,' ')}
+                      {a.action_type?.replace(/_/g, ' ')}
                     </span>
                     {actionTab === 'history' && (
-                      <span className={`text-[10px] font-bold px-2 py-0.5 rounded-full capitalize ${
-                        a.status === 'approved'
+                      <span className={`text-[10px] font-bold px-2 py-0.5 rounded-full capitalize ${a.status === 'approved'
                           ? 'bg-emerald-50 text-emerald-700 border border-emerald-200'
                           : a.status === 'dismissed'
-                          ? 'bg-gray-100 text-gray-700 border border-gray-200'
-                          : 'bg-amber-50 text-amber-700 border border-amber-200'
-                      }`}>
+                            ? 'bg-gray-100 text-gray-700 border border-gray-200'
+                            : 'bg-amber-50 text-amber-700 border border-amber-200'
+                        }`}>
                         {a.status} {a.approved_by ? `by ${a.approved_by}` : ''}
                       </span>
                     )}
@@ -335,7 +330,7 @@ export function Deals() {
                 </div>
 
                 {a.deal_name && (
-                  <div 
+                  <div
                     onClick={() => handleActionDealClick(a)}
                     className="text-[11px] text-gray-500 font-medium cursor-pointer hover:text-blue-600 transition-colors flex items-center gap-1"
                     title="Click to view deal details"
@@ -375,8 +370,8 @@ export function Deals() {
 
       {/* Interactive Comprehensive Deal Detail & Intelligence Modal */}
       {selectedDeal && (
-        <DealDetailModal 
-          selectedDeal={selectedDeal} 
+        <DealDetailModal
+          selectedDeal={selectedDeal}
           onClose={() => setSelectedDeal(null)}
           actions={actions}
           approveMut={approveMut}
@@ -400,16 +395,16 @@ export function Revenue() {
     queryFn: () => fetchFunnelMetrics(30),
   })
 
-  const funnelData = Object.entries(metrics).map(([k,v]) => ({
-    name: k.replace(/_/g,' '),
+  const funnelData = Object.entries(metrics).map(([k, v]) => ({
+    name: k.replace(/_/g, ' '),
     count: v,
-  })).sort((a,b) => b.count - a.count).slice(0,8)
+  })).sort((a, b) => b.count - a.count).slice(0, 8)
 
   const stages = forecast?.stage_conversion_rates
-    ? Object.entries(forecast.stage_conversion_rates).map(([k,v]) => ({
-        stage: k.replace(/_to_.*/, '').replace(/_/g,' '),
-        rate: Math.round(v * 100),
-      }))
+    ? Object.entries(forecast.stage_conversion_rates).map(([k, v]) => ({
+      stage: k.replace(/_to_.*/, '').replace(/_/g, ' '),
+      rate: Math.round(v * 100),
+    }))
     : []
 
   return (
@@ -514,9 +509,9 @@ export function Revenue() {
               </thead>
               <tbody className="divide-y divide-gray-800/60">
                 {deals.map(deal => {
-                  const amt = deal.amount || 50000
+                  const amt = deal.amount
                   const prob = deal.win_probability != null ? deal.win_probability : 35
-                  const ev = (amt * prob) / 100
+                  const ev = amt != null ? (amt * prob) / 100 : null
                   return (
                     <tr key={deal.id} className="hover:bg-gray-800/30 transition-colors">
                       <td className="py-2.5 px-3">
@@ -529,19 +524,18 @@ export function Revenue() {
                         </span>
                       </td>
                       <td className="py-2.5 px-3 text-right font-medium text-gray-200">
-                        ${Math.round(amt).toLocaleString()}
+                        {amt != null ? `$${Math.round(amt).toLocaleString()}` : <span className="text-gray-500 italic text-[11px]">Not available</span>}
                       </td>
                       <td className="py-2.5 px-3 text-center">
-                        <span className={`inline-block px-2 py-0.5 rounded font-bold text-xs ${
-                          prob >= 50 ? 'bg-emerald-900/30 text-emerald-400 border border-emerald-800/40' :
-                          prob >= 30 ? 'bg-amber-900/30 text-amber-400 border border-amber-800/40' :
-                          'bg-gray-800 text-gray-400 border border-gray-700'
-                        }`}>
+                        <span className={`inline-block px-2 py-0.5 rounded font-bold text-xs ${prob >= 50 ? 'bg-emerald-900/30 text-emerald-400 border border-emerald-800/40' :
+                            prob >= 30 ? 'bg-amber-900/30 text-amber-400 border border-amber-800/40' :
+                              'bg-gray-800 text-gray-400 border border-gray-700'
+                          }`}>
                           {Math.round(prob)}%
                         </span>
                       </td>
                       <td className="py-2.5 px-3 text-right font-bold text-blue-400">
-                        ${Math.round(ev).toLocaleString()}
+                        {ev != null ? `$${Math.round(ev).toLocaleString()}` : <span className="text-gray-500 italic text-[11px]">--</span>}
                       </td>
                       <td className="py-2.5 px-3 text-gray-400 max-w-xs truncate" title={deal.next_best_action || 'Review stage progression'}>
                         {deal.next_best_action || 'Schedule follow-up and review BANT criteria'}
@@ -565,7 +559,7 @@ export function Revenue() {
               <XAxis type="number" hide />
               <YAxis dataKey="name" type="category" tick={{ fill: '#6B7280', fontSize: 11 }} axisLine={false} tickLine={false} width={140} />
               <Tooltip contentStyle={{ background: '#1F2937', border: '1px solid #374151', borderRadius: 8, fontSize: 12 }} />
-              <Bar dataKey="count" fill="#3B82F6" radius={[0,4,4,0]} />
+              <Bar dataKey="count" fill="#3B82F6" radius={[0, 4, 4, 0]} />
             </BarChart>
           </ResponsiveContainer>
         </div>
@@ -576,34 +570,48 @@ export function Revenue() {
 
 // ── Agents Control Page ───────────────────────────────────────────────────
 const AGENTS = [
-  { id: 'A1', name: 'Prospect Intelligence', tier: 'data',
+  {
+    id: 'A1', name: 'Prospect Intelligence', tier: 'data',
     desc: 'Win-pattern model. Discovers net-new Apollo people, enriches, scores, and saves contacts.',
     apis: ['Apollo people search', 'Apollo bulk enrichment'],
-    schedule: 'Manual — runs when triggered' },
-  { id: 'A2', name: 'Signal Intelligence', tier: 'data',
+    schedule: 'Manual — runs when triggered'
+  },
+  {
+    id: 'A2', name: 'Signal Intelligence', tier: 'data',
     desc: 'Signal Conversion Registry. Monitors Adzuna and NewsAPI for buying intent.',
     apis: ['Adzuna', 'NewsAPI'],
-    schedule: 'Every hour' },
-  { id: 'A3', name: 'Multi-Channel Outreach', tier: 'data',
+    schedule: 'Every hour'
+  },
+  {
+    id: 'A3', name: 'Multi-Channel Outreach', tier: 'data',
     desc: 'Signal-matched sequences. Deduplication enforced. Claude Haiku for generation.',
     apis: ['Anthropic Claude API', 'Instantly', 'Dry run + approval default'],
-    schedule: 'After signal detection' },
-  { id: 'A4', name: 'Conversation Intelligence', tier: 'data',
+    schedule: 'After signal detection'
+  },
+  {
+    id: 'A4', name: 'Conversation Intelligence', tier: 'data',
     desc: 'Full thread memory. Rolling readiness score 0–100. Slack approval loop.',
     apis: ['Instantly webhook', 'Anthropic Claude API', 'Cal.com (free)', 'Slack API (free)'],
-    schedule: 'On reply webhook' },
-  { id: 'A5', name: 'Deal Intelligence', tier: 'intelligence',
+    schedule: 'On reply webhook'
+  },
+  {
+    id: 'A5', name: 'Deal Intelligence', tier: 'intelligence',
     desc: 'Transcript extraction. Pattern comparison vs closed-won baselines. Risk flagging.',
-    apis: ['Fireflies.ai webhook (free 800 min)', 'HubSpot API (free)', 'Gmail API (free)'],
-    schedule: 'On transcript + daily scan' },
-  { id: 'A6', name: 'Content Intelligence', tier: 'intelligence',
+    apis: ['Fireflies.ai webhook (free 800 min)', 'Salesforce CRM API', 'Gmail API (free)'],
+    schedule: 'On transcript + daily scan'
+  },
+  {
+    id: 'A6', name: 'Content Intelligence', tier: 'intelligence',
     desc: 'Demand-driven briefs from forum signals. Five separate format generations.',
     apis: ['NewsAPI', 'Anthropic Claude API', 'Hash embeddings'],
-    schedule: 'Every Tuesday 9am' },
-  { id: 'A7', name: 'Predictive Revenue', tier: 'intelligence',
+    schedule: 'Every Tuesday 9am'
+  },
+  {
+    id: 'A7', name: 'Predictive Revenue', tier: 'intelligence',
     desc: '30/60/90-day forecast. Constraint detection. Weekly digest via Resend.',
-    apis: ['HubSpot API (free)', 'Resend (free 100/day)', 'Internal PIG only'],
-    schedule: 'Every night 2am' },
+    apis: ['Salesforce CRM API', 'Resend (free 100/day)', 'Internal PIG only'],
+    schedule: 'Every night 2am'
+  },
 ]
 
 // Agents that have a Celery beat schedule entry (A1, A2, A6)
@@ -721,11 +729,11 @@ export function Agents() {
   useEffect(() => {
     fetchAgentSchedules()
       .then(data => setSchedules(data || {}))
-      .catch(() => {})
+      .catch(() => { })
   }, [])
 
-  const getMode  = id => agentModes[id] || 'manual'
-  const setMode  = (id, mode) => setAgentModes(m => ({ ...m, [id]: mode }))
+  const getMode = id => agentModes[id] || 'manual'
+  const setMode = (id, mode) => setAgentModes(m => ({ ...m, [id]: mode }))
 
   const saveSchedule = async (agentId, enabled) => {
     setSavingSchedule(s => ({ ...s, [agentId]: true }))
@@ -845,18 +853,17 @@ export function Agents() {
 
       {/* Live pipeline status banner — shown when redirected from intake form */}
       {pipelineStatus && (
-        <div className={`mb-5 flex items-center gap-3 px-4 py-3 rounded-xl border text-sm ${
-          pipelineStatus.startsWith('✓')
+        <div className={`mb-5 flex items-center gap-3 px-4 py-3 rounded-xl border text-sm ${pipelineStatus.startsWith('✓')
             ? 'bg-emerald-950/40 border-emerald-700/40 text-emerald-300'
             : pipelineStatus.toLowerCase().includes('fail')
-            ? 'bg-red-950/40 border-red-700/40 text-red-300'
-            : 'bg-blue-950/40 border-blue-700/40 text-blue-300'
-        }`}>
+              ? 'bg-red-950/40 border-red-700/40 text-red-300'
+              : 'bg-blue-950/40 border-blue-700/40 text-blue-300'
+          }`}>
           {pipelineRunning
             ? <Loader2 size={16} className="animate-spin shrink-0" />
             : pipelineStatus.startsWith('✓')
-            ? <CheckCircle size={16} className="shrink-0 text-emerald-400" />
-            : <Bot size={16} className="shrink-0" />}
+              ? <CheckCircle size={16} className="shrink-0 text-emerald-400" />
+              : <Bot size={16} className="shrink-0" />}
           <span className="font-medium">{pipelineStatus}</span>
         </div>
       )}
@@ -914,19 +921,17 @@ export function Agents() {
                   <div className="flex gap-1 bg-[#0F1623] rounded-md p-0.5">
                     <button
                       onClick={() => setMode(agent.id, 'manual')}
-                      className={`px-2.5 py-1 rounded text-[11px] transition-colors ${
-                        getMode(agent.id) === 'manual'
+                      className={`px-2.5 py-1 rounded text-[11px] transition-colors ${getMode(agent.id) === 'manual'
                           ? 'bg-blue-600 text-white'
                           : 'text-gray-500 hover:text-gray-300'
-                      }`}
+                        }`}
                     >Run Now</button>
                     <button
                       onClick={() => setMode(agent.id, 'schedule')}
-                      className={`px-2.5 py-1 rounded text-[11px] transition-colors ${
-                        getMode(agent.id) === 'schedule'
+                      className={`px-2.5 py-1 rounded text-[11px] transition-colors ${getMode(agent.id) === 'schedule'
                           ? 'bg-purple-600 text-white'
                           : 'text-gray-500 hover:text-gray-300'
-                      }`}
+                        }`}
                     >Schedule</button>
                   </div>
                 )}
@@ -995,7 +1000,7 @@ export function Outreach() {
 
   const [selectedDraft, setSelectedDraft] = useState(null)
 
-  const gmailComposeUrl = selectedDraft 
+  const gmailComposeUrl = selectedDraft
     ? `https://mail.google.com/mail/?view=cm&fs=1&to=${encodeURIComponent(selectedDraft.contact?.email || '')}&su=${encodeURIComponent(selectedDraft.subject || '')}&body=${encodeURIComponent(selectedDraft.body || '')}`
     : '#';
   const [isEditing, setIsEditing] = useState(false)
@@ -1004,7 +1009,7 @@ export function Outreach() {
   const [activeTab, setActiveTab] = useState('active') // 'active' or 'history'
 
   const qc = useQueryClient()
-  
+
   const approveMut = useMutation({
     mutationFn: approveOutreachDraft,
     onSuccess: () => {
@@ -1012,7 +1017,7 @@ export function Outreach() {
       setSelectedDraft(prev => prev ? { ...prev, approval_state: 'approved' } : null)
     }
   })
-  
+
   const rejectMut = useMutation({
     mutationFn: rejectOutreachDraft,
     onSuccess: () => {
@@ -1020,7 +1025,7 @@ export function Outreach() {
       setSelectedDraft(prev => prev ? { ...prev, approval_state: 'rejected' } : null)
     }
   })
-  
+
   const editMut = useMutation({
     mutationFn: ({ id, subject, body }) => editOutreachDraft(id, subject, body),
     onSuccess: (data) => {
@@ -1071,26 +1076,24 @@ export function Outreach() {
           <div className="flex border-b border-[#1F2937] bg-[#111827]">
             <button
               onClick={() => setActiveTab('active')}
-              className={`flex-1 py-3 text-xs font-semibold border-b-2 transition-all cursor-pointer ${
-                activeTab === 'active'
+              className={`flex-1 py-3 text-xs font-semibold border-b-2 transition-all cursor-pointer ${activeTab === 'active'
                   ? 'border-purple-500 text-purple-400 bg-purple-950/10'
                   : 'border-transparent text-gray-500 hover:text-gray-400 hover:bg-[#374151]/30'
-              }`}
+                }`}
             >
               Active Session ({activeDrafts.length})
             </button>
             <button
               onClick={() => setActiveTab('history')}
-              className={`flex-1 py-3 text-xs font-semibold border-b-2 transition-all cursor-pointer ${
-                activeTab === 'history'
+              className={`flex-1 py-3 text-xs font-semibold border-b-2 transition-all cursor-pointer ${activeTab === 'history'
                   ? 'border-purple-500 text-purple-400 bg-purple-950/10'
                   : 'border-transparent text-gray-500 hover:text-gray-400 hover:bg-[#374151]/30'
-              }`}
+                }`}
             >
               History ({historicalDrafts.length})
             </button>
           </div>
-          
+
           <div className="divide-y divide-[#1F2937] overflow-y-auto flex-1">
             {isLoading ? (
               <div className="p-10 text-center text-gray-500 text-sm">Loading drafts...</div>
@@ -1142,24 +1145,24 @@ export function Outreach() {
                           <button onClick={() => setIsEditing(true)} className="btn-secondary text-xs py-1.5 px-3">
                             Edit
                           </button>
-                          <a 
-                            href={gmailComposeUrl} 
-                            target="_blank" 
+                          <a
+                            href={gmailComposeUrl}
+                            target="_blank"
                             rel="noopener noreferrer"
                             onClick={() => approveMut.mutate(selectedDraft.id)}
                             className="bg-[#1a73e8] hover:bg-[#1557b0] text-white text-xs font-semibold py-1.5 px-3 rounded-lg flex items-center gap-1.5 transition-colors duration-200"
                           >
                             Send via Gmail Web
                           </a>
-                          <button 
-                            onClick={() => approveMut.mutate(selectedDraft.id)} 
+                          <button
+                            onClick={() => approveMut.mutate(selectedDraft.id)}
                             disabled={approveMut.isPending}
                             className="btn-primary text-xs py-1.5 px-3"
                           >
                             {approveMut.isPending ? 'Sending...' : 'Approve & Send'}
                           </button>
-                          <button 
-                            onClick={() => rejectMut.mutate(selectedDraft.id)} 
+                          <button
+                            onClick={() => rejectMut.mutate(selectedDraft.id)}
                             disabled={rejectMut.isPending}
                             className="btn-danger text-xs py-1.5 px-3"
                           >
@@ -1167,14 +1170,14 @@ export function Outreach() {
                           </button>
                         </>
                       ) : selectedDraft.approval_state === 'approved' ? (
-                        <button 
+                        <button
                           disabled
                           className="bg-green-600 text-white text-xs font-semibold py-1.5 px-4 rounded-lg cursor-not-allowed flex items-center gap-1.5"
                         >
                           <span className="text-white font-bold">✓</span> Sent & Approved
                         </button>
                       ) : (
-                        <button 
+                        <button
                           disabled
                           className="bg-red-600 text-white text-xs font-semibold py-1.5 px-4 rounded-lg cursor-not-allowed"
                         >
@@ -1226,8 +1229,8 @@ export function Outreach() {
                       <button onClick={() => setIsEditing(false)} className="btn-secondary text-xs">
                         Cancel
                       </button>
-                      <button 
-                        onClick={handleSave} 
+                      <button
+                        onClick={handleSave}
                         disabled={editMut.isPending}
                         className="btn-primary text-xs"
                       >
@@ -1277,7 +1280,7 @@ export function Content() {
     }),
   })
 
-  const formats = ['linkedin_post','email_sequence','case_study','blog_article','sales_deck_outline']
+  const formats = ['linkedin_post', 'email_sequence', 'case_study', 'blog_article', 'sales_deck_outline']
 
   const handleCopy = (e, id, text) => {
     e.stopPropagation()
@@ -1297,7 +1300,7 @@ export function Content() {
         </div>
         <select className="input w-44" value={format} onChange={e => setFormat(e.target.value)}>
           <option value="">All formats</option>
-          {formats.map(f => <option key={f} value={f}>{f.replace(/_/g,' ')}</option>)}
+          {formats.map(f => <option key={f} value={f}>{f.replace(/_/g, ' ')}</option>)}
         </select>
       </div>
       <div className="space-y-3">
@@ -1306,20 +1309,20 @@ export function Content() {
         ) : content.map(c => {
           const isExpanded = expandedId === c.id
           return (
-            <div 
-              key={c.id} 
+            <div
+              key={c.id}
               onClick={() => setExpandedId(isExpanded ? null : c.id)}
               className={`card cursor-pointer hover:border-purple-500/50 transition-all duration-200 ${isExpanded ? 'border-purple-500 ring-1 ring-purple-500/30' : ''}`}
             >
               <div className="flex items-start justify-between gap-4 mb-2">
                 <div className="text-sm font-semibold text-gray-200">{c.title}</div>
-                <span className="badge badge-blue shrink-0 text-[10px] capitalize">{c.content_format?.replace(/_/g,' ')}</span>
+                <span className="badge badge-blue shrink-0 text-[10px] capitalize">{c.content_format?.replace(/_/g, ' ')}</span>
               </div>
               {c.icp_segment && <div className="text-xs text-purple-400 font-medium mb-2.5">ICP Segment: {c.icp_segment}</div>}
-              
+
               {isExpanded ? (
                 <div className="space-y-3">
-                  <div 
+                  <div
                     style={{
                       backgroundColor: '#F8FAFC',
                       color: '#0F172A',
@@ -1338,7 +1341,7 @@ export function Content() {
                     {c.content}
                   </div>
                   <div className="flex items-center justify-between pt-1 flex-wrap gap-2">
-                    <button 
+                    <button
                       onClick={(e) => handleCopy(e, c.id, c.content)}
                       className="text-xs font-semibold text-purple-700 hover:text-purple-800 bg-purple-50 hover:bg-purple-100/80 border border-purple-200 px-3 py-1.5 rounded-lg transition-colors flex items-center gap-1.5"
                     >
@@ -1359,7 +1362,7 @@ export function Content() {
                 </div>
               ) : (
                 <div>
-                  <div 
+                  <div
                     style={{
                       backgroundColor: '#F8FAFC',
                       color: '#475569',
@@ -1383,7 +1386,7 @@ export function Content() {
                   </div>
                 </div>
               )}
-              
+
               <div className="text-[10px] text-gray-500 mt-3 border-t border-[#E2E8F0] pt-2.5 flex items-center justify-between">
                 <span>Generated: {new Date(c.created_at).toLocaleDateString()}</span>
                 <span>{c.used_in_outreach ? '✓ Used in Outreach' : 'Not yet used'}</span>

@@ -102,6 +102,14 @@ class Contact(Base):
     annual_revenue: Mapped[Optional[str]] = mapped_column(String(50))
     employee_count: Mapped[Optional[int]] = mapped_column(Integer)
 
+    # Prospect location intelligence
+    prospect_location: Mapped[Optional[str]] = mapped_column(String(200), nullable=True)
+    work_mode: Mapped[Optional[str]] = mapped_column(String(50), nullable=True, default="Not specified")
+    location_source: Mapped[Optional[str]] = mapped_column(String(100), nullable=True)
+
+    # Prospect selection / qualification summary
+    selection_summary: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+
     # Scoring  A1
     icp_score: Mapped[Optional[float]] = mapped_column(Float, index=True)
     icp_score_breakdown: Mapped[Optional[dict]] = mapped_column(JSONB)
@@ -129,7 +137,8 @@ class Contact(Base):
 
     # Source tracking
     source: Mapped[Optional[str]] = mapped_column(String(50))
-    hubspot_id: Mapped[Optional[str]] = mapped_column(String(100))
+    salesforce_contact_id: Mapped[Optional[str]] = mapped_column(String(100), nullable=True)
+    hubspot_id: Mapped[Optional[str]] = mapped_column(String(100), nullable=True)  # Deprecated: Retained for historical record compatibility
     apollo_id: Mapped[Optional[str]] = mapped_column(String(100))
     user_input_id: Mapped[Optional[int]] = mapped_column(Integer, ForeignKey("user_inputs.id"), nullable=True, index=True)
 
@@ -160,6 +169,7 @@ class SignalEvent(Base):
 
     id: Mapped[str] = mapped_column(UUID(as_uuid=False), primary_key=True, default=generate_uuid)
     contact_id: Mapped[str] = mapped_column(UUID(as_uuid=False), ForeignKey("contacts.id"), nullable=False, index=True)
+    user_id: Mapped[Optional[str]] = mapped_column(UUID(as_uuid=False), ForeignKey("users.id"), nullable=True, index=True)
     signal_type: Mapped[str] = mapped_column(String(50), nullable=False, index=True)
     signal_source: Mapped[str] = mapped_column(String(100))
     confidence: Mapped[float] = mapped_column(Float, default=0.5)
@@ -210,6 +220,7 @@ class OutreachLog(Base):
     body_preview: Mapped[Optional[str]] = mapped_column(Text)
     prompt_variant_id: Mapped[Optional[str]] = mapped_column(String(50))
     signal_id: Mapped[Optional[str]] = mapped_column(UUID(as_uuid=False), ForeignKey("signal_events.id"))
+    user_id: Mapped[Optional[str]] = mapped_column(UUID(as_uuid=False), ForeignKey("users.id"), nullable=True, index=True)
     sequence_step: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
     call_script: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
     linkedin_note: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
@@ -306,11 +317,13 @@ class Deal(Base):
     __tablename__ = "deals"
 
     id: Mapped[str] = mapped_column(UUID(as_uuid=False), primary_key=True, default=generate_uuid)
-    hubspot_deal_id: Mapped[Optional[str]] = mapped_column(String(100), unique=True, index=True)
+    salesforce_opportunity_id: Mapped[Optional[str]] = mapped_column(String(100), unique=True, index=True, nullable=True)
+    hubspot_deal_id: Mapped[Optional[str]] = mapped_column(String(100), unique=True, index=True, nullable=True)  # Deprecated: Retained for historical record compatibility
     contact_id: Mapped[Optional[str]] = mapped_column(UUID(as_uuid=False), ForeignKey("contacts.id"), index=True)
     name: Mapped[str] = mapped_column(String(300))
     stage: Mapped[str] = mapped_column(String(50), default=DealStage.PROSPECTING, index=True)
     amount: Mapped[Optional[float]] = mapped_column(Float)
+    amount_source: Mapped[Optional[str]] = mapped_column(String(100), nullable=True)
     close_date: Mapped[Optional[datetime]] = mapped_column(DateTime)
     owner_email: Mapped[Optional[str]] = mapped_column(String(200))
 
@@ -544,6 +557,7 @@ class OutreachDraft(Base):
 
     id: Mapped[str] = mapped_column(UUID(as_uuid=False), primary_key=True, default=generate_uuid)
     contact_id: Mapped[str] = mapped_column(UUID(as_uuid=False), ForeignKey("contacts.id"), nullable=False, index=True)
+    user_id: Mapped[Optional[str]] = mapped_column(UUID(as_uuid=False), ForeignKey("users.id"), nullable=True, index=True)
     signal_id: Mapped[Optional[str]] = mapped_column(UUID(as_uuid=False), ForeignKey("signal_events.id"))
     
     subject: Mapped[str] = mapped_column(String(500), nullable=False)
@@ -605,6 +619,11 @@ class User(Base):
     email: Mapped[str] = mapped_column(String(255), unique=True, nullable=False, index=True)
     password_hash: Mapped[str] = mapped_column(String(255), nullable=False)
     is_active: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)
+    role: Mapped[str] = mapped_column(String(50), default="SALES_REPRESENTATIVE", nullable=False)
+    cal_com_username: Mapped[Optional[str]] = mapped_column(String(100), nullable=True)
+    cal_com_event_slug: Mapped[Optional[str]] = mapped_column(String(100), nullable=True)
+    cal_com_booking_url: Mapped[Optional[str]] = mapped_column(String(255), nullable=True)
+    slack_user_id: Mapped[Optional[str]] = mapped_column(String(50), nullable=True)
 
     created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
     updated_at: Mapped[datetime] = mapped_column(
@@ -612,6 +631,40 @@ class User(Base):
     )
 
     user_inputs: Mapped[List["UserInput"]] = relationship("UserInput", back_populates="user")
+    integrations: Mapped[List["UserIntegration"]] = relationship("UserIntegration", back_populates="user", cascade="all, delete-orphan")
+
+
+class UserIntegration(Base):
+    """
+    Stores user-specific third-party integrations (e.g. Google Workspace/Gmail OAuth).
+    Tokens are stored in encrypted format.
+    """
+    __tablename__ = "user_integrations"
+
+    id: Mapped[str] = mapped_column(UUID(as_uuid=False), primary_key=True, default=generate_uuid)
+    user_id: Mapped[str] = mapped_column(UUID(as_uuid=False), ForeignKey("users.id", ondelete="CASCADE"), nullable=False, index=True)
+    provider: Mapped[str] = mapped_column(String(50), nullable=False, default="google")  # "google"
+    provider_account_email: Mapped[Optional[str]] = mapped_column(String(255), nullable=True, index=True)
+
+    # Encrypted token storage
+    encrypted_access_token: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    encrypted_refresh_token: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    token_expires_at: Mapped[Optional[datetime]] = mapped_column(DateTime, nullable=True)
+    scopes: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+
+    status: Mapped[str] = mapped_column(String(50), default="connected", nullable=False)  # "connected", "disconnected", "error", "expired"
+    error_message: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime, default=datetime.utcnow, onupdate=datetime.utcnow
+    )
+
+    user: Mapped["User"] = relationship("User", back_populates="integrations")
+
+    __table_args__ = (
+        UniqueConstraint("user_id", "provider", name="uq_user_provider"),
+    )
 
 
 class Notification(Base):

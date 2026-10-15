@@ -25,6 +25,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.core.config import settings
 from app.models.models import Contact, FunnelEvent, ContactUserInputAssociation
 from app.services.scoring_service import WinPatternScorer
+from app.services.prospect_summary import generate_selection_summary
 
 logger = structlog.get_logger()
 
@@ -45,9 +46,18 @@ class ProspectAgent:
     async def run(self, icp_config: Dict[str, Any]) -> Dict[str, Any]:
         logger.info("A1 starting", config_keys=list(icp_config.keys()))
 
-        raw_contacts, provider_meta = await self._fetch_from_apollo(icp_config)
+        use_apollo = icp_config.get("use_apollo")
+        if use_apollo is False or not settings.APOLLO_API_KEY:
+            logger.info("Running A1 in offline mode without Apollo API")
+            raw_contacts, provider_meta = await self._fetch_offline(icp_config)
+        else:
+            raw_contacts, provider_meta = await self._fetch_from_apollo(icp_config)
+            if not raw_contacts:
+                logger.info("Apollo fetch returned 0 contacts, falling back to offline prospect store")
+                raw_contacts, provider_meta = await self._fetch_offline(icp_config)
+
         logger.info(
-            "Apollo prospect fetch complete",
+            "Prospect fetch complete",
             count=len(raw_contacts),
             **provider_meta,
         )
@@ -217,6 +227,94 @@ class ProspectAgent:
                     return False
 
         return True
+
+    async def _fetch_offline(
+        self, icp_config: Dict[str, Any]
+    ) -> Tuple[List[Dict[str, Any]], Dict[str, Any]]:
+        """
+        Offline fallback prospect store.
+        Loads real prospects from prospects_export.csv without calling Apollo API.
+        """
+        import csv
+        import json
+        from pathlib import Path
+
+        candidates_paths = [
+            Path("/app/prospects_export.csv"),
+            Path(__file__).resolve().parent.parent.parent / "prospects_export.csv",
+            Path("prospects_export.csv"),
+        ]
+        csv_file = None
+        for p in candidates_paths:
+            if p.exists():
+                csv_file = p
+                break
+
+        csv_candidates = []
+        if csv_file:
+            with open(csv_file, mode="r", encoding="utf-8") as f:
+                reader = csv.DictReader(f)
+                for row in reader:
+                    email = (row.get("email") or "").strip().lower()
+                    if not email:
+                        continue
+
+                    tech_raw = row.get("tech_stack")
+                    tech_list = []
+                    if tech_raw:
+                        try:
+                            tech_list = json.loads(tech_raw) if isinstance(tech_raw, str) else tech_raw
+                        except Exception:
+                            tech_list = [t.strip() for t in str(tech_raw).split(",") if t.strip()]
+
+                    geo = (row.get("geography") or "").strip()
+                    prospect_loc = (row.get("prospect_location") or geo or "").strip() or None
+
+                    csv_candidates.append({
+                        "email": email,
+                        "first_name": row.get("first_name") or "",
+                        "last_name": row.get("last_name") or "",
+                        "title": row.get("title") or "",
+                        "company": row.get("company") or "",
+                        "company_domain": row.get("company_domain") or "",
+                        "linkedin_url": row.get("linkedin_url") or "",
+                        "company_size": row.get("company_size") or "",
+                        "employee_count": int(row["employee_count"]) if row.get("employee_count") and str(row["employee_count"]).isdigit() else None,
+                        "industry": row.get("industry") or "",
+                        "geography": geo,
+                        "prospect_location": prospect_loc,
+                        "work_mode": row.get("work_mode") or "Not specified",
+                        "location_source": "Offline/Database",
+                        "tech_stack": tech_list if isinstance(tech_list, list) else [],
+                        "funding_stage": row.get("funding_stage") or "",
+                        "apollo_id": row.get("apollo_id") or "",
+                        "source": "offline_store",
+                        "email_valid": True,
+                        "email_verified": True,
+                    })
+
+        enrich_limit = int(icp_config.get("enrich_limit", getattr(settings, "APOLLO_ENRICH_LIMIT", 10)))
+        target_titles = [t.lower() for t in (icp_config.get("titles") or []) if t]
+
+        matched = []
+        if target_titles:
+            for c in csv_candidates:
+                c_title = (c.get("title") or "").lower()
+                if any(tt in c_title or c_title in tt for tt in target_titles):
+                    matched.append(c)
+
+        candidates = matched if matched else csv_candidates
+        selected = candidates[:enrich_limit]
+
+        return selected, {
+            "provider": "offline",
+            "method": "offline_prospect_store",
+            "page": 1,
+            "total_entries": len(csv_candidates),
+            "raw_search_count": len(csv_candidates),
+            "candidates_after_dedup": len(selected),
+            "reason": "offline_prospects_loaded",
+        }
 
     async def _fetch_from_apollo(
         self, icp_config: Dict[str, Any]
@@ -557,18 +655,20 @@ class ProspectAgent:
     # Dedupe — check across all existing contacts in database
     # ------------------------------------------------------------------
 
-    async def _get_all_existing_apollo_ids(self) -> set:
-        """Return all apollo_ids of contacts ever saved in the database."""
-        result = await self.db.execute(
-            select(Contact.apollo_id).where(Contact.apollo_id.isnot(None))
-        )
+    async def _get_all_existing_apollo_ids(self, user_id: Optional[str] = None) -> set:
+        """Return all apollo_ids of contacts saved in the database for the user."""
+        stmt = select(Contact.apollo_id).where(Contact.apollo_id.isnot(None))
+        if user_id:
+            stmt = stmt.where(Contact.user_id == user_id)
+        result = await self.db.execute(stmt)
         return {row[0] for row in result.all() if row[0]}
 
-    async def _get_all_existing_emails(self) -> set:
-        """Return all emails of contacts ever saved in the database."""
-        result = await self.db.execute(
-            select(Contact.email).where(Contact.email.isnot(None))
-        )
+    async def _get_all_existing_emails(self, user_id: Optional[str] = None) -> set:
+        """Return all emails of contacts saved in the database for the user."""
+        stmt = select(Contact.email).where(Contact.email.isnot(None))
+        if user_id:
+            stmt = stmt.where(Contact.user_id == user_id)
+        result = await self.db.execute(stmt)
         return {row[0].strip().lower() for row in result.all() if row[0]}
 
     # ------------------------------------------------------------------
@@ -603,25 +703,67 @@ class ProspectAgent:
         if not tech_list and organization.get("technologies"):
             tech_list = organization.get("technologies") or []
 
+        # Company Location (Firmographic)
+        org_city = organization.get("city")
+        org_state = organization.get("state")
+        org_country = organization.get("country")
+        org_loc_parts = [p for p in [org_city, org_state, org_country] if p]
+        company_location = ", ".join(org_loc_parts) if org_loc_parts else (organization.get("raw_address") or "")
+
+        # Prospect Location (Individual - no guessing, store actual returned value)
+        p_formatted = person.get("formatted_address")
+        p_city = person.get("city")
+        p_state = person.get("state")
+        p_country = person.get("country")
+        p_loc_parts = [p for p in [p_city, p_state, p_country] if p]
+
+        if p_formatted and len(p_formatted.split(",")) <= 4 and not any(kw in p_formatted.lower() for kw in ["suite", "avenue", "street", "building", "floor"]):
+            prospect_loc = p_formatted
+        elif p_loc_parts:
+            prospect_loc = ", ".join(p_loc_parts)
+        elif p_formatted:
+            prospect_loc = p_formatted
+        else:
+            prospect_loc = None
+
+        # Work Mode (Individual work arrangement: Office / Remote / Hybrid / Not specified)
+        work_mode = "Not specified"
+        explicit_mode = person.get("work_mode") or person.get("work_arrangement")
+        if explicit_mode and str(explicit_mode).strip().lower() in ["remote", "hybrid", "office"]:
+            work_mode = str(explicit_mode).strip().capitalize()
+        else:
+            text = f"{person.get('title') or ''} {person.get('headline') or ''}".lower()
+            if re.search(r'\b(remote)\b', text):
+                work_mode = "Remote"
+            elif re.search(r'\b(hybrid)\b', text):
+                work_mode = "Hybrid"
+            elif re.search(r'\b(office|on-site|onsite)\b', text):
+                work_mode = "Office"
+
+        location_source = "Apollo" if prospect_loc else None
+
         return {
-            "email":          (person.get("email") or "").strip().lower(),
-            "first_name":     person.get("first_name") or "",
-            "last_name":      person.get("last_name") or "",
-            "title":          person.get("title") or "",
-            "company":        organization.get("name") or "",
-            "company_domain": domain,
-            "linkedin_url":   person.get("linkedin_url") or "",
-            "company_size":   str(organization.get("estimated_num_employees") or ""),
-            "employee_count": organization.get("estimated_num_employees"),
-            "industry":       organization.get("industry") or "",
-            "geography":      person.get("city") or person.get("country") or "",
-            "tech_stack":     tech_list,
-            "funding_stage":  organization.get("latest_funding_stage") or organization.get("funding_stage") or "",
-            "apollo_id":      person.get("id") or "",
-            "_org_id":        organization.get("id") or "",   # used for conditional org enrich
-            "source":         "apollo",
-            "email_valid":    True,
-            "email_verified": True,
+            "email":             (person.get("email") or "").strip().lower(),
+            "first_name":        person.get("first_name") or "",
+            "last_name":         person.get("last_name") or "",
+            "title":             person.get("title") or "",
+            "company":           organization.get("name") or "",
+            "company_domain":    domain,
+            "linkedin_url":      person.get("linkedin_url") or "",
+            "company_size":      str(organization.get("estimated_num_employees") or ""),
+            "employee_count":    organization.get("estimated_num_employees"),
+            "industry":          organization.get("industry") or "",
+            "geography":         company_location,
+            "prospect_location": prospect_loc,
+            "work_mode":         work_mode,
+            "location_source":   location_source,
+            "tech_stack":        tech_list,
+            "funding_stage":     organization.get("latest_funding_stage") or organization.get("funding_stage") or "",
+            "apollo_id":         person.get("id") or "",
+            "_org_id":           organization.get("id") or "",   # used for conditional org enrich
+            "source":            "apollo",
+            "email_valid":       True,
+            "email_verified":    True,
         }
 
     # ------------------------------------------------------------------
@@ -652,8 +794,8 @@ class ProspectAgent:
         user_id: Optional[str] = None,
     ) -> Dict[str, Any]:
         inserted_ids: List[str] = []
-        all_existing_emails = await self._get_all_existing_emails()
-        all_existing_apollo_ids = await self._get_all_existing_apollo_ids()
+        all_existing_emails = await self._get_all_existing_emails(user_id=user_id)
+        all_existing_apollo_ids = await self._get_all_existing_apollo_ids(user_id=user_id)
 
         for data in contacts:
             email = (data.get("email") or "").strip().lower()
@@ -665,8 +807,25 @@ class ProspectAgent:
             # If a person was already collected in any past search, skip them — do not import again,
             # do not update their user_input_id, and do not link them to this search.
             if email in all_existing_emails or (apollo_id and apollo_id in all_existing_apollo_ids):
-                logger.info("A1: Cross-search duplicate skipped in _save_contacts", email=email, apollo_id=apollo_id)
+                if user_input_id is not None:
+                    lookup_q = select(Contact.id).where(or_(Contact.email == email, Contact.apollo_id == apollo_id))
+                    if user_id:
+                        lookup_q = lookup_q.where(Contact.user_id == user_id)
+                    existing_cid = await self.db.scalar(lookup_q.limit(1))
+                    if existing_cid:
+                        assoc_exists = await self.db.scalar(
+                            select(ContactUserInputAssociation.contact_id).where(
+                                ContactUserInputAssociation.contact_id == existing_cid,
+                                ContactUserInputAssociation.user_input_id == user_input_id,
+                            ).limit(1)
+                        )
+                        if not assoc_exists:
+                            self.db.add(ContactUserInputAssociation(contact_id=existing_cid, user_input_id=user_input_id))
+                            inserted_ids.append(str(existing_cid))
+                logger.info("A1: Cross-search duplicate linked/skipped in _save_contacts", email=email, apollo_id=apollo_id)
                 continue
+
+            summary = generate_selection_summary(data)
 
             contact = Contact(
                 email=email,
@@ -682,6 +841,10 @@ class ProspectAgent:
                 funding_stage=data.get("funding_stage"),
                 tech_stack=data.get("tech_stack", []),
                 geography=data.get("geography"),
+                prospect_location=data.get("prospect_location"),
+                work_mode=data.get("work_mode") or "Not specified",
+                location_source=data.get("location_source"),
+                selection_summary=summary,
                 icp_score=data.get("win_pattern_score"),
                 win_pattern_score=data.get("win_pattern_score"),
                 icp_score_breakdown=data.get("icp_score_breakdown"),
@@ -703,6 +866,31 @@ class ProspectAgent:
             all_existing_emails.add(email)
             if apollo_id:
                 all_existing_apollo_ids.add(apollo_id)
+
+            # Best-effort Salesforce sync (Salesforce is Sole CRM source of truth)
+            try:
+                from app.services.salesforce_service import SalesforceService
+                sf_service = SalesforceService()
+                if sf_service.is_configured:
+                    sf_id = await sf_service.sync_contact_to_salesforce({
+                        "id": contact.id,
+                        "email": contact.email,
+                        "first_name": contact.first_name,
+                        "last_name": contact.last_name,
+                        "company": contact.company,
+                        "title": contact.title,
+                        "company_domain": contact.company_domain,
+                        "geography": contact.geography,
+                        "prospect_location": contact.prospect_location,
+                        "selection_summary": contact.selection_summary,
+                        "icp_score": contact.icp_score,
+                        "salesforce_contact_id": contact.salesforce_contact_id,
+                    })
+                    if sf_id:
+                        contact.salesforce_contact_id = sf_id
+                        logger.info("A1: Synced prospect to Salesforce", email=email, salesforce_id=sf_id)
+            except Exception as sf_err:
+                logger.warning("A1: Best-effort Salesforce contact sync failed", email=email, error=str(sf_err))
 
         await self.db.commit()
         return {

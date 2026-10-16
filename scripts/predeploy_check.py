@@ -170,7 +170,7 @@ def check_backend_tests():
         # Check if docker gtm_backend container is running
         ps = subprocess.run(["docker", "ps", "--filter", "name=gtm_backend", "--format", "{{.Names}}"], capture_output=True, text=True, timeout=5)
         if "gtm_backend" in ps.stdout:
-            test_cmd = ["docker", "exec", "gtm_backend", "python", "-m", "pytest", "tests/test_startup_and_deployment_config.py", "tests/test_tiering_and_prospect_prioritization.py", "-q"]
+            test_cmd = ["docker", "exec", "gtm_backend", "python", "-m", "pytest", "tests/test_startup_and_deployment_config.py", "tests/test_tiering_and_prospect_prioritization.py", "tests/test_migration_owner_bootstrap.py", "-q"]
     except Exception:
         pass
 
@@ -225,7 +225,7 @@ def check_frontend_build():
 
     # Run npm run build
     try:
-        res = subprocess.run([npm_cmd, "run", "build"], cwd=str(FRONTEND_DIR), capture_output=True, text=True, timeout=60)
+        res = subprocess.run([npm_cmd, "run", "build"], cwd=str(FRONTEND_DIR), capture_output=True, text=True, timeout=120)
         if res.returncode == 0:
             record_pass("frontend build", "Vite production build completed successfully with 0 errors")
         else:

@@ -91,7 +91,7 @@ jobs:
           PYTHONPATH: "."
         run: |
           cd backend
-          python -m pytest tests/test_startup_and_deployment_config.py tests/test_tiering_and_prospect_prioritization.py -v
+          python -m pytest tests/test_startup_and_deployment_config.py tests/test_tiering_and_prospect_prioritization.py tests/test_migration_owner_bootstrap.py -v
 
       - name: Run frontend production build
         working-directory: frontend

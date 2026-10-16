@@ -618,7 +618,7 @@ class User(Base):
     email: Mapped[str] = mapped_column(String(255), unique=True, nullable=False, index=True)
     password_hash: Mapped[str] = mapped_column(String(255), nullable=False)
     is_active: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)
-    role: Mapped[str] = mapped_column(String(50), default="SALES_REPRESENTATIVE", nullable=False)
+    role: Mapped[str] = mapped_column(String(50), default="SALES_REPRESENTATIVE", server_default="SALES_REPRESENTATIVE", nullable=False)
     cal_com_username: Mapped[Optional[str]] = mapped_column(String(100), nullable=True)
     cal_com_event_slug: Mapped[Optional[str]] = mapped_column(String(100), nullable=True)
     cal_com_booking_url: Mapped[Optional[str]] = mapped_column(String(255), nullable=True)

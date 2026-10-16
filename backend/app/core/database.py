@@ -115,7 +115,7 @@ async def _bootstrap_multi_user_schema(conn, migration_owner_email: Optional[str
     if owner_row is None:
         from app.core.security import hash_password
         import secrets as _secrets
-        temp_password = _secrets.token_urlsafe(24)
+        raw_password = (settings.GTM_MIGRATION_OWNER_PASSWORD or "").strip() or _secrets.token_urlsafe(24)
         await conn.execute(
             text(
                 "INSERT INTO users (id, name, email, password_hash, is_active, role, created_at, updated_at) "
@@ -125,7 +125,7 @@ async def _bootstrap_multi_user_schema(conn, migration_owner_email: Optional[str
             {
                 "name": "Migration Owner",
                 "email": owner_email,
-                "password_hash": hash_password(temp_password),
+                "password_hash": hash_password(raw_password),
                 "role": "SALES_REPRESENTATIVE",
             },
         )
@@ -133,12 +133,22 @@ async def _bootstrap_multi_user_schema(conn, migration_owner_email: Optional[str
             text("SELECT id FROM users WHERE email = :email"), {"email": owner_email}
         )
         owner_id = owner_id_row.scalar_one()
-        logger.warning(
-            "Created migration owner account. Temporary password (rotate immediately): "
-            f"{temp_password}"
-        )
+        if not settings.GTM_MIGRATION_OWNER_PASSWORD:
+            logger.warning(
+                "Created migration owner account. Temporary password (rotate immediately): "
+                f"{raw_password}"
+            )
+        else:
+            logger.info("Created migration owner account with configured GTM_MIGRATION_OWNER_PASSWORD")
     else:
         owner_id = owner_row[0]
+        if settings.GTM_MIGRATION_OWNER_PASSWORD and settings.GTM_MIGRATION_OWNER_PASSWORD.strip():
+            from app.core.security import hash_password
+            await conn.execute(
+                text("UPDATE users SET password_hash = :hash, is_active = true, updated_at = now() WHERE id = :id"),
+                {"hash": hash_password(settings.GTM_MIGRATION_OWNER_PASSWORD.strip()), "id": owner_id},
+            )
+            logger.info("Synchronized migration owner password from GTM_MIGRATION_OWNER_PASSWORD")
 
     # Backfill legacy rows: user_inputs → contacts inherit from their session
     await conn.execute(text(

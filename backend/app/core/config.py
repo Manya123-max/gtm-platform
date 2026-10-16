@@ -59,6 +59,8 @@ class Settings(BaseSettings):
     # Legacy data backfill: email of the user that pre-migration (anonymous)
     # records are assigned to. Empty = never silently assign ownership.
     GTM_MIGRATION_OWNER_EMAIL: str = ""
+    # Optional initial/sync password for the migration owner account.
+    GTM_MIGRATION_OWNER_PASSWORD: Optional[str] = None
 
 
     # ── Database ──────────────────────────────────────────────────────────

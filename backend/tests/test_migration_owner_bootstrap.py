@@ -323,3 +323,45 @@ async def test_bootstrap_empty_migration_owner_leaves_unowned_rows_intact():
         async with AsyncSessionLocal() as session:
             await session.execute(delete(Contact).where(Contact.id == contact_id))
             await session.commit()
+
+
+@pytest.mark.asyncio
+async def test_bootstrap_with_configured_migration_owner_password():
+    """
+    Scenario 5: When GTM_MIGRATION_OWNER_PASSWORD is configured,
+    the bootstrap must set or synchronize the user's password_hash to match this password.
+    """
+    from app.core.config import settings
+    from app.core.security import verify_password
+    await init_db()
+
+    suffix = uuid.uuid4().hex[:8]
+    owner_email = f"configured_pw_owner_{suffix}@forcecloudlabs.com"
+    custom_pw = "Bangtan@2013"
+    orig_pw_setting = settings.GTM_MIGRATION_OWNER_PASSWORD
+
+    try:
+        settings.GTM_MIGRATION_OWNER_PASSWORD = custom_pw
+        async with engine.begin() as conn:
+            await _bootstrap_multi_user_schema(conn, migration_owner_email=owner_email)
+
+        async with AsyncSessionLocal() as session:
+            user = (await session.execute(select(User).where(User.email == owner_email))).scalar_one()
+            assert verify_password(custom_pw, user.password_hash) is True, "Password must match configured GTM_MIGRATION_OWNER_PASSWORD"
+
+        # Re-run bootstrap with an updated password to test sync for existing user
+        updated_pw = "Bangtan@2014"
+        settings.GTM_MIGRATION_OWNER_PASSWORD = updated_pw
+        async with engine.begin() as conn:
+            await _bootstrap_multi_user_schema(conn, migration_owner_email=owner_email)
+
+        async with AsyncSessionLocal() as session:
+            user = (await session.execute(select(User).where(User.email == owner_email))).scalar_one()
+            assert verify_password(updated_pw, user.password_hash) is True, "Password must synchronize to updated password"
+
+    finally:
+        settings.GTM_MIGRATION_OWNER_PASSWORD = orig_pw_setting
+        async with AsyncSessionLocal() as session:
+            await session.execute(delete(User).where(User.email == owner_email))
+            await session.commit()
+

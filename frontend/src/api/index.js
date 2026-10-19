@@ -1,9 +1,26 @@
 import axios from 'axios'
 
-const API_URL = import.meta.env.VITE_API_URL || ''
+export function resolveApiBaseUrl(envUrl, isProd) {
+  const trimmed = (envUrl || '').trim()
+  const base = trimmed || (isProd ? 'https://gtm-platform-3tp6.onrender.com' : '')
+  const clean = base.replace(/\/+$/, '')
+  if (!clean) {
+    return '/api/v1'
+  }
+  if (clean.endsWith('/api/v1')) {
+    return clean
+  }
+  if (clean.endsWith('/api')) {
+    return `${clean}/v1`
+  }
+  return `${clean}/api/v1`
+}
+
+export const API_URL = import.meta.env.VITE_API_URL || ''
+export const API_BASE_URL = resolveApiBaseUrl(import.meta.env.VITE_API_URL, import.meta.env.PROD)
 
 const api = axios.create({
-  baseURL: `${API_URL}/api/v1`,
+  baseURL: API_BASE_URL,
   headers: {
     'Content-Type': 'application/json',
     Accept: 'application/json',

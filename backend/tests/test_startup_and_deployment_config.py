@@ -99,6 +99,86 @@ def test_cors_origins_includes_frontend_url():
     origins = settings.cors_origins_list
     assert "https://custom-gtm-frontend.netlify.app" in origins
     assert "http://localhost:3000" in origins
+    # Production Netlify origin must always be permitted
+    assert "https://dashing-sorbet-fd7cd5.netlify.app" in origins
+
+
+def test_cors_origins_normalization():
+    """Verify that whitespace, quotes, trailing slashes, and wildcards are handled properly."""
+    settings = Settings(
+        CORS_ORIGINS=" http://localhost:3000/ , 'https://custom-app.netlify.app/' , \"http://localhost:8000/\" , * ",
+        FRONTEND_URL="https://dashing-sorbet-fd7cd5.netlify.app/ ",
+    )
+    origins = settings.cors_origins_list
+    assert "https://dashing-sorbet-fd7cd5.netlify.app" in origins
+    assert "https://dashing-sorbet-fd7cd5.netlify.app/" not in origins
+    assert "https://custom-app.netlify.app" in origins
+    assert "https://custom-app.netlify.app/" not in origins
+    assert "http://localhost:3000" in origins
+    assert "http://localhost:3000/" not in origins
+    assert "http://localhost:8000" in origins
+    assert "*" not in origins, "Wildcard '*' must never be permitted when credentials are used"
+
+
+def test_cors_preflight_production_frontend_options():
+    """Verify that OPTIONS preflight request from the production frontend succeeds with valid CORS headers."""
+    from starlette.testclient import TestClient
+    from app.main import app
+
+    client = TestClient(app)
+    resp = client.options(
+        "/api/v1/auth/login",
+        headers={
+            "Origin": "https://dashing-sorbet-fd7cd5.netlify.app",
+            "Access-Control-Request-Method": "POST",
+            "Access-Control-Request-Headers": "content-type",
+        },
+    )
+    assert resp.status_code == 200, f"OPTIONS preflight failed with {resp.status_code}: {resp.text}"
+    assert resp.headers.get("access-control-allow-origin") == "https://dashing-sorbet-fd7cd5.netlify.app"
+    assert resp.headers.get("access-control-allow-credentials") == "true"
+    assert "content-type" in resp.headers.get("access-control-allow-headers", "").lower()
+    assert "POST" in resp.headers.get("access-control-allow-methods", "")
+
+
+def test_cors_preflight_with_authorization_header():
+    """Verify OPTIONS preflight succeeds with Authorization and Content-Type headers."""
+    from starlette.testclient import TestClient
+    from app.main import app
+
+    client = TestClient(app)
+    resp = client.options(
+        "/api/v1/auth/me",
+        headers={
+            "Origin": "https://dashing-sorbet-fd7cd5.netlify.app",
+            "Access-Control-Request-Method": "GET",
+            "Access-Control-Request-Headers": "authorization, content-type",
+        },
+    )
+    assert resp.status_code == 200
+    assert resp.headers.get("access-control-allow-origin") == "https://dashing-sorbet-fd7cd5.netlify.app"
+    allow_headers = resp.headers.get("access-control-allow-headers", "").lower()
+    assert "authorization" in allow_headers
+    assert "content-type" in allow_headers
+
+
+def test_cors_preflight_disallowed_origin_rejected():
+    """Verify that an unauthorized origin is rejected with 400 Bad Request and no Allow-Origin header."""
+    from starlette.testclient import TestClient
+    from app.main import app
+
+    client = TestClient(app)
+    resp = client.options(
+        "/api/v1/auth/login",
+        headers={
+            "Origin": "https://unauthorized-malicious-site.example.com",
+            "Access-Control-Request-Method": "POST",
+            "Access-Control-Request-Headers": "content-type",
+        },
+    )
+    assert resp.status_code == 400
+    assert "Disallowed CORS origin" in resp.text
+    assert "access-control-allow-origin" not in resp.headers
 
 
 def test_dockerfile_and_render_yaml_alignment():

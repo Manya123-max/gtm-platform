@@ -11,6 +11,14 @@ from functools import lru_cache
 from typing import List, Optional
 
 
+def _normalize_origin(origin: str) -> str:
+    """Normalize origin string: strip whitespace, surrounding quotes, and trailing slashes."""
+    if not origin:
+        return ""
+    val = origin.strip().strip("'\"").strip()
+    return val.rstrip("/")
+
+
 class Settings(BaseSettings):
     model_config = SettingsConfigDict(
         env_file=".env", env_file_encoding="utf-8", extra="ignore"
@@ -20,8 +28,9 @@ class Settings(BaseSettings):
     APP_ENV:        str  = "development"
     APP_SECRET_KEY: str  = "change-me"
     DEBUG:          bool = True
+    PRODUCTION_FRONTEND_URL: str = "https://dashing-sorbet-fd7cd5.netlify.app"
     FRONTEND_URL:   str  = "http://localhost:3000"
-    CORS_ORIGINS:   str  = "http://localhost:3000,http://localhost:8000"
+    CORS_ORIGINS:   str  = "http://localhost:3000,http://localhost:8000,https://dashing-sorbet-fd7cd5.netlify.app"
 
     @field_validator("DEBUG", mode="before")
     @classmethod
@@ -32,9 +41,33 @@ class Settings(BaseSettings):
 
     @property
     def cors_origins_list(self) -> List[str]:
-        origins = [o.strip() for o in self.CORS_ORIGINS.split(",") if o.strip()]
-        if self.FRONTEND_URL and self.FRONTEND_URL.strip() and self.FRONTEND_URL.strip() not in origins:
-            origins.append(self.FRONTEND_URL.strip())
+        raw_items: List[str] = []
+        raw_val = self.CORS_ORIGINS
+        if isinstance(raw_val, str):
+            cleaned = raw_val.strip()
+            if cleaned.startswith("[") and cleaned.endswith("]"):
+                cleaned = cleaned[1:-1]
+            raw_items = [part for part in cleaned.split(",") if part.strip()]
+        elif isinstance(raw_val, (list, tuple, set)):
+            raw_items = [str(part) for part in raw_val if str(part).strip()]
+
+        origins: List[str] = []
+        for item in raw_items:
+            norm = _normalize_origin(item)
+            if norm and norm != "*" and norm not in origins:
+                origins.append(norm)
+
+        # Include normalized FRONTEND_URL if set
+        if self.FRONTEND_URL:
+            norm_fe = _normalize_origin(self.FRONTEND_URL)
+            if norm_fe and norm_fe != "*" and norm_fe not in origins:
+                origins.append(norm_fe)
+
+        # Always guarantee the production Netlify frontend origin is permitted
+        norm_prod = _normalize_origin(self.PRODUCTION_FRONTEND_URL)
+        if norm_prod and norm_prod not in origins:
+            origins.append(norm_prod)
+
         return origins
 
     def validate_production_readiness(self) -> List[str]:

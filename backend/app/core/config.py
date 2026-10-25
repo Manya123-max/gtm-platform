@@ -30,7 +30,7 @@ class Settings(BaseSettings):
     DEBUG:          bool = True
     PRODUCTION_FRONTEND_URL: str = "https://dashing-sorbet-fd7cd5.netlify.app"
     FRONTEND_URL:   str  = "http://localhost:3000"
-    CORS_ORIGINS:   str  = "http://localhost:3000,http://localhost:8000,https://dashing-sorbet-fd7cd5.netlify.app"
+    CORS_ORIGINS:   str  = "http://localhost:3000,http://localhost:3003,http://localhost:5173,http://localhost:8000,http://127.0.0.1:3000,http://127.0.0.1:3003,http://127.0.0.1:5173,https://dashing-sorbet-fd7cd5.netlify.app"
 
     @field_validator("DEBUG", mode="before")
     @classmethod

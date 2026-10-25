@@ -1,6 +1,14 @@
 import axios from 'axios'
 
 export function resolveApiBaseUrl(envUrl, isProd) {
+  // If running in browser on localhost or local network, always use local proxy /api/v1
+  if (typeof window !== 'undefined' && window.location) {
+    const host = window.location.hostname
+    if (host === 'localhost' || host === '127.0.0.1' || host === '0.0.0.0' || host.startsWith('192.168.') || host.endsWith('.local')) {
+      return '/api/v1'
+    }
+  }
+
   const trimmed = (envUrl || '').trim()
   const base = trimmed || (isProd ? 'https://gtm-platform-3tp6.onrender.com' : '')
   const clean = base.replace(/\/+$/, '')

@@ -102,8 +102,8 @@ export default function DealDetailModal({ selectedDeal, onClose, actions = [], a
   // Health Score styling
   const healthScore = deal.deal_health_score ?? (deal.risk_score ? Math.round((1 - deal.risk_score) * 100) : 75)
   const healthColor = healthScore >= 70 ? 'text-emerald-700 bg-emerald-50 border-emerald-200' :
-                      healthScore >= 45 ? 'text-amber-700 bg-amber-50 border-amber-200' :
-                      'text-rose-700 bg-rose-50 border-rose-200'
+    healthScore >= 45 ? 'text-amber-700 bg-amber-50 border-amber-200' :
+      'text-rose-700 bg-rose-50 border-rose-200'
   const healthLabel = healthScore >= 70 ? 'Healthy Momentum' : healthScore >= 45 ? 'Moderate Attention' : 'Critical Deal Risk'
 
   // Win Probability
@@ -112,8 +112,8 @@ export default function DealDetailModal({ selectedDeal, onClose, actions = [], a
   // Buying Intent
   const buyingIntent = (deal.buying_intent || 'STRONG').toUpperCase()
   const intentBadge = buyingIntent === 'STRONG' ? 'bg-emerald-100 text-emerald-800 border-emerald-300' :
-                      buyingIntent === 'MEDIUM' ? 'bg-blue-100 text-blue-800 border-blue-300' :
-                      'bg-amber-100 text-amber-800 border-amber-300'
+    buyingIntent === 'MEDIUM' ? 'bg-blue-100 text-blue-800 border-blue-300' :
+      'bg-amber-100 text-amber-800 border-amber-300'
 
   // Stage confidence
   const stageConfidence = Math.round((deal.stage_confidence ?? 0.85) * 100)
@@ -129,11 +129,11 @@ export default function DealDetailModal({ selectedDeal, onClose, actions = [], a
   }
 
   return (
-    <div 
+    <div
       className="fixed inset-0 bg-slate-900/60 backdrop-blur-sm z-50 flex items-center justify-center p-3 sm:p-5 animate-fadeIn"
       onClick={onClose}
     >
-      <div 
+      <div
         className="bg-white rounded-2xl max-w-4xl w-full shadow-2xl border border-gray-200 relative flex flex-col max-h-[92vh] overflow-hidden text-gray-800 animate-scaleUp"
         onClick={(e) => e.stopPropagation()}
       >
@@ -144,24 +144,35 @@ export default function DealDetailModal({ selectedDeal, onClose, actions = [], a
               <span className="px-2.5 py-0.5 rounded-full text-xs font-bold uppercase tracking-wider bg-blue-100 text-blue-800 border border-blue-200">
                 {deal.stage?.replace(/_/g, ' ')}
               </span>
-              {deal.amount != null && (
-                <span className="text-sm font-extrabold text-gray-900 font-mono bg-white px-2 py-0.5 rounded-md border border-gray-200 shadow-2xs">
-                  ${deal.amount.toLocaleString()}
-                </span>
+              {deal.amount != null ? (
+                <div className="flex items-center gap-1.5 bg-white px-2 py-0.5 rounded-md border border-gray-200 shadow-2xs">
+                  <span className="text-sm font-extrabold text-gray-900 font-mono">
+                    ${deal.amount.toLocaleString()}
+                  </span>
+                  <span className="text-[10px] text-gray-500 font-sans">
+                    ({deal.amount_source || ((deal.salesforce_opportunity_id || deal.hubspot_deal_id) ? 'Salesforce' : 'Prospect conversation')})
+                  </span>
+                </div>
+              ) : (
+                <div className="flex items-center gap-1 bg-gray-100 px-2 py-0.5 rounded-md border border-gray-200 text-xs text-gray-600">
+                  <span className="font-semibold text-gray-700">Deal Amount:</span>
+                  <span className="italic text-gray-500">Not available</span>
+                  <span className="text-[10px] text-gray-400">(Source: Not provided)</span>
+                </div>
               )}
               <span className="text-xs text-emerald-700 bg-emerald-50 px-2.5 py-0.5 rounded-full font-semibold border border-emerald-200 flex items-center gap-1">
                 <span className="w-1.5 h-1.5 rounded-full bg-emerald-500 animate-pulse"></span>
                 Active Deal
               </span>
-              {deal.hubspot_deal_id && (
+              {(deal.salesforce_opportunity_id || deal.hubspot_deal_id) && (
                 <a
-                  href={`https://app.hubspot.com/contacts/deals/${deal.hubspot_deal_id}`}
+                  href={`https://login.salesforce.com`}
                   target="_blank"
                   rel="noopener noreferrer"
-                  className="text-xs text-orange-700 bg-orange-50 hover:bg-orange-100 px-2 py-0.5 rounded-md border border-orange-200 transition-colors flex items-center gap-1 font-medium"
-                  title="Open deal in HubSpot CRM"
+                  className="text-xs text-blue-700 bg-blue-50 hover:bg-blue-100 px-2 py-0.5 rounded-md border border-blue-200 transition-colors flex items-center gap-1 font-medium"
+                  title="Open Opportunity in Salesforce CRM"
                 >
-                  <span>HubSpot #{deal.hubspot_deal_id}</span>
+                  <span>Salesforce #{deal.salesforce_opportunity_id || deal.hubspot_deal_id}</span>
                   <ExternalLink size={10} />
                 </a>
               )}
@@ -172,12 +183,10 @@ export default function DealDetailModal({ selectedDeal, onClose, actions = [], a
             </h1>
 
             <div className="flex items-center gap-3 text-xs text-gray-500 mt-1 flex-wrap">
-              {deal.owner_email && (
-                <span className="flex items-center gap-1">
-                  <User size={11} className="text-gray-400" />
-                  <span>Owner: <strong className="text-gray-700">{deal.owner_email}</strong></span>
-                </span>
-              )}
+              <span className="flex items-center gap-1">
+                <User size={11} className="text-gray-400" />
+                <span>Owner: <strong className="text-gray-700">{deal.owner_email || 'Not assigned'}</strong></span>
+              </span>
               <span className="flex items-center gap-1">
                 <Clock size={11} className="text-gray-400" />
                 <span>Stage Age: <strong className="text-gray-700">{deal.days_in_current_stage ?? 0} days</strong></span>
@@ -191,7 +200,7 @@ export default function DealDetailModal({ selectedDeal, onClose, actions = [], a
             </div>
           </div>
 
-          <button 
+          <button
             onClick={onClose}
             className="w-9 h-9 rounded-full flex items-center justify-center text-gray-400 hover:text-gray-700 hover:bg-gray-200/80 transition-colors cursor-pointer shrink-0"
             title="Close modal (Esc)"
@@ -211,20 +220,18 @@ export default function DealDetailModal({ selectedDeal, onClose, actions = [], a
                   <div className="flex flex-col items-center flex-1">
                     <div className="flex items-center w-full">
                       <div className={`h-1 flex-1 ${idx === 0 ? 'invisible' : (isPast || isCurrent ? 'bg-blue-600' : 'bg-gray-200')}`} />
-                      <div className={`w-6 h-6 rounded-full flex items-center justify-center text-[10px] font-bold shrink-0 transition-all ${
-                        isCurrent
+                      <div className={`w-6 h-6 rounded-full flex items-center justify-center text-[10px] font-bold shrink-0 transition-all ${isCurrent
                           ? 'bg-blue-600 text-white ring-4 ring-blue-100 shadow-sm'
                           : isPast
-                          ? 'bg-emerald-500 text-white'
-                          : 'bg-gray-100 text-gray-400 border border-gray-300'
-                      }`}>
+                            ? 'bg-emerald-500 text-white'
+                            : 'bg-gray-100 text-gray-400 border border-gray-300'
+                        }`}>
                         {isPast ? <Check size={11} /> : idx + 1}
                       </div>
                       <div className={`h-1 flex-1 ${idx === STAGES.length - 1 ? 'invisible' : (isPast ? 'bg-blue-600' : 'bg-gray-200')}`} />
                     </div>
-                    <span className={`text-[11px] mt-1 font-semibold capitalize ${
-                      isCurrent ? 'text-blue-700 font-bold' : isPast ? 'text-gray-700' : 'text-gray-400'
-                    }`}>
+                    <span className={`text-[11px] mt-1 font-semibold capitalize ${isCurrent ? 'text-blue-700 font-bold' : isPast ? 'text-gray-700' : 'text-gray-400'
+                      }`}>
                       {s.label}
                     </span>
                   </div>
@@ -238,11 +245,10 @@ export default function DealDetailModal({ selectedDeal, onClose, actions = [], a
         <div className="px-6 bg-gray-50/80 border-b border-gray-200 flex gap-2 pt-2">
           <button
             onClick={() => setActiveTab('intelligence')}
-            className={`px-3.5 py-2 text-xs font-semibold rounded-t-lg transition-all flex items-center gap-1.5 border-b-2 cursor-pointer ${
-              activeTab === 'intelligence'
+            className={`px-3.5 py-2 text-xs font-semibold rounded-t-lg transition-all flex items-center gap-1.5 border-b-2 cursor-pointer ${activeTab === 'intelligence'
                 ? 'bg-white text-blue-700 border-blue-600 shadow-xs'
                 : 'text-gray-600 border-transparent hover:text-gray-900 hover:bg-gray-100/80'
-            }`}
+              }`}
           >
             <Sparkles size={13} className={activeTab === 'intelligence' ? 'text-blue-600' : 'text-gray-400'} />
             <span>AI Intelligence & BANT</span>
@@ -250,11 +256,10 @@ export default function DealDetailModal({ selectedDeal, onClose, actions = [], a
 
           <button
             onClick={() => setActiveTab('contact')}
-            className={`px-3.5 py-2 text-xs font-semibold rounded-t-lg transition-all flex items-center gap-1.5 border-b-2 cursor-pointer ${
-              activeTab === 'contact'
+            className={`px-3.5 py-2 text-xs font-semibold rounded-t-lg transition-all flex items-center gap-1.5 border-b-2 cursor-pointer ${activeTab === 'contact'
                 ? 'bg-white text-blue-700 border-blue-600 shadow-xs'
                 : 'text-gray-600 border-transparent hover:text-gray-900 hover:bg-gray-100/80'
-            }`}
+              }`}
           >
             <User size={13} className={activeTab === 'contact' ? 'text-blue-600' : 'text-gray-400'} />
             <span>Contact & Emails {thread.length > 0 && `(${thread.length})`}</span>
@@ -262,11 +267,10 @@ export default function DealDetailModal({ selectedDeal, onClose, actions = [], a
 
           <button
             onClick={() => setActiveTab('signals')}
-            className={`px-3.5 py-2 text-xs font-semibold rounded-t-lg transition-all flex items-center gap-1.5 border-b-2 cursor-pointer ${
-              activeTab === 'signals'
+            className={`px-3.5 py-2 text-xs font-semibold rounded-t-lg transition-all flex items-center gap-1.5 border-b-2 cursor-pointer ${activeTab === 'signals'
                 ? 'bg-white text-blue-700 border-blue-600 shadow-xs'
                 : 'text-gray-600 border-transparent hover:text-gray-900 hover:bg-gray-100/80'
-            }`}
+              }`}
           >
             <Zap size={13} className={activeTab === 'signals' ? 'text-amber-500' : 'text-gray-400'} />
             <span>Market Signals {signals.length > 0 && `(${signals.length})`}</span>
@@ -275,11 +279,10 @@ export default function DealDetailModal({ selectedDeal, onClose, actions = [], a
           {deal.stage_history && deal.stage_history.length > 0 && (
             <button
               onClick={() => setActiveTab('history')}
-              className={`px-3.5 py-2 text-xs font-semibold rounded-t-lg transition-all flex items-center gap-1.5 border-b-2 cursor-pointer ${
-                activeTab === 'history'
+              className={`px-3.5 py-2 text-xs font-semibold rounded-t-lg transition-all flex items-center gap-1.5 border-b-2 cursor-pointer ${activeTab === 'history'
                   ? 'bg-white text-blue-700 border-blue-600 shadow-xs'
                   : 'text-gray-600 border-transparent hover:text-gray-900 hover:bg-gray-100/80'
-              }`}
+                }`}
             >
               <Layers size={13} className={activeTab === 'history' ? 'text-blue-600' : 'text-gray-400'} />
               <span>Stage Velocity ({deal.stage_history.length})</span>
@@ -289,7 +292,7 @@ export default function DealDetailModal({ selectedDeal, onClose, actions = [], a
 
         {/* Modal Scrollable Body */}
         <div className="p-6 overflow-y-auto flex-1 space-y-5 bg-slate-50/30">
-          
+
           {/* TAB 1: AI Intelligence & BANT */}
           {activeTab === 'intelligence' && (
             <div className="space-y-5">
@@ -378,12 +381,10 @@ export default function DealDetailModal({ selectedDeal, onClose, actions = [], a
 
                 <div className="grid grid-cols-1 sm:grid-cols-2 gap-3 text-xs">
                   {/* Budget */}
-                  <div className={`p-3 rounded-lg border flex items-start gap-2.5 ${
-                    deal.budget_confirmed ? 'bg-emerald-50/60 border-emerald-200 text-emerald-950' : 'bg-amber-50/50 border-amber-200 text-amber-950'
-                  }`}>
-                    <div className={`w-5 h-5 rounded-full flex items-center justify-center shrink-0 mt-0.5 text-xs font-bold ${
-                      deal.budget_confirmed ? 'bg-emerald-500 text-white' : 'bg-amber-400 text-white'
+                  <div className={`p-3 rounded-lg border flex items-start gap-2.5 ${deal.budget_confirmed ? 'bg-emerald-50/60 border-emerald-200 text-emerald-950' : 'bg-amber-50/50 border-amber-200 text-amber-950'
                     }`}>
+                    <div className={`w-5 h-5 rounded-full flex items-center justify-center shrink-0 mt-0.5 text-xs font-bold ${deal.budget_confirmed ? 'bg-emerald-500 text-white' : 'bg-amber-400 text-white'
+                      }`}>
                       {deal.budget_confirmed ? '✓' : '!'}
                     </div>
                     <div>
@@ -395,12 +396,10 @@ export default function DealDetailModal({ selectedDeal, onClose, actions = [], a
                   </div>
 
                   {/* Authority */}
-                  <div className={`p-3 rounded-lg border flex items-start gap-2.5 ${
-                    deal.authority_confirmed ? 'bg-emerald-50/60 border-emerald-200 text-emerald-950' : 'bg-amber-50/50 border-amber-200 text-amber-950'
-                  }`}>
-                    <div className={`w-5 h-5 rounded-full flex items-center justify-center shrink-0 mt-0.5 text-xs font-bold ${
-                      deal.authority_confirmed ? 'bg-emerald-500 text-white' : 'bg-amber-400 text-white'
+                  <div className={`p-3 rounded-lg border flex items-start gap-2.5 ${deal.authority_confirmed ? 'bg-emerald-50/60 border-emerald-200 text-emerald-950' : 'bg-amber-50/50 border-amber-200 text-amber-950'
                     }`}>
+                    <div className={`w-5 h-5 rounded-full flex items-center justify-center shrink-0 mt-0.5 text-xs font-bold ${deal.authority_confirmed ? 'bg-emerald-500 text-white' : 'bg-amber-400 text-white'
+                      }`}>
                       {deal.authority_confirmed ? '✓' : '!'}
                     </div>
                     <div>
@@ -412,12 +411,10 @@ export default function DealDetailModal({ selectedDeal, onClose, actions = [], a
                   </div>
 
                   {/* Need */}
-                  <div className={`p-3 rounded-lg border flex items-start gap-2.5 ${
-                    deal.need_confirmed ? 'bg-emerald-50/60 border-emerald-200 text-emerald-950' : 'bg-amber-50/50 border-amber-200 text-amber-950'
-                  }`}>
-                    <div className={`w-5 h-5 rounded-full flex items-center justify-center shrink-0 mt-0.5 text-xs font-bold ${
-                      deal.need_confirmed ? 'bg-emerald-500 text-white' : 'bg-amber-400 text-white'
+                  <div className={`p-3 rounded-lg border flex items-start gap-2.5 ${deal.need_confirmed ? 'bg-emerald-50/60 border-emerald-200 text-emerald-950' : 'bg-amber-50/50 border-amber-200 text-amber-950'
                     }`}>
+                    <div className={`w-5 h-5 rounded-full flex items-center justify-center shrink-0 mt-0.5 text-xs font-bold ${deal.need_confirmed ? 'bg-emerald-500 text-white' : 'bg-amber-400 text-white'
+                      }`}>
                       {deal.need_confirmed ? '✓' : '!'}
                     </div>
                     <div>
@@ -429,12 +426,10 @@ export default function DealDetailModal({ selectedDeal, onClose, actions = [], a
                   </div>
 
                   {/* Timeline */}
-                  <div className={`p-3 rounded-lg border flex items-start gap-2.5 ${
-                    deal.timeline_confirmed ? 'bg-emerald-50/60 border-emerald-200 text-emerald-950' : 'bg-amber-50/50 border-amber-200 text-amber-950'
-                  }`}>
-                    <div className={`w-5 h-5 rounded-full flex items-center justify-center shrink-0 mt-0.5 text-xs font-bold ${
-                      deal.timeline_confirmed ? 'bg-emerald-500 text-white' : 'bg-amber-400 text-white'
+                  <div className={`p-3 rounded-lg border flex items-start gap-2.5 ${deal.timeline_confirmed ? 'bg-emerald-50/60 border-emerald-200 text-emerald-950' : 'bg-amber-50/50 border-amber-200 text-amber-950'
                     }`}>
+                    <div className={`w-5 h-5 rounded-full flex items-center justify-center shrink-0 mt-0.5 text-xs font-bold ${deal.timeline_confirmed ? 'bg-emerald-500 text-white' : 'bg-amber-400 text-white'
+                      }`}>
                       {deal.timeline_confirmed ? '✓' : '!'}
                     </div>
                     <div>
@@ -614,7 +609,7 @@ export default function DealDetailModal({ selectedDeal, onClose, actions = [], a
                   <User size={24} className="text-gray-300 mx-auto" />
                   <div className="text-sm font-semibold text-gray-700">No Contact Associated Yet</div>
                   <p className="text-xs text-gray-400 max-w-sm mx-auto">
-                    This deal is currently linked directly to HubSpot without a mapped contact record.
+                    This deal is currently linked directly to Salesforce CRM without a mapped contact record.
                   </p>
                 </div>
               )}

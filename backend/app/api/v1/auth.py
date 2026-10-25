@@ -105,6 +105,10 @@ def _user_out(user: User) -> dict:
         "id": user.id,
         "name": user.name,
         "email": user.email,
+        "role": getattr(user, "role", "SALES_REPRESENTATIVE") or "SALES_REPRESENTATIVE",
+        "cal_com_username": getattr(user, "cal_com_username", None),
+        "cal_com_event_slug": getattr(user, "cal_com_event_slug", None),
+        "cal_com_booking_url": getattr(user, "cal_com_booking_url", None),
         "created_at": user.created_at,
     }
 
@@ -119,6 +123,63 @@ def _token_response(user: User) -> dict:
 
 
 # ── Endpoints ──────────────────────────────────────────────────────────────
+
+
+async def _shift_history_to_user(db: AsyncSession, user: User) -> None:
+    """
+    Shifts all existing unassigned project history (contacts, search sessions,
+    deals, workflow runs, revenue forecasts) to the newly registered or authenticated user.
+    """
+    from sqlalchemy import update, or_, select
+    from app.models.models import Contact, UserInput, WorkflowRun, RevenueForecast, Deal
+
+    try:
+        # 1. Shift unassigned contacts that are either not tied to a session or tied to this user's session
+        subq_other_users = select(UserInput.id).where(UserInput.user_id.isnot(None), UserInput.user_id != user.id)
+        await db.execute(
+            update(Contact)
+            .where(
+                Contact.user_id.is_(None),
+                or_(Contact.user_input_id.is_(None), Contact.user_input_id.not_in(subq_other_users))
+            )
+            .values(user_id=user.id)
+        )
+
+        # 2. Shift all search sessions (UserInput history)
+        await db.execute(
+            update(UserInput)
+            .where((UserInput.user_id.is_(None)) | (UserInput.user_id == user.id))
+            .values(user_id=user.id)
+        )
+
+        # 3. Shift all workflow runs
+        await db.execute(
+            update(WorkflowRun)
+            .where((WorkflowRun.user_id.is_(None)) | (WorkflowRun.user_id == user.id))
+            .values(user_id=user.id)
+        )
+
+        # 4. Shift all revenue forecasts
+        await db.execute(
+            update(RevenueForecast)
+            .where((RevenueForecast.user_id.is_(None)) | (RevenueForecast.user_id == user.id))
+            .values(user_id=user.id)
+        )
+
+        # 5. Shift unassigned deals to user's email (multi-user safe)
+        await db.execute(
+            update(Deal)
+            .where((Deal.owner_email.is_(None)) | (Deal.owner_email == ""))
+            .values(owner_email=user.email)
+        )
+
+        await db.commit()
+    except Exception as exc:
+        await db.rollback()
+        # Non-fatal log so registration/login succeeds even if no data to shift
+        import logging
+        logging.getLogger(__name__).warning(f"Could not shift history to user: {exc}")
+
 
 @auth_router.post("/register", status_code=status.HTTP_201_CREATED)
 async def register(body: RegisterRequest, request: Request, db: AsyncSession = Depends(get_db)):
@@ -138,6 +199,7 @@ async def register(body: RegisterRequest, request: Request, db: AsyncSession = D
     db.add(user)
     await db.commit()
     await db.refresh(user)
+    await _shift_history_to_user(db, user)
     return _token_response(user)
 
 
@@ -151,6 +213,7 @@ async def login(body: LoginRequest, request: Request, db: AsyncSession = Depends
         raise HTTPException(status_code=401, detail="Invalid email or password")
     if not user.is_active:
         raise HTTPException(status_code=403, detail="Account is disabled")
+    await _shift_history_to_user(db, user)
     return _token_response(user)
 
 

@@ -1,10 +1,16 @@
+import { useState, useEffect, useRef } from 'react'
 import { Outlet, NavLink, useLocation, useNavigate } from 'react-router-dom'
+import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
 import {
   LayoutDashboard, Users, Briefcase, Send, FileText,
-  TrendingUp, Bot, ChevronRight, Bell, Zap, Clipboard, History, LogOut
+  TrendingUp, Bot, ChevronRight, Bell, Zap, Clipboard, History,
+  Settings as SettingsIcon,
+  Mail, Check, X, LogOut
 } from 'lucide-react'
 import clsx from 'clsx'
+import { useSession } from '../../context/SessionContext'
 import { useAuth } from '../../context/AuthContext'
+import { fetchNotifications, markNotificationRead } from '../../api' 
 
 const NAV = [
   { to: '/dashboard', icon: LayoutDashboard, label: 'Dashboard' },
@@ -16,6 +22,7 @@ const NAV = [
   { to: '/content',   icon: FileText,        label: 'Content'   },
   { to: '/revenue',   icon: TrendingUp,      label: 'Revenue'   },
   { to: '/history',   icon: History,         label: 'History'   },
+  { to: '/settings',  icon: SettingsIcon,    label: 'Settings'  },
 ]
 
 const AGENT_STATUS = [
@@ -57,6 +64,59 @@ export default function Layout() {
   const handleLogout = async () => {
     await logout()
     navigate('/login', { replace: true })
+  }
+
+  const { activeSessionId } = useSession()
+  const queryClient = useQueryClient()
+  const [isOpen, setIsOpen] = useState(false)
+  const dropdownRef = useRef(null)
+
+  const { data: notifData, refetch } = useQuery({
+    queryKey: ['notifications', activeSessionId],
+    queryFn: () => fetchNotifications(activeSessionId),
+    refetchInterval: 30_000,
+    refetchOnWindowFocus: true,
+    staleTime: 15_000,
+  })
+
+  const unreadCount = notifData?.unread_count || 0
+  const notifications = notifData?.notifications || []
+
+  const markReadMutation = useMutation({
+    mutationFn: markNotificationRead,
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ['notifications'] })
+    }
+  })
+
+  useEffect(() => {
+    function handleClickOutside(e) {
+      if (dropdownRef.current && !dropdownRef.current.contains(e.target)) {
+        setIsOpen(false)
+      }
+    }
+    if (isOpen) {
+      document.addEventListener('mousedown', handleClickOutside)
+    }
+    return () => document.removeEventListener('mousedown', handleClickOutside)
+  }, [isOpen])
+
+  const handleBellClick = () => {
+    const nextOpen = !isOpen
+    setIsOpen(nextOpen)
+    if (nextOpen) {
+      refetch()
+    }
+  }
+
+  const handleNotificationClick = (notif) => {
+    if (!notif.read_at) {
+      markReadMutation.mutate(notif.id)
+    }
+    setIsOpen(false)
+    if (notif.action_url) {
+      navigate(notif.action_url)
+    }
   }
 
   return (
@@ -232,18 +292,134 @@ export default function Layout() {
             >
               <LogOut size={13} />
             </button>
-            <button
-              className="w-7 h-7 rounded-lg flex items-center justify-center transition-colors"
-              style={{
-                background: 'var(--c-surface2)',
-                color: 'var(--c-text3)',
-                border: '1px solid var(--c-border)',
-              }}
-              onMouseEnter={e => e.currentTarget.style.color = 'var(--c-text)'}
-              onMouseLeave={e => e.currentTarget.style.color = 'var(--c-text3)'}
-            >
-              <Bell size={13} />
-            </button>
+            <div className="relative" ref={dropdownRef}>
+              <button
+                onClick={handleBellClick}
+                className="w-7 h-7 rounded-lg flex items-center justify-center transition-colors relative"
+                style={{
+                  background: isOpen ? 'var(--c-border)' : 'var(--c-surface2)',
+                  color: unreadCount > 0 ? '#10D9A0' : 'var(--c-text3)',
+                  border: '1px solid var(--c-border)',
+                }}
+                onMouseEnter={e => { if (!isOpen) e.currentTarget.style.color = 'var(--c-text)' }}
+                onMouseLeave={e => { if (!isOpen) e.currentTarget.style.color = unreadCount > 0 ? '#10D9A0' : 'var(--c-text3)' }}
+                title="Notifications"
+              >
+                <Bell size={13} />
+                {unreadCount > 0 && (
+                  <span
+                    className="absolute -top-1 -right-1 flex h-4 min-w-[16px] items-center justify-center rounded-full px-1 text-[9px] font-bold text-white shadow-sm pointer-events-none"
+                    style={{ background: '#0A67FF' }}
+                  >
+                    {unreadCount > 99 ? '99+' : unreadCount}
+                  </span>
+                )}
+              </button>
+
+              {isOpen && (
+                <div
+                  className="absolute right-0 mt-2 w-80 rounded-xl shadow-2xl z-50 overflow-hidden flex flex-col"
+                  style={{
+                    background: 'var(--c-surface)',
+                    border: '1px solid var(--c-border)',
+                    boxShadow: '0 10px 30px rgba(0, 0, 0, 0.4)',
+                  }}
+                >
+                  <div
+                    className="flex items-center justify-between px-3.5 py-2.5"
+                    style={{ borderBottom: '1px solid var(--c-border)' }}
+                  >
+                    <div className="flex items-center gap-2">
+                      <span className="text-xs font-semibold" style={{ color: 'var(--c-text)' }}>Notifications</span>
+                      {unreadCount > 0 && (
+                        <span
+                          className="text-[10px] px-1.5 py-0.5 rounded-full font-medium"
+                          style={{ background: 'rgba(10, 103, 255, 0.2)', color: '#00C8FF' }}
+                        >
+                          {unreadCount} new
+                        </span>
+                      )}
+                    </div>
+                    <button
+                      onClick={() => setIsOpen(false)}
+                      className="text-xs text-gray-400 hover:text-white p-0.5 transition-colors"
+                    >
+                      <X size={12} />
+                    </button>
+                  </div>
+
+                  <div className="max-h-80 overflow-y-auto divide-y" style={{ borderColor: 'var(--c-border)' }}>
+                    {notifications.length === 0 ? (
+                      <div className="py-8 text-center text-xs" style={{ color: 'var(--c-text3)' }}>
+                        No notifications yet
+                      </div>
+                    ) : (
+                      notifications.map((n) => {
+                        const isUnread = !n.read_at
+                        const isReply = n.type === 'reply_received'
+                        return (
+                          <div
+                            key={n.id}
+                            onClick={() => handleNotificationClick(n)}
+                            className="p-3 text-left transition-colors cursor-pointer flex items-start gap-2.5 hover:bg-white/[0.04]"
+                            style={{
+                              background: isUnread ? 'rgba(10, 103, 255, 0.05)' : 'transparent',
+                            }}
+                          >
+                            <div
+                              className="w-6 h-6 rounded-md flex items-center justify-center flex-shrink-0 mt-0.5"
+                              style={{
+                                background: isReply ? 'rgba(16, 217, 160, 0.15)' : 'rgba(245, 158, 11, 0.15)',
+                                color: isReply ? '#10D9A0' : '#F59E0B',
+                              }}
+                            >
+                              {isReply ? <Mail size={12} /> : <Zap size={12} />}
+                            </div>
+
+                            <div className="flex-1 min-w-0">
+                              <div className="flex items-center justify-between gap-1 mb-0.5">
+                                <span
+                                  className="text-[10px] font-semibold uppercase tracking-wider"
+                                  style={{ color: isReply ? '#10D9A0' : '#F59E0B' }}
+                                >
+                                  {isReply ? 'Reply Received' : 'New Signal'}
+                                </span>
+                                <span className="text-[10px]" style={{ color: 'var(--c-text3)' }}>
+                                  {new Date(n.created_at).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}
+                                </span>
+                              </div>
+                              <div
+                                className="text-xs leading-snug line-clamp-2"
+                                style={{
+                                  color: isUnread ? 'var(--c-text)' : 'var(--c-text2)',
+                                  fontWeight: isUnread ? 500 : 400
+                                }}
+                              >
+                                {n.message}
+                              </div>
+                            </div>
+
+                            {isUnread && (
+                              <button
+                                onClick={(e) => {
+                                  e.stopPropagation()
+                                  markReadMutation.mutate(n.id)
+                                }}
+                                title="Mark as read"
+                                className="flex-shrink-0 p-1 rounded hover:bg-white/10 transition-colors"
+                                style={{ color: 'var(--c-text3)' }}
+                              >
+                                <Check size={11} />
+                              </button>
+                            )}
+                          </div>
+                        )
+                      })
+                    )}
+                  </div>
+                </div>
+              )}
+            </div>
           </div>
         </header>
 

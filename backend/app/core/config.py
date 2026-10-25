@@ -11,6 +11,14 @@ from functools import lru_cache
 from typing import List, Optional
 
 
+def _normalize_origin(origin: str) -> str:
+    """Normalize origin string: strip whitespace, surrounding quotes, and trailing slashes."""
+    if not origin:
+        return ""
+    val = origin.strip().strip("'\"").strip()
+    return val.rstrip("/")
+
+
 class Settings(BaseSettings):
     model_config = SettingsConfigDict(
         env_file=".env", env_file_encoding="utf-8", extra="ignore"
@@ -20,8 +28,9 @@ class Settings(BaseSettings):
     APP_ENV:        str  = "development"
     APP_SECRET_KEY: str  = "change-me"
     DEBUG:          bool = True
+    PRODUCTION_FRONTEND_URL: str = "https://dashing-sorbet-fd7cd5.netlify.app"
     FRONTEND_URL:   str  = "http://localhost:3000"
-    CORS_ORIGINS:   str  = "http://localhost:3000,http://localhost:8000"
+    CORS_ORIGINS:   str  = "http://localhost:3000,http://localhost:8000,https://dashing-sorbet-fd7cd5.netlify.app"
 
     @field_validator("DEBUG", mode="before")
     @classmethod
@@ -32,7 +41,47 @@ class Settings(BaseSettings):
 
     @property
     def cors_origins_list(self) -> List[str]:
-        return [o.strip() for o in self.CORS_ORIGINS.split(",")]
+        raw_items: List[str] = []
+        raw_val = self.CORS_ORIGINS
+        if isinstance(raw_val, str):
+            cleaned = raw_val.strip()
+            if cleaned.startswith("[") and cleaned.endswith("]"):
+                cleaned = cleaned[1:-1]
+            raw_items = [part for part in cleaned.split(",") if part.strip()]
+        elif isinstance(raw_val, (list, tuple, set)):
+            raw_items = [str(part) for part in raw_val if str(part).strip()]
+
+        origins: List[str] = []
+        for item in raw_items:
+            norm = _normalize_origin(item)
+            if norm and norm != "*" and norm not in origins:
+                origins.append(norm)
+
+        # Include normalized FRONTEND_URL if set
+        if self.FRONTEND_URL:
+            norm_fe = _normalize_origin(self.FRONTEND_URL)
+            if norm_fe and norm_fe != "*" and norm_fe not in origins:
+                origins.append(norm_fe)
+
+        # Always guarantee the production Netlify frontend origin is permitted
+        norm_prod = _normalize_origin(self.PRODUCTION_FRONTEND_URL)
+        if norm_prod and norm_prod not in origins:
+            origins.append(norm_prod)
+
+        return origins
+
+    def validate_production_readiness(self) -> List[str]:
+        """Validate production configuration and return a list of blocker messages."""
+        errors: List[str] = []
+        is_prod = self.APP_ENV.lower() in {"prod", "production"} or not self.DEBUG
+        if is_prod:
+            if not self.APP_SECRET_KEY or self.APP_SECRET_KEY == "change-me":
+                errors.append("APP_SECRET_KEY must be set to a secure secret in production (cannot be 'change-me')")
+            if not self.DATABASE_URL or "localhost" in self.DATABASE_URL:
+                errors.append("DATABASE_URL must point to a production database, not localhost")
+            if self.AUTH_ENABLED and not (self.JWT_SECRET_KEY or (self.APP_SECRET_KEY and self.APP_SECRET_KEY != "change-me")):
+                errors.append("JWT_SECRET_KEY or a secure APP_SECRET_KEY is required when AUTH_ENABLED=True")
+        return errors
 
     # ── Auth ──────────────────────────────────────────────────────────────────
     AUTH_ENABLED: bool = True          # false = legacy unauthenticated dev mode
@@ -43,14 +92,38 @@ class Settings(BaseSettings):
     # Legacy data backfill: email of the user that pre-migration (anonymous)
     # records are assigned to. Empty = never silently assign ownership.
     GTM_MIGRATION_OWNER_EMAIL: str = ""
+    # Optional initial/sync password for the migration owner account.
+    GTM_MIGRATION_OWNER_PASSWORD: Optional[str] = None
 
 
     # ── Database ──────────────────────────────────────────────────────────
     DATABASE_URL: str = "postgresql+asyncpg://gtm:gtmpass@localhost:5432/gtm_platform"
 
+    @field_validator("DATABASE_URL", mode="before")
+    @classmethod
+    def assemble_db_connection(cls, v: Optional[str]) -> str:
+        if isinstance(v, str):
+            if v.startswith("postgres://"):
+                v = v.replace("postgres://", "postgresql+asyncpg://", 1)
+            elif v.startswith("postgresql://") and not v.startswith("postgresql+asyncpg://"):
+                v = v.replace("postgresql://", "postgresql+asyncpg://", 1)
+            if "sslmode=require" in v:
+                v = v.replace("sslmode=require", "ssl=require")
+            elif "sslmode=prefer" in v:
+                v = v.replace("sslmode=prefer", "ssl=prefer")
+            elif "sslmode=disable" in v:
+                v = v.replace("sslmode=disable", "")
+            return v
+        return v or ""
+
     @property
     def sync_database_url(self) -> str:
-        return self.DATABASE_URL.replace("+asyncpg", "")
+        url = self.DATABASE_URL.replace("+asyncpg", "")
+        if "ssl=require" in url:
+            url = url.replace("ssl=require", "sslmode=require")
+        elif "ssl=prefer" in url:
+            url = url.replace("ssl=prefer", "sslmode=prefer")
+        return url
 
     # ── Redis / Celery ────────────────────────────────────────────────────
     REDIS_URL:              str = "redis://localhost:6379/0"
@@ -85,12 +158,16 @@ class Settings(BaseSettings):
     PREDICTLEADS_API_TOKEN: str = ""
     CURRENTS_API_KEY:       str = ""
 
-    # ── CRM / calendar / email ────────────────────────────────────────────
-    HUBSPOT_ACCESS_TOKEN:      str = ""
+    # ── Salesforce CRM (Sole CRM Integration) ─────────────────────────────
+    SALESFORCE_INSTANCE_URL:  Optional[str] = None
+    SALESFORCE_ACCESS_TOKEN:  Optional[str] = None
+    SALESFORCE_CLIENT_ID:     Optional[str] = None
+    SALESFORCE_CLIENT_SECRET: Optional[str] = None
+    SALESFORCE_API_VERSION:   str = "v60.0"
+
+    # Direct Salesforce credentials (used by simple-salesforce / lead sync)
     SALESFORCE_USERNAME:       str = ""
     SALESFORCE_PASSWORD:       str = ""
-    SALESFORCE_CLIENT_ID:      str = ""
-    SALESFORCE_CLIENT_SECRET:  str = ""
     SALESFORCE_SECURITY_TOKEN: str = ""
     SALESFORCE_REFRESH_TOKEN:  str = ""
     SALESFORCE_DOMAIN:         str = "login"
@@ -98,13 +175,42 @@ class Settings(BaseSettings):
     SF_CLIENT_SECRET:          str = ""
     SF_USERNAME:               str = ""
     SF_DOMAIN:                 str = ""
-    GMAIL_CLIENT_ID:           str = ""
+
+    # Deprecated HubSpot setting (kept as None for legacy compatibility)
+    HUBSPOT_ACCESS_TOKEN:     Optional[str] = None
+
+    # ── Google Workspace Integration (Domain-Wide Delegation & OAuth) ──────
+    GOOGLE_CLIENT_ID:          Optional[str] = None
+    GOOGLE_CLIENT_SECRET:      Optional[str] = None
+    GOOGLE_OAUTH_REDIRECT_URI: str = "http://localhost:8000/api/v1/integrations/google/callback"
+    GOOGLE_WORKSPACE_DWD_ENABLED: bool = False
+    GOOGLE_WORKSPACE_SERVICE_ACCOUNT_EMAIL: Optional[str] = None
+    GOOGLE_WORKSPACE_SERVICE_ACCOUNT_KEY: Optional[str] = None
+    GOOGLE_WORKSPACE_DOMAIN: Optional[str] = None
+    GOOGLE_WORKSPACE_ADMIN_EMAIL: Optional[str] = None
+    GMAIL_CLIENT_ID:      str = ""
     GMAIL_CLIENT_SECRET:  str = ""
     GMAIL_REDIRECT_URI:   str = "http://localhost:8000/api/v1/auth/gmail/callback"
-    CAL_COM_API_KEY:      str = ""
-    CAL_COM_BASE_URL:     str = "https://api.cal.com/v2"
-    CAL_COM_API_VERSION:  str = "2024-06-14"
-    CAL_COM_EVENT_SLUG:   str = ""
+
+    # Microsoft 365 / Microsoft Graph (Production Company Email)
+    MICROSOFT_CLIENT_ID:          Optional[str] = None
+    MICROSOFT_CLIENT_SECRET:      Optional[str] = None
+    MICROSOFT_TENANT_ID:          Optional[str] = "common"
+    MICROSOFT_REDIRECT_URI:       str = "http://localhost:8000/api/v1/integrations/microsoft/callback"
+    MICROSOFT_AUTHORITY:          str = "https://login.microsoftonline.com"
+    MICROSOFT_GRAPH_ENDPOINT:     str = "https://graph.microsoft.com/v1.0"
+    MICROSOFT_SCOPES:             str = "offline_access User.Read Mail.Send Mail.Read"
+    COMPANY_PRODUCTION_EMAIL:     str = "shree.lakshmi@forcecloudlabs.com"
+
+
+    # ── Cal.com Settings & Automated Resolution ────────────────────────────
+    CAL_COM_API_KEY:            str = ""
+    CAL_COM_BASE_URL:           str = "https://api.cal.com/v2"
+    CAL_COM_API_VERSION:        str = "2024-06-14"
+    CAL_COM_EVENT_SLUG:         str = ""
+    CAL_COM_ORG_SLUG:           Optional[str] = None
+    CAL_COM_DEFAULT_EVENT_SLUG: Optional[str] = "15min"
+    CAL_COM_USER_MAPPINGS:      Optional[str] = '{"shree.lakshmi@forcecloudlabs.com": {"username": "shree-lakshmi-iaqqsz", "event_slug": "15min", "booking_url": "https://cal.com/shree-lakshmi-iaqqsz/15min"}}'
 
     # ── Outreach delivery ─────────────────────────────────────────────────
     RESEND_API_KEY:        str  = ""
@@ -115,6 +221,10 @@ class Settings(BaseSettings):
     INSTANTLY_CAMPAIGN_ID: str  = ""
 
     # ── Notifications ─────────────────────────────────────────────────────
+    # Deal ownership & notifications
+    DEAL_OWNER_EMAIL:       Optional[str] = None
+    NOTIFICATION_EMAIL:     Optional[str] = None
+
     NOTIFICATION_PROVIDER:  str = "ntfy"
     NTFY_BASE_URL:          str = "https://ntfy.sh"
     NTFY_APPROVAL_TOPIC:    str = ""
@@ -139,9 +249,10 @@ class Settings(BaseSettings):
     ENABLE_SLACK_APPROVALS:    bool = False   # ntfy is the default; flip for Slack
     ALLOW_DEMO_PROSPECTS:      bool = False   # production: False
 
+    A5_SIMULATION_MODE: bool = False  # Production: False. When False, never generate synthetic Fireflies transcripts or fake BANT.
     AGENT3_TEST_MODE: bool = False
     TEST_MODE_ICP_SCORE_THRESHOLD: int = 60
-    TEST_EMAIL_OVERRIDE: Optional[str] = "ibmsuriya@gmail.com"
+    TEST_EMAIL_OVERRIDE: Optional[str] = None  # In production: None. For test mode: set in .env
 
     # ── SMTP / Gmail ──────────────────────────────────────────────────────
     SMTP_HOST: str = "smtp.gmail.com"
@@ -171,8 +282,17 @@ class Settings(BaseSettings):
     REVENUE_AGENT_SCHEDULE:  str = "0 2 * * *"
 
     # ── Content Agent Settings ────────────────────────────────────────────
-    A6_CONTENT_FORMATS:      str = "linkedin_post,email_sequence,case_study,blog_article,sales_deck_outline"
-    A6_MAX_BRIEFS:           int = 3
+    A6_CONTENT_FORMATS:          str = "linkedin_post,email_sequence,case_study,blog_article,sales_deck_outline"
+    A6_MAX_BRIEFS:               int = 3
+    RSS_FEED_URLS:               str = ""
+    GOOGLE_NEWS_QUERIES:         str = ""
+    A6_GOOGLE_NEWS_QUERIES:      str = ""
+    A6_RSS_FEEDS:                str = ""
+    A6_NEWS_MAX_RESULTS:         int = 5
+    A6_REDDIT_MAX_RESULTS:       int = 5
+    A6_GOOGLE_NEWS_MAX_RESULTS:  int = 5
+    A6_RSS_MAX_RESULTS_PER_FEED: int = 5
+    A6_RELEVANCE_KEYWORDS:       str = "Salesforce, CRM, AI, AI agents, RAG, automation, sales automation, enterprise AI, B2B, cloud, data integration, customer service, lead generation, sales intelligence"
 
 
 

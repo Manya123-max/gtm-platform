@@ -1,8 +1,9 @@
 import { createContext, useContext, useState, useEffect, useCallback } from 'react'
 import { useQueryClient } from '@tanstack/react-query'
 import axios from 'axios'
+import { API_BASE_URL } from '../api'
 
-const API_BASE = '/api/v1'
+const API_BASE = API_BASE_URL
 
 // Raw axios (no interceptors) so auth calls never trigger the 401 logout loop
 const http = axios.create({

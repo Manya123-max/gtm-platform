@@ -34,7 +34,7 @@ scikit-learn>=1.6.0
 # Re-add sentence-transformers when you have 10+ GB free disk.
 
 # ── HTTP ───────────────────────────────────────────────────────────────────
-httpx==0.27.2
+httpx>=0.28.1
 tenacity==9.0.0
 
 # ── Scheduling ─────────────────────────────────────────────────────────────
@@ -54,5 +54,6 @@ structlog==24.4.0
 orjson==3.10.12
 python-dateutil==2.9.0
 pytz==2024.2
-psycopg2-binary
+psycopg2-binary==2.9.10
 simple-salesforce==1.12.9
+googlenewsdecoder==0.2.1

@@ -167,7 +167,7 @@ def resolve_industries_and_terms(industry_str: str) -> Tuple[List[str], List[str
         if not clean_term:
             continue
         normalized = clean_term.lower()
-        if normalized in INDUSTRY_TAG_MAP:
+        if normalized in INDUSTRY_TAG_MAP and not INDUSTRY_TAG_MAP[normalized].startswith("5567cd4773696439ab"):
             tag_id = INDUSTRY_TAG_MAP[normalized]
             if tag_id not in tag_ids:
                 tag_ids.append(tag_id)
@@ -186,4 +186,3 @@ def resolve_industries(industry_str: str) -> Tuple[List[str], List[str]]:
     """
     tag_ids, _, fallback_keywords = resolve_industries_and_terms(industry_str)
     return tag_ids, fallback_keywords
-

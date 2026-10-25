@@ -39,7 +39,8 @@ from sqlalchemy import select, and_, or_
 from app.core.config import settings
 from app.models.models import (
     Contact, SignalEvent, OutreachLog, PromptVariant,
-    FunnelEvent, SignalType, PendingAction, ActionStatus, UserInput, OutreachDraft
+    FunnelEvent, SignalType, PendingAction, ActionStatus, UserInput, OutreachDraft,
+    ContactUserInputAssociation, User, UserIntegration
 )
 from app.services.llm_service import LLMService
 from app.services.instantly_service import InstantlyService
@@ -509,8 +510,31 @@ class DraftManager:
         channel: str
     ) -> OutreachDraft:
         """Create and persist an OutreachDraft."""
+        # Lookup contact to determine rep ownership
+        contact_res = await self.db.execute(select(Contact).where(Contact.id == contact_id))
+        contact = contact_res.scalar_one_or_none()
+        rep_user_id = contact.user_id if contact else None
+
+        # Resolve rep identity and Cal.com booking link from backend source of truth
+        if rep_user_id:
+            user = await self.db.get(User, rep_user_id)
+            if user:
+                from app.services import CalService
+                cal_svc = CalService()
+                contact_full_name = f"{contact.first_name or ''} {contact.last_name or ''}".strip() if contact else ""
+                booking_link = await cal_svc.get_booking_link(
+                    contact_email=contact.email if contact else "",
+                    contact_name=contact_full_name,
+                    user=user,
+                )
+                if user.name and "[Your Name]" in body:
+                    body = body.replace("[Your Name]", user.name)
+                if booking_link and "cal.com" not in body.lower():
+                    body = body.rstrip() + f"\n\nFeel free to select a convenient time on my calendar: {booking_link}"
+
         draft = OutreachDraft(
             contact_id=contact_id,
+            user_id=rep_user_id,
             signal_id=signal_id,
             subject=subject,
             body=body,
@@ -595,10 +619,130 @@ class DraftManager:
 
         draft.approval_state = "approved"
         
-        # Dispatch outreach using the existing send logic (via Instantly)
+        # Dispatch outreach using owner rep's authorized mailbox
         provider_id = None
         success = False
-        if settings.ENABLE_INSTANTLY:
+
+        # Identify assigned sales rep
+        rep_user_id = getattr(draft, "user_id", None) or (contact.user_id if contact else None)
+        user = None
+        if rep_user_id:
+            user = await self.db.get(User, rep_user_id)
+
+        # Check if user is a production company user
+        is_production_user = bool(
+            user and (
+                user.email.endswith("@forcecloudlabs.com")
+                or user.email == getattr(settings, "COMPANY_PRODUCTION_EMAIL", "shree.lakshmi@forcecloudlabs.com")
+            )
+        )
+
+        # Priority 1 (Production Company Mailbox): Microsoft 365 / Microsoft Graph (POST /me/sendMail)
+        if rep_user_id and user:
+            from app.services.microsoft_graph_service import MicrosoftGraphService
+            ms_svc = MicrosoftGraphService()
+            ms_int_res = await self.db.execute(
+                select(UserIntegration).where(
+                    UserIntegration.user_id == rep_user_id,
+                    UserIntegration.provider == "microsoft",
+                    UserIntegration.status == "connected",
+                )
+            )
+            ms_integration = ms_int_res.scalar_one_or_none()
+            if ms_integration:
+                token = await ms_svc.get_valid_access_token(ms_integration, self.db)
+                if token:
+                    sender_email = ms_integration.provider_account_email or user.email
+                    formatted_body = draft.body.replace("\n", "<br/>")
+                    try:
+                        provider_id = await ms_svc.send_mail(
+                            access_token=token,
+                            to_email=contact.email,
+                            subject=draft.subject,
+                            html_body=f"<div style='font-family: sans-serif; font-size: 14px; line-height: 1.6;'>{formatted_body}</div>",
+                            from_email=sender_email,
+                        )
+                        success = bool(provider_id)
+                        logger.info(
+                            "A3: Outbound email sent via sales rep Microsoft 365 mailbox",
+                            rep_email=sender_email,
+                            to=contact.email,
+                            provider_id=provider_id,
+                        )
+                    except Exception as ms_send_err:
+                        logger.error(
+                            "A3: Failed to send via Microsoft 365 mailbox; falling back",
+                            rep_email=sender_email,
+                            error=str(ms_send_err),
+                        )
+                        success = False
+
+            elif is_production_user:
+                # Production rep without connected Microsoft 365 mailbox MUST NOT fall back to personal Gmail
+                err_msg = f"Microsoft 365 mailbox is not connected for this sales representative ({user.email})."
+                logger.error("A3: Outreach blocked - production email requires Microsoft 365 connection", error=err_msg)
+                draft.status = "failed"
+                await self.db.commit()
+                return False
+
+        # Priority 2 (Development/Testing Fallback ONLY for non-production accounts): Google Workspace / Gmail OAuth
+        if not success and rep_user_id and user and not is_production_user:
+            from app.services.google_oauth_service import GoogleOAuthService
+            oauth_svc = GoogleOAuthService()
+            g_int_res = await self.db.execute(
+                select(UserIntegration).where(
+                    UserIntegration.user_id == rep_user_id,
+                    UserIntegration.provider == "google",
+                    UserIntegration.status == "connected",
+                )
+            )
+            g_integration = g_int_res.scalar_one_or_none()
+            token, token_type = await oauth_svc.get_effective_access_token_for_user(user, self.db)
+            if token and user and user.email:
+                sender_email = (g_integration.provider_account_email if g_integration else None) or user.email
+                try:
+                    formatted_body = draft.body.replace("\n", "<br/>")
+                    rep_name = user.name if user else None
+                    provider_id = await oauth_svc.send_gmail_message(
+                        access_token=token,
+                        to_email=contact.email,
+                        subject=draft.subject,
+                        html_body=f"<div style='font-family: sans-serif; font-size: 14px; line-height: 1.6;'>{formatted_body}</div>",
+                        from_email=sender_email,
+                        from_name=rep_name,
+                    )
+                    success = bool(provider_id)
+                    logger.info(
+                        "A3: Outbound email sent via sales rep Google mailbox (Development Fallback)",
+                        rep_email=sender_email,
+                        token_type=token_type,
+                        to=contact.email,
+                        provider_id=provider_id,
+                    )
+                except Exception as oauth_send_err:
+                    logger.error(
+                        "A3: Failed to send via user's Google mailbox; falling back",
+                        rep_email=sender_email,
+                        error=str(oauth_send_err),
+                    )
+                    success = False
+
+        # Safety Gate: If test mode, dry run, pytest, or ENABLE_EMAIL_SENDING is False, mock send safely
+        if (
+            not success
+            and (
+                getattr(settings, "AGENT3_TEST_MODE", False)
+                or getattr(settings, "DRY_RUN_OUTREACH", False)
+                or os.environ.get("PYTEST_CURRENT_TEST")
+                or not getattr(settings, "ENABLE_EMAIL_SENDING", False)
+            )
+        ):
+            logger.info("Safe/Test mode active; mock-sending draft without live dispatch", email=contact.email)
+            success = True
+            provider_id = "mock_msg_safe_test"
+
+        # Priority 3: Instantly (if enabled and live sending permitted)
+        if not success and settings.ENABLE_INSTANTLY:
             provider_id = await self.instantly.add_lead(
                 email=contact.email,
                 first_name=contact.first_name,
@@ -610,7 +754,7 @@ class DraftManager:
                 body=draft.body,
             )
             success = bool(provider_id)
-        elif getattr(settings, "SMTP_USER", "") and getattr(settings, "SMTP_PASSWORD", ""):
+        elif not success and getattr(settings, "SMTP_USER", "") and getattr(settings, "SMTP_PASSWORD", ""):
             from app.services import SMTPService
             smtp_svc = SMTPService()
             formatted_body = draft.body.replace("\n", "<br/>")
@@ -622,7 +766,7 @@ class DraftManager:
             success = bool(provider_id)
             if not success:
                 logger.error("SMTP email dispatch returned failure", email=contact.email)
-        elif getattr(settings, "ENABLE_EMAIL_SENDING", True) and settings.RESEND_API_KEY:
+        elif not success and getattr(settings, "ENABLE_EMAIL_SENDING", False) and settings.RESEND_API_KEY:
             from app.services.resend_service import ResendService
             resend = ResendService()
             formatted_body = draft.body.replace("\n", "<br/>")
@@ -634,7 +778,7 @@ class DraftManager:
             success = bool(provider_id)
             if not success:
                 logger.error("Resend email dispatch returned failure", email=contact.email)
-        else:
+        elif not success:
             # Safe default fallback for development/staging
             logger.info("Email sending not enabled; mock-sending draft", email=contact.email)
             success = True
@@ -800,12 +944,17 @@ class OutreachAgent:
 
 
             # Enforce strict current-session checks
-            if contact.user_input_id != active_session_id:
+            assoc_check = await self.db.execute(
+                select(ContactUserInputAssociation).where(
+                    ContactUserInputAssociation.contact_id == contact.id,
+                    ContactUserInputAssociation.user_input_id == active_session_id
+                )
+            )
+            if not assoc_check.scalars().first() and contact.user_input_id != active_session_id:
                 skip_reasons["inactive_session"] += 1
                 logger.info(
-                    "Outreach skipped: contact belongs to historical session",
+                    "Outreach skipped: contact does not belong to active session",
                     contact_id=contact.id,
-                    contact_session_id=contact.user_input_id,
                     active_session_id=active_session_id
                 )
                 continue
@@ -1036,12 +1185,13 @@ class OutreachAgent:
         if active_session_id is None:
             return []
 
+        assoc_ids_q = select(ContactUserInputAssociation.contact_id).where(ContactUserInputAssociation.user_input_id == active_session_id)
         result = await self.db.execute(
             select(Contact, SignalEvent)
             .join(SignalEvent, SignalEvent.contact_id == Contact.id)
             .where(
                 and_(
-                    Contact.user_input_id == active_session_id,
+                    or_(Contact.user_input_id == active_session_id, Contact.id.in_(assoc_ids_q)),
                     Contact.do_not_contact == False,
                     SignalEvent.confidence >= settings.SIGNAL_SCORE_THRESHOLD / 100,
                     SignalEvent.processed == False,

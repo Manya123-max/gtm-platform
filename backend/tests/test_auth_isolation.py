@@ -34,6 +34,21 @@ async def client():
         ) as c:
             yield c
     finally:
+        # Clean up any test users and their data created during tests
+        from app.core.database import AsyncSessionLocal
+        from app.models.models import User, Contact, UserInput, Notification, SignalEvent
+        from sqlalchemy import select, delete, or_
+        async with AsyncSessionLocal() as db:
+            users = (await db.execute(select(User).where(or_(User.email.ilike("%@example.com"), User.email.ilike("%@company.com"))))).scalars().all()
+            if users:
+                uids = [u.id for u in users]
+                c_sub = select(Contact.id).where(Contact.user_id.in_(uids))
+                await db.execute(delete(Notification).where(Notification.contact_id.in_(c_sub)))
+                await db.execute(delete(SignalEvent).where(SignalEvent.contact_id.in_(c_sub)))
+                await db.execute(delete(Contact).where(Contact.user_id.in_(uids)))
+                await db.execute(delete(UserInput).where(UserInput.user_id.in_(uids)))
+                await db.execute(delete(User).where(User.id.in_(uids)))
+                await db.commit()
         settings.AUTH_ENABLED = orig_auth
         settings.APP_ENV = orig_env
         await close_db()
@@ -272,7 +287,7 @@ async def test_direct_object_access_prevention(client):
     """
     from app.core.database import AsyncSessionLocal
     from app.models.models import Contact, Deal, OutreachDraft, WorkflowRun, User as UserM
-    from sqlalchemy import select
+    from sqlalchemy import select, delete
 
     user_a = await _register(client, name="User A")
     user_b = await _register(client, name="User B")
@@ -331,6 +346,13 @@ async def test_direct_object_access_prevention(client):
     # User A tries to view User B's workflow run -> 404
     r = await client.get(f"/api/v1/orchestrator/runs/{wf_b_id}", headers=user_a["headers"])
     assert r.status_code == 404
+
+    # Cleanup entities
+    async with AsyncSessionLocal() as db:
+        await db.execute(delete(Deal).where(Deal.id == deal_b_id))
+        await db.execute(delete(OutreachDraft).where(OutreachDraft.id == draft_b_id))
+        await db.execute(delete(WorkflowRun).where(WorkflowRun.id == wf_b_id))
+        await db.commit()
 
 
 @pytest.mark.asyncio

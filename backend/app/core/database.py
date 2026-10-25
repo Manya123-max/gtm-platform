@@ -1,3 +1,4 @@
+from typing import Optional
 from sqlalchemy.ext.asyncio import AsyncSession, create_async_engine, async_sessionmaker
 from sqlalchemy.orm import DeclarativeBase
 
@@ -59,7 +60,7 @@ async def init_db():
     logger.info("Database initialised")
 
 
-async def _bootstrap_multi_user_schema(conn) -> None:
+async def _bootstrap_multi_user_schema(conn, migration_owner_email: Optional[str] = None) -> None:
     """
     Idempotent schema migration for multi-user support (safe to run on every
     startup). Creates the ownership columns/indexes that `create_all` cannot
@@ -68,6 +69,7 @@ async def _bootstrap_multi_user_schema(conn) -> None:
     explicitly set).
     """
     statements = [
+        "ALTER TABLE users ALTER COLUMN role SET DEFAULT 'SALES_REPRESENTATIVE'",
         "ALTER TABLE user_inputs ADD COLUMN IF NOT EXISTS user_id UUID REFERENCES users(id)",
         "ALTER TABLE contacts ADD COLUMN IF NOT EXISTS user_id UUID REFERENCES users(id)",
         "ALTER TABLE workflow_runs ADD COLUMN IF NOT EXISTS user_id UUID REFERENCES users(id)",
@@ -93,8 +95,11 @@ async def _bootstrap_multi_user_schema(conn) -> None:
     for stmt in statements:
         await conn.execute(text(stmt))
 
+    if migration_owner_email is not None:
+        owner_email = migration_owner_email.strip().lower()
+    else:
+        owner_email = (settings.GTM_MIGRATION_OWNER_EMAIL or "").strip().lower()
 
-    owner_email = (settings.GTM_MIGRATION_OWNER_EMAIL or "").strip().lower()
     if not owner_email:
         logger.warning(
             "GTM_MIGRATION_OWNER_EMAIL not set — legacy (anonymous) rows keep "
@@ -110,28 +115,40 @@ async def _bootstrap_multi_user_schema(conn) -> None:
     if owner_row is None:
         from app.core.security import hash_password
         import secrets as _secrets
-        temp_password = _secrets.token_urlsafe(24)
+        raw_password = (settings.GTM_MIGRATION_OWNER_PASSWORD or "").strip() or _secrets.token_urlsafe(24)
         await conn.execute(
             text(
-                "INSERT INTO users (id, name, email, password_hash, is_active, created_at, updated_at) "
-                "VALUES (gen_random_uuid(), :name, :email, :password_hash, true, now(), now())"
+                "INSERT INTO users (id, name, email, password_hash, is_active, role, created_at, updated_at) "
+                "VALUES (gen_random_uuid(), :name, :email, :password_hash, true, :role, now(), now()) "
+                "ON CONFLICT (email) DO NOTHING"
             ),
             {
                 "name": "Migration Owner",
                 "email": owner_email,
-                "password_hash": hash_password(temp_password),
+                "password_hash": hash_password(raw_password),
+                "role": "SALES_REPRESENTATIVE",
             },
         )
         owner_id_row = await conn.execute(
             text("SELECT id FROM users WHERE email = :email"), {"email": owner_email}
         )
         owner_id = owner_id_row.scalar_one()
-        logger.warning(
-            "Created migration owner account. Temporary password (rotate immediately): "
-            f"{temp_password}"
-        )
+        if not settings.GTM_MIGRATION_OWNER_PASSWORD:
+            logger.warning(
+                "Created migration owner account. Temporary password (rotate immediately): "
+                f"{raw_password}"
+            )
+        else:
+            logger.info("Created migration owner account with configured GTM_MIGRATION_OWNER_PASSWORD")
     else:
         owner_id = owner_row[0]
+        if settings.GTM_MIGRATION_OWNER_PASSWORD and settings.GTM_MIGRATION_OWNER_PASSWORD.strip():
+            from app.core.security import hash_password
+            await conn.execute(
+                text("UPDATE users SET password_hash = :hash, is_active = true, updated_at = now() WHERE id = :id"),
+                {"hash": hash_password(settings.GTM_MIGRATION_OWNER_PASSWORD.strip()), "id": owner_id},
+            )
+            logger.info("Synchronized migration owner password from GTM_MIGRATION_OWNER_PASSWORD")
 
     # Backfill legacy rows: user_inputs → contacts inherit from their session
     await conn.execute(text(

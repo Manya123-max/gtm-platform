@@ -130,11 +130,36 @@ async def _shift_history_to_user(db: AsyncSession, user: User) -> None:
     Shifts all existing unassigned project history (contacts, search sessions,
     deals, workflow runs, revenue forecasts) to the newly registered or authenticated user.
     """
-    from sqlalchemy import update, or_, select
+    from sqlalchemy import update, or_, select, text
     from app.models.models import Contact, UserInput, WorkflowRun, RevenueForecast, Deal
 
     try:
-        # 1. Shift unassigned contacts that are either not tied to a session or tied to this user's session
+        # 1. Deduplicate unassigned contacts to prevent uq_contacts_user_email collision:
+        # Remove unassigned contacts whose email already belongs to this user
+        await db.execute(
+            text("""
+                DELETE FROM contacts
+                WHERE user_id IS NULL
+                  AND email IN (SELECT email FROM contacts WHERE user_id = :uid)
+            """),
+            {"uid": user.id}
+        )
+
+        # Remove duplicate unassigned contacts keeping the latest record
+        await db.execute(
+            text("""
+                DELETE FROM contacts c1
+                WHERE c1.user_id IS NULL
+                  AND EXISTS (
+                      SELECT 1 FROM contacts c2
+                      WHERE c2.user_id IS NULL
+                        AND c2.email = c1.email
+                        AND (c2.created_at > c1.created_at OR (c2.created_at = c1.created_at AND c2.id > c1.id))
+                  )
+            """)
+        )
+
+        # Shift unassigned contacts that are either not tied to a session or tied to this user's session
         subq_other_users = select(UserInput.id).where(UserInput.user_id.isnot(None), UserInput.user_id != user.id)
         await db.execute(
             update(Contact)
@@ -199,8 +224,9 @@ async def register(body: RegisterRequest, request: Request, db: AsyncSession = D
     db.add(user)
     await db.commit()
     await db.refresh(user)
+    token_resp = _token_response(user)
     await _shift_history_to_user(db, user)
-    return _token_response(user)
+    return token_resp
 
 
 @auth_router.post("/login")
@@ -213,8 +239,9 @@ async def login(body: LoginRequest, request: Request, db: AsyncSession = Depends
         raise HTTPException(status_code=401, detail="Invalid email or password")
     if not user.is_active:
         raise HTTPException(status_code=403, detail="Account is disabled")
+    token_resp = _token_response(user)
     await _shift_history_to_user(db, user)
-    return _token_response(user)
+    return token_resp
 
 
 @auth_router.post("/refresh")

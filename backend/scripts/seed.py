@@ -76,7 +76,7 @@ async def seed():
                 verified_at=datetime.utcnow() - timedelta(days=random.randint(1, 30)),
                 enriched_at=datetime.utcnow() - timedelta(days=random.randint(1, 14)),
                 readiness_score=0.0,
-                source="apollo",
+                source="seeded",
             )
             db.add(c)
             contacts.append(c)

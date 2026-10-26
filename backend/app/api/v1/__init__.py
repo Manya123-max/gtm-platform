@@ -65,9 +65,31 @@ async def _ensure_owned_input(db: AsyncSession, user, user_input_id: int) -> Non
         raise HTTPException(status_code=404, detail="Session not found")
 
 
+def _is_real_prospect_contact():
+    """
+    SQLAlchemy filter to strictly exclude mock, seeded, test, and non-prospect service addresses
+    (e.g., developer@groq.co, updates@groq.co, info@e.atlassian.com, c-...@example.com).
+    """
+    from sqlalchemy import not_, and_
+    return and_(
+        Contact.source.notin_(["seeded", "mock", "test"]),
+        Contact.source.isnot(None),
+        not_(Contact.email.ilike("%@example.com")),
+        not_(Contact.email.ilike("developer@%")),
+        not_(Contact.email.ilike("updates@%")),
+        not_(Contact.email.ilike("info@%")),
+        not_(Contact.email.ilike("support@%")),
+        not_(Contact.email.ilike("no-reply@%")),
+        not_(Contact.email.ilike("noreply@%")),
+    )
+
+
 def _own_contact_ids_q(user):
-    """Subquery: contact ids owned by the user or legacy pre-auth contacts."""
-    return select(Contact.id).where(or_(Contact.user_id == user.id, Contact.user_id.is_(None)))
+    """Subquery: contact ids owned by the user or legacy pre-auth contacts, excluding mock data."""
+    return select(Contact.id).where(
+        or_(Contact.user_id == user.id, Contact.user_id.is_(None)),
+        _is_real_prospect_contact(),
+    )
 
 
 def _own_deal_ids_q(user):
@@ -286,8 +308,8 @@ async def get_dashboard_overview(
 
     from app.models.models import UserInput
 
-    # Base contact filter (strictly exclude seeded mock data)
-    contact_filter = [Contact.do_not_contact == False, Contact.source != "seeded"]
+    # Base contact filter (strictly exclude seeded and mock data)
+    contact_filter = [Contact.do_not_contact == False, _is_real_prospect_contact()]
     if current_user is not None:
         contact_filter.append((Contact.user_id == current_user.id) | (Contact.user_id.is_(None)))
     if user_input_id is not None:
@@ -399,7 +421,7 @@ async def get_tier_summary(
     assoc_ids_q = select(ContactUserInputAssociation.contact_id).where(ContactUserInputAssociation.user_input_id == user_input_id)
     q = select(Contact).options(selectinload(Contact.signals)).where(
         Contact.do_not_contact.is_(False),
-        or_(Contact.source != "seeded", Contact.source.is_(None)),
+        _is_real_prospect_contact(),
         or_(Contact.user_input_id == user_input_id, Contact.id.in_(assoc_ids_q)),
     )
     if current_user is not None:
@@ -437,10 +459,10 @@ async def list_contacts(
     if current_user is not None:
         await _ensure_owned_input(db, current_user, user_input_id)
 
-    # 2. Exclude seeded mock contacts
+    # 2. Exclude seeded and mock contacts
     q = select(Contact).options(selectinload(Contact.signals)).where(
         Contact.do_not_contact == do_not_contact,
-        or_(Contact.source != "seeded", Contact.source.is_(None)),
+        _is_real_prospect_contact(),
     )
 
     # 3. Scope strictly to the specified search
@@ -634,7 +656,7 @@ async def list_deals(
     if contact_id is not None:
         q = q.where(Deal.contact_id == contact_id)
     if current_user is not None:
-        own_contacts = select(Contact.id).where(or_(Contact.user_id == current_user.id, Contact.user_id.is_(None)))
+        own_contacts = _own_contact_ids_q(current_user)
         if user_input_id is not None:
             assoc_ids_q = select(ContactUserInputAssociation.contact_id).where(ContactUserInputAssociation.user_input_id == user_input_id)
             own_contacts = own_contacts.where(or_(Contact.user_input_id == user_input_id, Contact.id.in_(assoc_ids_q)))
@@ -646,7 +668,10 @@ async def list_deals(
             q = q.where(or_(*deal_clauses))
     elif user_input_id is not None:
         assoc_ids_q = select(ContactUserInputAssociation.contact_id).where(ContactUserInputAssociation.user_input_id == user_input_id)
-        matching_contacts = select(Contact.id).where(or_(Contact.user_input_id == user_input_id, Contact.id.in_(assoc_ids_q)))
+        matching_contacts = select(Contact.id).where(
+            or_(Contact.user_input_id == user_input_id, Contact.id.in_(assoc_ids_q)),
+            _is_real_prospect_contact(),
+        )
         q = q.where(Deal.contact_id.in_(matching_contacts))
     if stage:
         q = q.where(Deal.stage == stage)
@@ -667,7 +692,7 @@ async def get_pipeline_summary(
         await _ensure_owned_input(db, current_user, user_input_id)
     where_clauses = [Deal.outcome.is_(None)]
     if current_user is not None:
-        own_contacts = select(Contact.id).where(or_(Contact.user_id == current_user.id, Contact.user_id.is_(None)))
+        own_contacts = _own_contact_ids_q(current_user)
         if user_input_id is not None:
             assoc_ids_q = select(ContactUserInputAssociation.contact_id).where(ContactUserInputAssociation.user_input_id == user_input_id)
             own_contacts = own_contacts.where(or_(Contact.user_input_id == user_input_id, Contact.id.in_(assoc_ids_q)))
@@ -679,7 +704,10 @@ async def get_pipeline_summary(
             where_clauses.append(or_(*deal_clauses))
     elif user_input_id is not None:
         assoc_ids_q = select(ContactUserInputAssociation.contact_id).where(ContactUserInputAssociation.user_input_id == user_input_id)
-        matching_contacts = select(Contact.id).where(or_(Contact.user_input_id == user_input_id, Contact.id.in_(assoc_ids_q)))
+        matching_contacts = select(Contact.id).where(
+            or_(Contact.user_input_id == user_input_id, Contact.id.in_(assoc_ids_q)),
+            _is_real_prospect_contact(),
+        )
         where_clauses.append(Deal.contact_id.in_(matching_contacts))
     result = await db.execute(
         select(Deal.stage, func.count(Deal.id).label("count"),
@@ -1219,13 +1247,19 @@ async def get_outreach_drafts(
              OutreachLog.sent_at >= datetime.utcnow() - timedelta(days=7))
     )
     if current_user is not None:
-        q = q.join(Contact, Contact.id == OutreachLog.contact_id).where((Contact.user_id == current_user.id) | (Contact.user_id.is_(None)))
+        q = q.join(Contact, Contact.id == OutreachLog.contact_id).where(
+            (Contact.user_id == current_user.id) | (Contact.user_id.is_(None)),
+            _is_real_prospect_contact(),
+        )
         if user_input_id is not None:
             assoc_ids_q = select(ContactUserInputAssociation.contact_id).where(ContactUserInputAssociation.user_input_id == user_input_id)
             q = q.where(or_(Contact.user_input_id == user_input_id, Contact.id.in_(assoc_ids_q)))
     elif user_input_id is not None:
         assoc_ids_q = select(ContactUserInputAssociation.contact_id).where(ContactUserInputAssociation.user_input_id == user_input_id)
-        matching_contacts = select(Contact.id).where(or_(Contact.user_input_id == user_input_id, Contact.id.in_(assoc_ids_q)))
+        matching_contacts = select(Contact.id).where(
+            or_(Contact.user_input_id == user_input_id, Contact.id.in_(assoc_ids_q)),
+            _is_real_prospect_contact(),
+        )
         q = q.where(OutreachLog.contact_id.in_(matching_contacts))
     result = await db.execute(q.order_by(desc(OutreachLog.sent_at)).limit(50))
     return result.scalars().all()

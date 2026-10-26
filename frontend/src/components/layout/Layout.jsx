@@ -35,22 +35,13 @@ const AGENT_STATUS = [
   { id: 'A7', label: 'Revenue',  color: '#F59E0B' },
 ]
 
-function ForceLogo() {
+function G2MLogo() {
   return (
-    <svg width="30" height="30" viewBox="0 0 30 30" fill="none" xmlns="http://www.w3.org/2000/svg">
-      <rect width="30" height="30" rx="8" fill="url(#grad4ce)" />
-      <path
-        d="M9 19c0-2.2 1.8-4 4-4h.2A3.5 3.5 0 0 1 20 16.5c0 .17-.01.33-.03.5H20a1.5 1.5 0 0 1 0 3H9.5A.5.5 0 0 1 9 19.5V19z"
-        fill="white" fillOpacity="0.18"
-      />
-      <path d="M16.5 7.5L12 16h5L14 22.5l7.5-10.5H17L16.5 7.5z" fill="white" fillOpacity="0.95" />
-      <defs>
-        <linearGradient id="grad4ce" x1="0" y1="0" x2="30" y2="30" gradientUnits="userSpaceOnUse">
-          <stop offset="0%" stopColor="#0A67FF" />
-          <stop offset="100%" stopColor="#00C8FF" />
-        </linearGradient>
-      </defs>
-    </svg>
+    <img
+      src="/g2m-logo.png"
+      alt="G2M Logo"
+      className="h-7 w-auto object-contain select-none filter drop-shadow-sm"
+    />
   )
 }
 
@@ -138,23 +129,17 @@ export default function Layout() {
           style={{ borderBottom: '1px solid var(--c-border)' }}
         >
           <div className="flex items-center gap-2.5">
-            <ForceLogo />
+            <G2MLogo />
             <div>
               <div
-                className="text-sm font-bold leading-none tracking-tight"
-                style={{
-                  background: 'linear-gradient(90deg, #0A67FF, #00C8FF)',
-                  WebkitBackgroundClip: 'text',
-                  WebkitTextFillColor: 'transparent',
-                }}
+                className="text-sm font-bold leading-none tracking-tight text-[#1E1B4B]"
               >
-                4CECloud Labs
+                G2M Platform
               </div>
               <div
-                className="text-[10px] mt-0.5"
-                style={{ color: 'var(--c-text3)' }}
+                className="text-[10px] mt-0.5 text-gray-500 font-medium"
               >
-                GTM · 7-Agent Engine
+                7-Agent Intelligence Engine
               </div>
             </div>
           </div>

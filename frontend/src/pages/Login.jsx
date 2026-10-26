@@ -39,16 +39,14 @@ function MicrosoftIcon() {
   )
 }
 
-// ── G2M Brand Monogram ────────────────────────────────────────────────────────
+// ── G2M Official Brand Logo ───────────────────────────────────────────────────
 function G2MLogo() {
   return (
-    <div className="flex items-center tracking-tight font-black select-none">
-      <span className="text-[34px] leading-none text-[#1E1B4B]">G</span>
-      <span className="text-[34px] leading-none italic font-black bg-gradient-to-r from-[#5B4EFF] to-[#8B5CF6] bg-clip-text text-transparent px-0.5 transform -skew-x-6">
-        2
-      </span>
-      <span className="text-[34px] leading-none text-[#1E1B4B]">M</span>
-    </div>
+    <img
+      src="/g2m-logo.png"
+      alt="G2M Logo"
+      className="h-10 sm:h-12 w-auto object-contain select-none filter drop-shadow-sm"
+    />
   )
 }
 

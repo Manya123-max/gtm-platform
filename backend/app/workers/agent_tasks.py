@@ -104,7 +104,10 @@ def run_revenue_agent(config: Optional[Dict] = None):
         from app.agents.a7_revenue import RevenueAgent
         async with AsyncSessionLocal() as db:
             agent = RevenueAgent(db)
-            result = await agent.run()
+            cfg = config or {}
+            user_id = cfg.get("user_id")
+            company_wide = cfg.get("company_wide", False)
+            result = await agent.run(user_id=user_id, company_wide=company_wide)
             logger.info("A7 complete", **result)
             return result
     return run_async(_run())
@@ -155,7 +158,9 @@ def send_weekly_digest(config: Optional[Dict] = None):
         from app.agents.a7_revenue import RevenueAgent
         async with AsyncSessionLocal() as db:
             agent = RevenueAgent(db)
-            await agent.send_weekly_digest()
+            cfg = config or {}
+            user_id = cfg.get("user_id")
+            await agent.send_weekly_digest(user_id=user_id)
             return {"status": "sent"}
     return run_async(_run())
 

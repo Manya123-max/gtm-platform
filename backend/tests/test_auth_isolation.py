@@ -36,13 +36,20 @@ async def client():
     finally:
         # Clean up any test users and their data created during tests
         from app.core.database import AsyncSessionLocal
-        from app.models.models import User, Contact, UserInput, Notification, SignalEvent
+        from app.models.models import (
+            User, Contact, UserInput, Notification, SignalEvent,
+            Deal, DealStageHistory, RevenueForecast
+        )
         from sqlalchemy import select, delete, or_
         async with AsyncSessionLocal() as db:
             users = (await db.execute(select(User).where(or_(User.email.ilike("%@example.com"), User.email.ilike("%@company.com"))))).scalars().all()
             if users:
                 uids = [u.id for u in users]
                 c_sub = select(Contact.id).where(Contact.user_id.in_(uids))
+                deal_sub = select(Deal.id).where(Deal.contact_id.in_(c_sub))
+                await db.execute(delete(DealStageHistory).where(DealStageHistory.deal_id.in_(deal_sub)))
+                await db.execute(delete(Deal).where(Deal.contact_id.in_(c_sub)))
+                await db.execute(delete(RevenueForecast).where(RevenueForecast.user_id.in_(uids)))
                 await db.execute(delete(Notification).where(Notification.contact_id.in_(c_sub)))
                 await db.execute(delete(SignalEvent).where(SignalEvent.contact_id.in_(c_sub)))
                 await db.execute(delete(Contact).where(Contact.user_id.in_(uids)))

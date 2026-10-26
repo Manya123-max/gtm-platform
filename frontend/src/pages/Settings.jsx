@@ -1,7 +1,7 @@
 import { useState, useEffect } from 'react'
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
 import {
-  Mail, Calendar, Slack, CheckCircle, XCircle, AlertCircle,
+  Mail, Calendar, CheckCircle, XCircle, AlertCircle,
   ExternalLink, Shield, Key, RefreshCw, Save, User, Building,
   Check, Lock, Info, Sparkles, Edit3, UserPlus, Users,
   ToggleLeft, ToggleRight, Trash2, ArrowRight

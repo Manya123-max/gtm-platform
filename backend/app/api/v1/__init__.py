@@ -944,7 +944,11 @@ async def list_content(
 # ── Agents — manual trigger ────────────────────────────────────────────────
 
 @router.post("/agents/run")
-async def run_agent_manually(body: AgentRunRequest, background_tasks: BackgroundTasks):
+async def run_agent_manually(
+    body: AgentRunRequest,
+    background_tasks: BackgroundTasks,
+    current_user=Depends(get_current_user),
+):
     """
     Trigger any agent manually from the frontend.
     A4 (Inbound) is webhook-only — use /webhook/inbound-reply instead.
@@ -966,7 +970,12 @@ async def run_agent_manually(body: AgentRunRequest, background_tasks: Background
     task_fn = agent_map.get(body.agent)
     if not task_fn:
         raise HTTPException(status_code=400, detail=f"Unknown agent: {body.agent}")
-    task = task_fn.apply_async(kwargs={"config": body.config} if body.config else {})
+
+    cfg = dict(body.config or {})
+    if current_user is not None and not cfg.get("user_id"):
+        cfg["user_id"] = current_user.id
+
+    task = task_fn.apply_async(kwargs={"config": cfg} if cfg else {})
     return {"status": "queued", "task_id": task.id, "agent": body.agent}
 
 

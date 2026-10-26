@@ -442,8 +442,8 @@ export function Revenue() {
       </div>
 
       <div className="grid grid-cols-1 lg:grid-cols-2 gap-4 mb-6">
-        {/* Constraint */}
-        {forecast?.bottleneck_stage && (
+        {/* Constraint / Pipeline Health */}
+        {forecast?.bottleneck_stage ? (
           <div className="card border-amber-800/40 bg-amber-900/10">
             <div className="flex items-center gap-2 mb-2">
               <AlertTriangle size={14} className="text-amber-400" />
@@ -453,6 +453,18 @@ export function Revenue() {
             <div className="text-xs text-gray-400 mb-3">{forecast.bottleneck_description}</div>
             <div className="text-xs text-blue-400 font-medium bg-blue-950/40 p-2.5 rounded border border-blue-900/30">
               <strong className="text-blue-300">Recommended Growth Lever:</strong> {forecast.recommended_lever}
+            </div>
+          </div>
+        ) : (
+          <div className="card border-slate-800/60 bg-slate-900/20">
+            <div className="flex items-center gap-2 mb-2">
+              <span className="text-sm font-medium text-slate-300">Pipeline Health & Levers</span>
+            </div>
+            <div className="text-sm text-slate-200 font-medium mb-1">
+              {forecast?.bottleneck_description || "No active bottleneck detected"}
+            </div>
+            <div className="text-xs text-gray-400 mb-3">
+              {forecast?.recommended_lever || "Pipeline converting healthily across stages."}
             </div>
           </div>
         )}

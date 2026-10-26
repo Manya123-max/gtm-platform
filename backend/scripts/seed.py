@@ -23,6 +23,9 @@ DATABASE_URL = os.environ.get(
 
 
 async def seed():
+    if os.environ.get("APP_ENV") == "production" or os.environ.get("ENVIRONMENT") == "production":
+        raise RuntimeError("CRITICAL: Cannot seed synthetic business data in a production environment!")
+
     from sqlalchemy.ext.asyncio import create_async_engine, async_sessionmaker, AsyncSession
     from sqlalchemy import text
 
@@ -76,7 +79,7 @@ async def seed():
                 verified_at=datetime.utcnow() - timedelta(days=random.randint(1, 30)),
                 enriched_at=datetime.utcnow() - timedelta(days=random.randint(1, 14)),
                 readiness_score=0.0,
-                source="apollo",
+                source="seeded",
             )
             db.add(c)
             contacts.append(c)

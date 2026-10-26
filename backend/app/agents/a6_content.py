@@ -488,7 +488,7 @@ Return only the content, no meta-commentary."""
     async def _get_brand_voice_examples(self, topic: str) -> List[str]:
         """
         Retrieve 2 most similar brand assets using pgvector cosine similarity.
-        OpenAI text-embedding-3-small: $0.02/M tokens — negligible cost.
+        Uses deterministic hash-based token projection embeddings (0 dependencies, non-neural).
         """
         try:
             embedding = await self.embedder.embed(topic)

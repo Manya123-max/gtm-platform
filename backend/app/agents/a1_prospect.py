@@ -72,11 +72,12 @@ class ProspectAgent:
         )
 
         reason = self._reason(raw_contacts, scored, qualified, save_result, provider_meta)
+        provider = provider_meta.get("provider", "apollo")
 
         await self._log_funnel_event(
             "prospect_batch_completed",
             {
-                "provider": "apollo",
+                "provider": provider,
                 "discovery_method": provider_meta.get("method"),
                 "provider_page": provider_meta.get("page"),
                 "icp_fingerprint": provider_meta.get("icp_fingerprint"),
@@ -90,7 +91,8 @@ class ProspectAgent:
 
         return {
             "agent": "A1",
-            "provider": "apollo",
+            "provider": provider,
+            "status": "LIVE" if provider == "apollo" and raw_contacts else ("FALLBACK" if provider == "offline" and raw_contacts else "UNAVAILABLE"),
             "discovery_method": provider_meta.get("method"),
             "provider_page": provider_meta.get("page"),
             "raw_count": len(raw_contacts),
@@ -851,9 +853,9 @@ class ProspectAgent:
                 readiness_score=0.0,
                 email_valid=data.get("email_valid"),
                 email_verified=bool(data.get("email_verified")),
-                verified_at=datetime.utcnow(),
-                enriched_at=datetime.utcnow(),
-                source="apollo",
+                verified_at=datetime.utcnow() if data.get("source") != "offline_store" else None,
+                enriched_at=datetime.utcnow() if data.get("source") != "offline_store" else None,
+                source=data.get("source", "apollo"),
                 apollo_id=apollo_id,
                 user_input_id=user_input_id,
                 user_id=user_id,

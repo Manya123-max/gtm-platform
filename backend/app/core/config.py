@@ -30,7 +30,7 @@ class Settings(BaseSettings):
     DEBUG:          bool = True
     PRODUCTION_FRONTEND_URL: str = "https://dashing-sorbet-fd7cd5.netlify.app"
     FRONTEND_URL:   str  = "http://localhost:3000"
-    CORS_ORIGINS:   str  = "http://localhost:3000,http://localhost:8000,https://dashing-sorbet-fd7cd5.netlify.app"
+    CORS_ORIGINS:   str  = "http://localhost:3000,http://localhost:3003,http://localhost:5173,http://localhost:8000,http://127.0.0.1:3000,http://127.0.0.1:3003,http://127.0.0.1:5173,https://dashing-sorbet-fd7cd5.netlify.app"
 
     @field_validator("DEBUG", mode="before")
     @classmethod
@@ -164,6 +164,17 @@ class Settings(BaseSettings):
     SALESFORCE_CLIENT_ID:     Optional[str] = None
     SALESFORCE_CLIENT_SECRET: Optional[str] = None
     SALESFORCE_API_VERSION:   str = "v60.0"
+
+    # Direct Salesforce credentials (used by simple-salesforce / lead sync)
+    SALESFORCE_USERNAME:       str = ""
+    SALESFORCE_PASSWORD:       str = ""
+    SALESFORCE_SECURITY_TOKEN: str = ""
+    SALESFORCE_REFRESH_TOKEN:  str = ""
+    SALESFORCE_DOMAIN:         str = "login"
+    SF_CLIENT_ID:              str = ""
+    SF_CLIENT_SECRET:          str = ""
+    SF_USERNAME:               str = ""
+    SF_DOMAIN:                 str = ""
 
     # Deprecated HubSpot setting (kept as None for legacy compatibility)
     HUBSPOT_ACCESS_TOKEN:     Optional[str] = None

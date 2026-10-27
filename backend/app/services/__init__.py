@@ -691,5 +691,6 @@ class EmbeddingService:
 
 
 from app.services.gmail_imap_service import GmailIMAPService
+from app.services.salesforce_service import SalesforceSyncService
 from app.services.token_encryption import encrypt_token, decrypt_token
 from app.services.google_oauth_service import GoogleOAuthService

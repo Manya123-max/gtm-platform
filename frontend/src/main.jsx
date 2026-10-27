@@ -12,8 +12,11 @@ import { Deals, Outreach, Content, Revenue, Agents } from './pages/index'
 import InputForm from './components/InputForm'
 import History from './pages/History'
 import Settings from './pages/Settings'
+import Notifications from './pages/Notifications'
 import Login from './pages/Login'
 import Register from './pages/Register'
+import ForgotPassword from './pages/ForgotPassword'
+import ResetPassword from './pages/ResetPassword'
 import ProtectedRoute from './components/ProtectedRoute'
 import { SessionProvider } from './context/SessionContext'
 import { AuthProvider } from './context/AuthContext'
@@ -31,8 +34,10 @@ ReactDOM.createRoot(document.getElementById('root')).render(
         <BrowserRouter>
           <Routes>
             {/* Public auth routes */}
-            <Route path="/login"    element={<Login />} />
-            <Route path="/register" element={<Register />} />
+            <Route path="/login"           element={<Login initialMode="login" />} />
+            <Route path="/register"        element={<Register />} />
+            <Route path="/forgot-password" element={<ForgotPassword />} />
+            <Route path="/reset-password"  element={<ResetPassword />} />
 
             {/* Protected application routes */}
             <Route element={<ProtectedRoute />}>
@@ -49,6 +54,8 @@ ReactDOM.createRoot(document.getElementById('root')).render(
                 <Route path="input"        element={<InputForm />} />
                 <Route path="history"      element={<History />} />
                 <Route path="settings"     element={<Settings />} />
+                <Route path="profile"      element={<Settings />} />
+                <Route path="notifications" element={<Notifications />} />
               </Route>
             </Route>
 

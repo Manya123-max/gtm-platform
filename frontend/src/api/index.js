@@ -1,6 +1,14 @@
 import axios from 'axios'
 
 export function resolveApiBaseUrl(envUrl, isProd) {
+  // If running in browser on localhost or local network, always use local proxy /api/v1
+  if (typeof window !== 'undefined' && window.location) {
+    const host = window.location.hostname
+    if (host === 'localhost' || host === '127.0.0.1' || host === '0.0.0.0' || host.startsWith('192.168.') || host.endsWith('.local')) {
+      return '/api/v1'
+    }
+  }
+
   const trimmed = (envUrl || '').trim()
   const base = trimmed || (isProd ? 'https://gtm-platform-3tp6.onrender.com' : '')
   const clean = base.replace(/\/+$/, '')
@@ -69,6 +77,7 @@ export const fetchContact = id => unwrap(api.get(`/contacts/${id}`))
 export const fetchThread = id => unwrap(api.get(`/contacts/${id}/thread`))
 export const fetchSignals = id => unwrap(api.get(`/contacts/${id}/signals`))
 export const summarizeSignals = id => unwrap(api.post(`/contacts/${id}/summarize-signals`))
+export const syncContactToSalesforce = id => unwrap(api.post(`/contacts/${id}/sync-salesforce`))
 export const fetchDeals = (params = {}) => unwrap(api.get('/deals', { params }))
 export const fetchDeal = id => unwrap(api.get(`/deals/${id}`))
 export const fetchPipelineSummary = (user_input_id) => unwrap(api.get('/deals/pipeline-summary', { params: user_input_id ? { user_input_id } : {} }))
@@ -86,6 +95,7 @@ export const rejectOutreachDraft = id => unwrap(api.post(`/drafts/${id}/reject`)
 export const editOutreachDraft = (id, subject, body) => unwrap(api.post(`/drafts/${id}/edit`, { subject, body }))
 export const previewOutreachDraft = id => unwrap(api.get(`/drafts/${id}/preview`))
 export const fetchOutreachAnalytics = () => unwrap(api.get('/dashboard/outreach-analytics'))
+export const submitInput = (payload) => unwrap(api.post('/submit-input', payload))
 export const fetchInputHistory = () => unwrap(api.get('/input-history'))
 export const deleteInputHistory = (id) => unwrap(api.delete(`/input-history/${id}`))
 export const deleteAllInputHistory = () => unwrap(api.delete('/input-history'))
@@ -150,10 +160,14 @@ export const fetchAgentSchedules = () => unwrap(api.get('/agents/schedule'))
 export const updateAgentSchedule = (agent, enabled, cron = null) =>
   unwrap(api.post('/agents/schedule', { agent, enabled, cron }))
 
-export const fetchNotifications = (user_input_id) =>
-  unwrap(api.get('/notifications', { params: user_input_id ? { user_input_id } : {} }))
+export const fetchNotifications = (params = {}) => {
+  const queryParams = typeof params === 'object' ? params : (params ? { user_input_id: params } : {})
+  return unwrap(api.get('/notifications', { params: queryParams }))
+}
 export const markNotificationRead = id =>
   unwrap(api.post(`/notifications/${id}/read`))
+export const markAllNotificationsRead = () =>
+  unwrap(api.post('/notifications/read-all'))
 // User & Integrations API
 export const fetchIntegrations = () => unwrap(api.get('/integrations'))
 export const getGoogleConnectUrl = () => unwrap(api.get('/integrations/google/connect'))

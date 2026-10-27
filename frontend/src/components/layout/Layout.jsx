@@ -5,7 +5,7 @@ import {
   LayoutDashboard, Users, Briefcase, Send, FileText,
   TrendingUp, Bot, ChevronRight, Bell, Zap, Clipboard, History,
   Settings as SettingsIcon,
-  Mail, Check, X, LogOut
+  Mail, Check, X, LogOut, CheckCircle2, AlertTriangle, User
 } from 'lucide-react'
 import clsx from 'clsx'
 import { useSession } from '../../context/SessionContext'
@@ -16,46 +16,115 @@ const NAV = [
   { to: '/dashboard', icon: LayoutDashboard, label: 'Dashboard' },
   { to: '/input',     icon: Clipboard,       label: 'Input'     },
   { to: '/agents',    icon: Bot,             label: 'Agents'    },
-  { to: '/contacts',  icon: Users,           label: 'Contacts'  },
+  { to: '/contacts',  icon: Users,           label: 'Prospect'  },
   { to: '/deals',     icon: Briefcase,       label: 'Deals'     },
   { to: '/outreach',  icon: Send,            label: 'Outreach'  },
   { to: '/content',   icon: FileText,        label: 'Content'   },
   { to: '/revenue',   icon: TrendingUp,      label: 'Revenue'   },
   { to: '/history',   icon: History,         label: 'History'   },
-  { to: '/settings',  icon: SettingsIcon,    label: 'Settings'  },
 ]
 
-const AGENT_STATUS = [
-  { id: 'A1', label: 'Prospect', color: '#0A67FF' },
-  { id: 'A2', label: 'Signal',   color: '#0A67FF' },
-  { id: 'A3', label: 'Outreach', color: '#00C8FF' },
-  { id: 'A4', label: 'Inbound',  color: '#10D9A0' },
-  { id: 'A5', label: 'Deal',     color: '#A78BFA' },
-  { id: 'A6', label: 'Content',  color: '#A78BFA' },
-  { id: 'A7', label: 'Revenue',  color: '#F59E0B' },
-]
-
-function ForceLogo() {
+function G2MLogo() {
   return (
-    <svg width="30" height="30" viewBox="0 0 30 30" fill="none" xmlns="http://www.w3.org/2000/svg">
-      <rect width="30" height="30" rx="8" fill="url(#grad4ce)" />
-      <path
-        d="M9 19c0-2.2 1.8-4 4-4h.2A3.5 3.5 0 0 1 20 16.5c0 .17-.01.33-.03.5H20a1.5 1.5 0 0 1 0 3H9.5A.5.5 0 0 1 9 19.5V19z"
-        fill="white" fillOpacity="0.18"
-      />
-      <path d="M16.5 7.5L12 16h5L14 22.5l7.5-10.5H17L16.5 7.5z" fill="white" fillOpacity="0.95" />
-      <defs>
-        <linearGradient id="grad4ce" x1="0" y1="0" x2="30" y2="30" gradientUnits="userSpaceOnUse">
-          <stop offset="0%" stopColor="#0A67FF" />
-          <stop offset="100%" stopColor="#00C8FF" />
-        </linearGradient>
-      </defs>
-    </svg>
+    <img
+      src="/g2m-logo.png"
+      alt="G2M Logo"
+      className="h-8 w-auto object-contain select-none filter drop-shadow-sm"
+    />
   )
 }
 
+// Helper to format friendly relative time
+function formatTimeAgo(dateString) {
+  if (!dateString) return ''
+  const date = new Date(dateString)
+  const now = new Date()
+  const diffMs = now - date
+  const diffMins = Math.floor(diffMs / (1000 * 60))
+  const diffHours = Math.floor(diffMs / (1000 * 60 * 60))
+
+  if (diffMins < 1) return 'Just now'
+  if (diffMins < 60) return `${diffMins} min ago`
+  if (diffHours < 24 && date.getDate() === now.getDate()) return `${diffHours} hr ago`
+  
+  const yesterday = new Date(now)
+  yesterday.setDate(now.getDate() - 1)
+  const timeStr = date.toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' })
+  if (date.getDate() === yesterday.getDate() && date.getMonth() === yesterday.getMonth() && date.getFullYear() === yesterday.getFullYear()) {
+    return `Yesterday, ${timeStr}`
+  }
+
+  const monthNames = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec']
+  return `${monthNames[date.getMonth()]} ${date.getDate()}, ${timeStr}`
+}
+
+// Synthesize Figma display elements for notification dropdown
+function formatNotificationDisplay(item) {
+  const type = (item.type || '').toLowerCase()
+  const msg = item.message || ''
+
+  if (type.includes('signal')) {
+    let title = 'New buying signal'
+    let desc = msg || 'A funding round signal was detected.'
+    if (msg.toLowerCase().includes('funding')) {
+      desc = 'A funding round signal was detected.'
+    } else if (msg.toLowerCase().includes('expansion') || msg.toLowerCase().includes('news')) {
+      title = 'Company expansion activity was detected'
+      desc = msg
+    }
+    return {
+      title,
+      description: desc,
+      actionUrl: item.action_url || (item.contact_id ? `/contacts/${item.contact_id}` : '/contacts'),
+      icon: Send,
+    }
+  }
+
+  if (type.includes('reply')) {
+    let title = 'Reply received'
+    let desc = msg || 'A prospect replied to your outreach.'
+    if (msg.toLowerCase().includes('follow-up')) {
+      desc = 'A follow-up response is ready to review.'
+    }
+    return {
+      title,
+      description: desc,
+      actionUrl: item.action_url || '/outreach',
+      icon: Mail,
+    }
+  }
+
+  if (type.includes('deal') || msg.toLowerCase().includes('deal')) {
+    let title = 'Deal needs attention'
+    let desc = msg || 'Review the latest CRM risk action.'
+    return {
+      title,
+      description: desc,
+      actionUrl: item.action_url || '/deals',
+      icon: AlertTriangle,
+    }
+  }
+
+  if (type.includes('draft') || msg.toLowerCase().includes('draft')) {
+    let title = 'Drafts ready for review'
+    let desc = msg || 'Your outreach drafts are ready to approve.'
+    return {
+      title,
+      description: desc,
+      actionUrl: item.action_url || '/outreach',
+      icon: FileText,
+    }
+  }
+
+  return {
+    title: 'Agent run completed',
+    description: msg || 'Your latest prospect search is complete.',
+    actionUrl: item.action_url || '/history',
+    icon: CheckCircle2,
+  }
+}
+
 export default function Layout() {
-  // useLocation must be called at top level — not inside JSX
   const location = useLocation()
   const navigate = useNavigate()
   const { user, logout } = useAuth()
@@ -70,16 +139,18 @@ export default function Layout() {
   const queryClient = useQueryClient()
   const [isOpen, setIsOpen] = useState(false)
   const dropdownRef = useRef(null)
+  const [userMenuOpen, setUserMenuOpen] = useState(false)
+  const userMenuRef = useRef(null)
 
   const { data: notifData, refetch } = useQuery({
     queryKey: ['notifications', activeSessionId],
-    queryFn: () => fetchNotifications(activeSessionId),
+    queryFn: () => fetchNotifications({ user_input_id: activeSessionId, limit: 10 }),
     refetchInterval: 30_000,
     refetchOnWindowFocus: true,
     staleTime: 15_000,
   })
 
-  const unreadCount = notifData?.unread_count || 0
+  const unreadCount = notifData?.unread_count ?? 0
   const notifications = notifData?.notifications || []
 
   const markReadMutation = useMutation({
@@ -94,12 +165,15 @@ export default function Layout() {
       if (dropdownRef.current && !dropdownRef.current.contains(e.target)) {
         setIsOpen(false)
       }
+      if (userMenuRef.current && !userMenuRef.current.contains(e.target)) {
+        setUserMenuOpen(false)
+      }
     }
-    if (isOpen) {
+    if (isOpen || userMenuOpen) {
       document.addEventListener('mousedown', handleClickOutside)
     }
     return () => document.removeEventListener('mousedown', handleClickOutside)
-  }, [isOpen])
+  }, [isOpen, userMenuOpen])
 
   const handleBellClick = () => {
     const nextOpen = !isOpen
@@ -120,303 +194,230 @@ export default function Layout() {
   }
 
   return (
-    <div
-      className="flex h-screen overflow-hidden"
-      style={{ background: 'var(--c-bg)' }}
-    >
+    <div className="flex h-screen overflow-hidden bg-[#F8F9FD]">
       {/* ── Sidebar ──────────────────────────────────────────────── */}
-      <aside
-        className="w-56 flex-shrink-0 flex flex-col"
-        style={{
-          background: 'var(--c-surface)',
-          borderRight: '1px solid var(--c-border)',
-        }}
-      >
-        {/* Logo */}
-        <div
-          className="px-5 pt-5 pb-4"
-          style={{ borderBottom: '1px solid var(--c-border)' }}
-        >
-          <div className="flex items-center gap-2.5">
-            <ForceLogo />
-            <div>
-              <div
-                className="text-sm font-bold leading-none tracking-tight"
-                style={{
-                  background: 'linear-gradient(90deg, #0A67FF, #00C8FF)',
-                  WebkitBackgroundClip: 'text',
-                  WebkitTextFillColor: 'transparent',
-                }}
-              >
-                4CECloud Labs
-              </div>
-              <div
-                className="text-[10px] mt-0.5"
-                style={{ color: 'var(--c-text3)' }}
-              >
-                GTM · 7-Agent Engine
-              </div>
-            </div>
+      <aside className="w-60 flex-shrink-0 flex flex-col justify-between bg-white border-r border-gray-100 z-20">
+        <div>
+          {/* Brand Logo */}
+          <div className="px-6 pt-6 pb-6">
+            <G2MLogo />
           </div>
+
+          {/* Navigation Links */}
+          <nav className="px-4 space-y-1.5">
+            {NAV.map(({ to, icon: Icon, label }) => (
+              <NavLink
+                key={to}
+                to={to}
+                className={({ isActive }) =>
+                  clsx(
+                    'flex items-center gap-3 px-3.5 py-2.5 rounded-2xl text-xs font-semibold transition-all',
+                    isActive
+                      ? 'bg-[#ECE8FE] text-[#5B4EFF] shadow-sm'
+                      : 'text-gray-500 hover:text-gray-900 hover:bg-gray-50/80'
+                  )
+                }
+              >
+                <Icon size={17} strokeWidth={2.2} />
+                <span>{label}</span>
+              </NavLink>
+            ))}
+          </nav>
         </div>
 
-        {/* Nav */}
-        <nav className="flex-1 px-2 py-3 space-y-0.5 overflow-y-auto">
-          {NAV.map(({ to, icon: Icon, label }) => (
-            <NavLink
-              key={to}
-              to={to}
-              className="flex items-center gap-3 px-3 py-2 rounded-lg text-sm transition-all"
-              style={({ isActive }) =>
-                isActive
-                  ? {
-                      background: 'rgba(10,103,255,0.18)',
-                      color: '#5DA8FF',
-                      fontWeight: 500,
-                      boxShadow: 'inset 2px 0 0 #0A67FF',
-                    }
-                  : { color: 'var(--c-text3)' }
-              }
-              onMouseEnter={e => {
-                if (!e.currentTarget.style.boxShadow) {
-                  e.currentTarget.style.background = 'var(--c-surface2)'
-                }
-              }}
-              onMouseLeave={e => {
-                if (!e.currentTarget.style.boxShadow) {
-                  e.currentTarget.style.background = ''
-                }
-              }}
-            >
-              <Icon size={15} />
-              {label}
-            </NavLink>
-          ))}
-        </nav>
-
-        {/* Agent status */}
-        <div
-          className="px-3 py-3"
-          style={{ borderTop: '1px solid var(--c-border)' }}
-        >
-          <div
-            className="text-[10px] uppercase tracking-wider mb-2 px-1 font-medium"
-            style={{ color: 'var(--c-text3)' }}
+        {/* Bottom Sidebar: Agent Status pill button, user role & copyright */}
+        <div className="p-4 border-t border-gray-100 space-y-3">
+          <button
+            type="button"
+            onClick={() => navigate('/agents')}
+            className="w-full py-2.5 px-4 bg-[#5B4EFF] hover:bg-[#4C3FF0] active:scale-[0.98] text-white rounded-2xl text-xs font-semibold flex items-center justify-between shadow-[0_4px_14px_rgba(91,78,255,0.25)] transition-all cursor-pointer"
           >
-            Agent Status
-          </div>
-          <div className="space-y-1.5">
-            {AGENT_STATUS.map(a => (
-              <div key={a.id} className="flex items-center gap-2 px-1">
-                <span
-                  className="w-1.5 h-1.5 rounded-full flex-shrink-0"
-                  style={{ background: a.color }}
-                />
-                <span
-                  className="text-xs font-semibold w-5"
-                  style={{ color: 'var(--c-text2)' }}
-                >
-                  {a.id}
-                </span>
-                <span
-                  className="text-xs"
-                  style={{ color: 'var(--c-text3)' }}
-                >
-                  {a.label}
-                </span>
-              </div>
-            ))}
+            <span>Agent Status</span>
+            <ChevronRight size={15} />
+          </button>
+
+          <div className="px-1 text-left">
+            <div className="text-xs font-bold text-gray-800">
+              {user?.role || 'Admin'}
+            </div>
+            <div className="text-[11px] text-gray-400 mt-0.5">
+              © 2026 All Rights Reserved
+            </div>
           </div>
         </div>
       </aside>
 
-      {/* ── Main ─────────────────────────────────────────────────── */}
+      {/* ── Main Area ─────────────────────────────────────────────────── */}
       <div className="flex-1 flex flex-col min-w-0">
 
-        {/* Topbar */}
-        <header
-          className="h-12 flex items-center justify-between px-6 flex-shrink-0"
-          style={{
-            background: 'var(--c-surface)',
-            borderBottom: '1px solid var(--c-border)',
-          }}
-        >
-          <div
-            className="flex items-center gap-1.5 text-xs"
-            style={{ color: 'var(--c-text3)' }}
-          >
-            <span style={{ color: 'var(--c-text2)' }}>4CECloud GTM</span>
-            <ChevronRight size={12} />
-            <span
-              className="capitalize"
-              style={{ color: 'var(--c-text)' }}
-            >
-              {currentPage}
-            </span>
+        {/* Topbar: Search Bar on Left, Notifications & Profile Badge on Right */}
+        <header className="h-16 flex items-center justify-between px-8 bg-white border-b border-gray-100 flex-shrink-0 z-10">
+          
+          {/* Search Bar matching Figma */}
+          <div className="relative w-80 sm:w-96">
+            <input
+              type="text"
+              placeholder="Search here"
+              className="w-full bg-[#FBFBFE] hover:bg-white focus:bg-white border border-gray-200/80 rounded-full py-2 pl-4 pr-10 text-xs text-gray-800 placeholder:text-gray-400 focus:outline-none focus:ring-2 focus:ring-[#5B4EFF]/20 focus:border-[#5B4EFF] transition-all"
+            />
+            <div className="absolute right-3.5 top-1/2 -translate-y-1/2 pointer-events-none text-gray-400">
+              <svg width="15" height="15" viewBox="0 0 20 20" fill="none" xmlns="http://www.w3.org/2000/svg">
+                <path d="M19 19L14.65 14.65M17 9C17 13.4183 13.4183 17 9 17C4.58172 17 1 13.4183 1 9C1 4.58172 4.58172 1 9 1C13.4183 1 17 4.58172 17 9Z" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"/>
+              </svg>
+            </div>
           </div>
 
-          <div className="flex items-center gap-3">
-            <div
-              className="flex items-center gap-1.5 text-xs"
-              style={{ color: '#10D9A0' }}
-            >
-              <Zap size={11} />
-              <span>All systems operational</span>
-            </div>
-            {user && (
-              <div
-                className="flex items-center gap-2 text-xs"
-                style={{ color: 'var(--c-text2)' }}
-                title={user.email}
-              >
-                <span
-                  className="w-6 h-6 rounded-full flex items-center justify-center text-[10px] font-bold text-white"
-                  style={{ background: 'linear-gradient(135deg, #0A67FF, #00C8FF)' }}
-                >
-                  {user.name?.charAt(0)?.toUpperCase() || '?'}
-                </span>
-                <span className="hidden md:inline">{user.name}</span>
-              </div>
-            )}
-            <button
-              onClick={handleLogout}
-              title="Sign out"
-              className="w-7 h-7 rounded-lg flex items-center justify-center transition-colors"
-              style={{
-                background: 'var(--c-surface2)',
-                color: 'var(--c-text3)',
-                border: '1px solid var(--c-border)',
-              }}
-              onMouseEnter={e => e.currentTarget.style.color = '#EF4444'}
-              onMouseLeave={e => e.currentTarget.style.color = 'var(--c-text3)'}
-            >
-              <LogOut size={13} />
-            </button>
+          {/* Right Topbar Actions */}
+          <div className="flex items-center gap-4">
+            
+            {/* Notification Bell with Red Badge matching Figma */}
             <div className="relative" ref={dropdownRef}>
               <button
+                type="button"
                 onClick={handleBellClick}
-                className="w-7 h-7 rounded-lg flex items-center justify-center transition-colors relative"
-                style={{
-                  background: isOpen ? 'var(--c-border)' : 'var(--c-surface2)',
-                  color: unreadCount > 0 ? '#10D9A0' : 'var(--c-text3)',
-                  border: '1px solid var(--c-border)',
-                }}
-                onMouseEnter={e => { if (!isOpen) e.currentTarget.style.color = 'var(--c-text)' }}
-                onMouseLeave={e => { if (!isOpen) e.currentTarget.style.color = unreadCount > 0 ? '#10D9A0' : 'var(--c-text3)' }}
+                className="w-9 h-9 rounded-full bg-white border border-gray-200/80 flex items-center justify-center text-gray-500 hover:text-gray-900 transition-colors relative shadow-sm cursor-pointer"
                 title="Notifications"
               >
-                <Bell size={13} />
+                <Bell size={16} />
                 {unreadCount > 0 && (
-                  <span
-                    className="absolute -top-1 -right-1 flex h-4 min-w-[16px] items-center justify-center rounded-full px-1 text-[9px] font-bold text-white shadow-sm pointer-events-none"
-                    style={{ background: '#0A67FF' }}
-                  >
-                    {unreadCount > 99 ? '99+' : unreadCount}
+                  <span className="absolute -top-1 -right-1 flex h-4 min-w-[16px] items-center justify-center rounded-full px-1 text-[9px] font-bold text-white bg-[#DC2626] shadow-sm">
+                    {unreadCount}
                   </span>
                 )}
               </button>
 
               {isOpen && (
                 <div
-                  className="absolute right-0 mt-2 w-80 rounded-xl shadow-2xl z-50 overflow-hidden flex flex-col"
-                  style={{
-                    background: 'var(--c-surface)',
-                    border: '1px solid var(--c-border)',
-                    boxShadow: '0 10px 30px rgba(0, 0, 0, 0.4)',
-                  }}
+                  className="absolute right-0 mt-3 w-96 rounded-2xl shadow-2xl z-50 overflow-hidden flex flex-col bg-white border border-gray-100 p-5"
+                  style={{ minWidth: '360px' }}
                 >
-                  <div
-                    className="flex items-center justify-between px-3.5 py-2.5"
-                    style={{ borderBottom: '1px solid var(--c-border)' }}
-                  >
-                    <div className="flex items-center gap-2">
-                      <span className="text-xs font-semibold" style={{ color: 'var(--c-text)' }}>Notifications</span>
-                      {unreadCount > 0 && (
-                        <span
-                          className="text-[10px] px-1.5 py-0.5 rounded-full font-medium"
-                          style={{ background: 'rgba(10, 103, 255, 0.2)', color: '#00C8FF' }}
-                        >
-                          {unreadCount} new
-                        </span>
-                      )}
+                  {/* Popover Header */}
+                  <div className="flex items-start justify-between pb-3">
+                    <div>
+                      <h3 className="text-sm font-bold text-gray-900 tracking-tight">Notifications</h3>
+                      <p className="text-xs text-gray-400 font-medium mt-0.5">
+                        {unreadCount} unread
+                      </p>
                     </div>
                     <button
+                      type="button"
                       onClick={() => setIsOpen(false)}
-                      className="text-xs text-gray-400 hover:text-white p-0.5 transition-colors"
+                      className="text-gray-400 hover:text-gray-600 p-1 rounded-full transition-colors cursor-pointer"
                     >
-                      <X size={12} />
+                      <X size={15} />
                     </button>
                   </div>
 
-                  <div className="max-h-80 overflow-y-auto divide-y" style={{ borderColor: 'var(--c-border)' }}>
+                  {/* Notifications List (Top 4 latest matching Figma) */}
+                  <div className="space-y-1 my-1">
                     {notifications.length === 0 ? (
-                      <div className="py-8 text-center text-xs" style={{ color: 'var(--c-text3)' }}>
+                      <div className="py-8 text-center text-xs text-gray-400">
                         No notifications yet
                       </div>
                     ) : (
-                      notifications.map((n) => {
+                      notifications.slice(0, 4).map((n) => {
+                        const display = formatNotificationDisplay(n)
+                        const Icon = display.icon
                         const isUnread = !n.read_at
-                        const isReply = n.type === 'reply_received'
                         return (
                           <div
                             key={n.id}
                             onClick={() => handleNotificationClick(n)}
-                            className="p-3 text-left transition-colors cursor-pointer flex items-start gap-2.5 hover:bg-white/[0.04]"
-                            style={{
-                              background: isUnread ? 'rgba(10, 103, 255, 0.05)' : 'transparent',
-                            }}
+                            className="py-2.5 px-2 flex items-start gap-3 rounded-xl hover:bg-gray-50 transition-colors cursor-pointer group"
                           >
-                            <div
-                              className="w-6 h-6 rounded-md flex items-center justify-center flex-shrink-0 mt-0.5"
-                              style={{
-                                background: isReply ? 'rgba(16, 217, 160, 0.15)' : 'rgba(245, 158, 11, 0.15)',
-                                color: isReply ? '#10D9A0' : '#F59E0B',
-                              }}
-                            >
-                              {isReply ? <Mail size={12} /> : <Zap size={12} />}
+                            <div className="w-8 h-8 rounded-full bg-[#ECE8FE] flex items-center justify-center shrink-0 text-[#5B4EFF] mt-0.5">
+                              <Icon size={15} />
                             </div>
-
-                            <div className="flex-1 min-w-0">
-                              <div className="flex items-center justify-between gap-1 mb-0.5">
-                                <span
-                                  className="text-[10px] font-semibold uppercase tracking-wider"
-                                  style={{ color: isReply ? '#10D9A0' : '#F59E0B' }}
-                                >
-                                  {isReply ? 'Reply Received' : 'New Signal'}
-                                </span>
-                                <span className="text-[10px]" style={{ color: 'var(--c-text3)' }}>
-                                  {new Date(n.created_at).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}
-                                </span>
+                            <div className="flex-1 min-w-0 pr-1">
+                              <div className="text-xs font-bold text-gray-900 group-hover:text-[#5B4EFF] transition-colors truncate">
+                                {display.title}
                               </div>
-                              <div
-                                className="text-xs leading-snug line-clamp-2"
-                                style={{
-                                  color: isUnread ? 'var(--c-text)' : 'var(--c-text2)',
-                                  fontWeight: isUnread ? 500 : 400
-                                }}
-                              >
-                                {n.message}
-                              </div>
+                              <p className="text-[11px] text-gray-500 line-clamp-1 mt-0.5 leading-snug">
+                                {display.description}
+                              </p>
+                              <span className="text-[10px] text-gray-400 mt-0.5 block font-medium">
+                                {formatTimeAgo(n.created_at)}
+                              </span>
                             </div>
-
                             {isUnread && (
-                              <button
-                                onClick={(e) => {
-                                  e.stopPropagation()
-                                  markReadMutation.mutate(n.id)
-                                }}
-                                title="Mark as read"
-                                className="flex-shrink-0 p-1 rounded hover:bg-white/10 transition-colors"
-                                style={{ color: 'var(--c-text3)' }}
-                              >
-                                <Check size={11} />
-                              </button>
+                              <div className="w-2 h-2 rounded-full bg-[#2563EB] shrink-0 self-center" />
                             )}
                           </div>
                         )
                       })
                     )}
                   </div>
+
+                  {/* View All Notifications Button */}
+                  <div className="pt-3 mt-1">
+                    <button
+                      type="button"
+                      onClick={() => {
+                        setIsOpen(false)
+                        navigate('/notifications')
+                      }}
+                      className="w-full py-2.5 px-4 bg-[#ECE8FE] hover:bg-[#E2DCFD] active:scale-[0.99] text-[#5B4EFF] rounded-2xl text-xs font-bold flex items-center justify-center gap-1.5 transition-all cursor-pointer"
+                    >
+                      <span>View all notifications</span>
+                      <span className="text-sm">→</span>
+                    </button>
+                  </div>
+                </div>
+              )}
+            </div>
+
+            {/* User Profile Pill & Dropdown matching Figma */}
+            <div className="relative pl-2" ref={userMenuRef}>
+              <div
+                onClick={() => setUserMenuOpen(!userMenuOpen)}
+                className="flex items-center gap-2.5 bg-white border border-gray-200/80 rounded-full py-1 pl-1 pr-3.5 shadow-2xs cursor-pointer hover:border-gray-300 transition-all select-none"
+                title={user?.email || 'Authenticated User'}
+              >
+                <div className="w-7 h-7 rounded-full bg-gradient-to-tr from-[#5B4EFF] to-[#A78BFA] flex items-center justify-center text-white text-xs font-bold shrink-0 shadow-2xs overflow-hidden">
+                  <img
+                    src={user?.avatar_url || '/avatar-shree.jpg'}
+                    alt="User Avatar"
+                    className="w-full h-full object-cover"
+                    onError={(e) => {
+                      e.currentTarget.style.display = 'none'
+                    }}
+                  />
+                </div>
+                <span className="text-xs font-bold text-gray-800 tracking-tight">
+                  {user?.name || 'P P Shree Lakshmi'}
+                </span>
+              </div>
+
+              {/* Dropdown Menu matching Figma screenshot */}
+              {userMenuOpen && (
+                <div className="absolute right-0 mt-2 w-52 bg-white border border-gray-200/90 rounded-2xl shadow-xl py-2 z-50 animate-in fade-in zoom-in-95 duration-100">
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setUserMenuOpen(false)
+                      navigate('/settings')
+                    }}
+                    className={`w-full flex items-center gap-3 px-4 py-2.5 text-xs font-bold transition-colors cursor-pointer ${
+                      location.pathname === '/settings' || location.pathname === '/profile'
+                        ? 'bg-[#ECE8FE] text-[#5B4EFF]'
+                        : 'text-gray-800 hover:bg-gray-50'
+                    }`}
+                  >
+                    <User size={15} className="shrink-0" />
+                    <span>View profile</span>
+                  </button>
+
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setUserMenuOpen(false)
+                      handleLogout()
+                    }}
+                    className="w-full flex items-center gap-3 px-4 py-2.5 text-xs font-medium text-gray-700 hover:bg-gray-50 hover:text-red-600 transition-colors cursor-pointer"
+                  >
+                    <LogOut size={15} className="shrink-0 text-gray-500" />
+                    <span>Log out</span>
+                  </button>
                 </div>
               )}
             </div>
@@ -424,13 +425,10 @@ export default function Layout() {
         </header>
 
         {/* Page content */}
-        <main
-          className="flex-1 overflow-y-auto p-6"
-          style={{ background: 'var(--c-bg)' }}
-        >
+        <main className="flex-1 overflow-y-auto p-6 sm:p-8 bg-[#F8F9FD]">
           <Outlet />
         </main>
       </div>
     </div>
   )
-}
+}

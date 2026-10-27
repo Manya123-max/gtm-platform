@@ -93,6 +93,13 @@ class InboundAgent:
         subject = webhook_payload.get("subject", "")
         message_id = webhook_payload.get("message_id") or webhook_payload.get("email_id") or webhook_payload.get("id")
 
+        # Guard: Ignore bot, newsletter, and automated transactional senders
+        BOT_PREFIXES = ("developer@", "updates@", "info@", "support@", "billing@", "notifications@", "mailer-daemon@", "jira@", "no-reply@", "noreply@", "news@", "marketing@", "forward@")
+        clean_email = (email or "").strip().lower()
+        if any(clean_email.startswith(p) for p in BOT_PREFIXES) or clean_email.endswith("@example.com"):
+            logger.info("A4: Ignoring automated/service email sender", email=email)
+            return {"status": "ignored_service_sender", "email": email}
+
         logger.info("A4: Received inbound reply", email=email, subject=subject, reply_text=reply_text[:100], user_id=user_id)
 
         # Find contact scoped to user if user_id is specified

@@ -91,15 +91,16 @@ def run_agent_node(
                 current_agent_id,
             )
 
+            from app.models.models import WorkflowRun
+            workflow_record = await db.get(WorkflowRun, current_workflow_id)
+            auth_user_id = workflow_record.user_id if workflow_record else None
+
             try:
                 raw_result: Any
 
                 if current_agent_id == "A1":
                     from app.services.icp_normalizer import normalize_icp_input
-                    from app.models.models import UserInput, WorkflowRun
-
-                    workflow_record = await db.get(WorkflowRun, current_workflow_id)
-                    auth_user_id = workflow_record.user_id if workflow_record else None
+                    from app.models.models import UserInput
 
                     cfg_value = payload_data.get("icp_config")
 
@@ -195,7 +196,7 @@ def run_agent_node(
                     )
 
                 elif current_agent_id == "A7":
-                    raw_result = await RevenueAgent(db).run()
+                    raw_result = await RevenueAgent(db).run(user_id=auth_user_id)
 
                 else:
                     raise ValueError(

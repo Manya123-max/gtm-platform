@@ -23,6 +23,9 @@ DATABASE_URL = os.environ.get(
 
 
 async def seed():
+    if os.environ.get("APP_ENV") == "production" or os.environ.get("ENVIRONMENT") == "production":
+        raise RuntimeError("CRITICAL: Cannot seed synthetic business data in a production environment!")
+
     from sqlalchemy.ext.asyncio import create_async_engine, async_sessionmaker, AsyncSession
     from sqlalchemy import text
 

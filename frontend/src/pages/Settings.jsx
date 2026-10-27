@@ -1,9 +1,10 @@
 import { useState, useEffect, useMemo } from 'react'
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
 import {
-  Mail, Calendar, ExternalLink, Shield, Server,
-  CheckCircle2, AlertTriangle, X, User, Users,
-  Edit3, UserPlus, Cloud, Check, ArrowRight
+  Mail, Calendar, CheckCircle, XCircle, AlertCircle,
+  ExternalLink, Shield, Key, RefreshCw, Save, User, Building,
+  Check, Lock, Info, Sparkles, Edit3, UserPlus, Users,
+  ToggleLeft, ToggleRight, Trash2, ArrowRight
 } from 'lucide-react'
 import { useAuth } from '../context/AuthContext'
 import {

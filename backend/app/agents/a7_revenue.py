@@ -25,7 +25,7 @@ from sqlalchemy.orm import selectinload
 
 from app.core.config import settings
 from app.models.models import (
-    Deal, FunnelEvent, RevenueForecast, DealStageHistory, Contact, ConversationThread
+    Deal, FunnelEvent, RevenueForecast, DealStageHistory, Contact, ConversationThread, User
 )
 from app.services.slack_service import SlackService
 from app.services.resend_service import ResendService
@@ -76,44 +76,45 @@ class RevenueAgent:
         self.resend = ResendService()
         self.llm = LLMService()
 
-    async def _resolve_owner_user_id(self) -> Optional[str]:
+    async def run(
+        self, user_id: Optional[str] = None, company_wide: bool = False
+    ) -> Dict[str, Any]:
         """
-        Stamp the forecast with the owner of the most recently submitted
-        intake session (the platform's 'active user' concept). Legacy rows
-        without a user keep NULL.
+        A7 main entry point.
+        Strictly requires either an authenticated rep user_id or explicit company_wide=True authorization.
         """
-        from sqlalchemy import select, desc
-        from app.models.models import UserInput
-        result = await self.db.execute(
-            select(UserInput.user_id)
-            .where(UserInput.user_id.isnot(None))
-            .order_by(desc(UserInput.id))
-            .limit(1)
-        )
-        return result.scalar_one_or_none()
+        if not user_id and not company_wide:
+            raise ValueError(
+                "User context required for revenue forecasting. Pass user_id or specify company_wide=True."
+            )
 
-    async def run(self) -> Dict[str, Any]:
-        logger.info("A7 starting predictive revenue forecast")
+        logger.info(
+            "A7 starting predictive revenue forecast",
+            user_id=user_id,
+            company_wide=company_wide,
+        )
 
         # Step 1: Pull live deals and calculate stage velocities
-        deals = await self._get_active_deals()
+        deals = await self._get_active_deals(user_id=user_id, company_wide=company_wide)
         velocity = await self._calculate_stage_velocity()
-        conversion_rates = await self._calculate_conversion_rates()
+        conversion_rates, has_real_stage_history = await self._calculate_conversion_rates()
         baselines = await self._get_historical_baselines()
 
         # Step 2: Run deal-level probability & horizon calculations
         forecast_metrics = self._calculate_deal_level_forecast(deals, velocity)
 
         # Step 3: Factor in top-of-funnel pipeline inflow from leading funnel events
-        inflow = await self._calculate_top_of_funnel_inflow(deals)
+        inflow = await self._calculate_top_of_funnel_inflow(deals, user_id=user_id)
         forecast_30d = forecast_metrics["day_30"] + inflow["inflow_30d"]
         forecast_60d = forecast_metrics["day_60"] + inflow["inflow_60d"]
         forecast_90d = forecast_metrics["day_90"] + inflow["inflow_90d"]
 
         # Step 4: Identify bottleneck stage & tactical growth levers
-        constraint = await self._identify_constraint_and_levers(conversion_rates, baselines, deals)
+        constraint = await self._identify_constraint_and_levers(
+            conversion_rates, baselines, deals, has_real_stage_history=has_real_stage_history
+        )
 
-        # Step 5: Persist snapshot in revenue_forecasts table
+        # Step 5: Persist snapshot in revenue_forecasts table with authenticated rep ownership
         forecast_record = RevenueForecast(
             forecast_30d=round(forecast_30d, 2),
             forecast_60d=round(forecast_60d, 2),
@@ -124,7 +125,7 @@ class RevenueAgent:
             recommended_lever=constraint.get("lever"),
             stage_conversion_rates=conversion_rates,
             stage_velocity_days=velocity,
-            user_id=await self._resolve_owner_user_id(),
+            user_id=user_id if not company_wide else None,
             calculated_at=datetime.utcnow(),
         )
         self.db.add(forecast_record)
@@ -137,7 +138,10 @@ class RevenueAgent:
             "forecast_90d": round(forecast_90d, 2),
             "pipeline_value": round(forecast_metrics["total_pipeline_value"], 2),
             "deals_evaluated": len(deals),
+            "unpriced_deals_count": forecast_metrics.get("unpriced_deals_count", 0),
             "bottleneck_stage": constraint.get("stage"),
+            "user_id": user_id,
+            "company_wide": company_wide,
         })
 
         return {
@@ -147,28 +151,45 @@ class RevenueAgent:
             "forecast_90d": round(forecast_90d, 2),
             "pipeline_value": round(forecast_metrics["total_pipeline_value"], 2),
             "deals_evaluated": len(deals),
+            "unpriced_deals_count": forecast_metrics.get("unpriced_deals_count", 0),
+            "priced_deals_count": forecast_metrics.get("priced_deals_count", 0),
             "bottleneck_stage": constraint.get("stage"),
             "lever": constraint.get("lever"),
             "conversion_rates": conversion_rates,
             "stage_velocity": velocity,
             "top_deals": forecast_metrics.get("deal_breakdown", [])[:5],
+            "user_id": user_id,
+            "company_wide": company_wide,
             "reason": (
-                "No active pipeline; zero-value forecast saved"
+                "Empty pipeline: zero-value forecast saved"
                 if not deals else
-                f"Forecast calculated across {len(deals)} active deals"
+                f"Forecast calculated across {len(deals)} active deal(s) ({forecast_metrics.get('unpriced_deals_count', 0)} unpriced)"
             ),
         }
 
-    async def _get_active_deals(self) -> List[Deal]:
-        """Fetch all currently open deals with contact relationships."""
-        result = await self.db.execute(
+    async def _get_active_deals(
+        self, user_id: Optional[str] = None, company_wide: bool = False
+    ) -> List[Deal]:
+        """Fetch open deals scoped to the authenticated sales rep, or company-wide if authorized."""
+        stmt = (
             select(Deal)
             .options(selectinload(Deal.contact))
             .where(Deal.outcome.is_(None))
-            .order_by(desc(Deal.amount))
         )
-        deals = result.scalars().all()
-        return list(deals)
+        if user_id:
+            user = await self.db.get(User, user_id)
+            own_contacts_q = select(Contact.id).where(Contact.user_id == user_id)
+            conditions = [Deal.contact_id.in_(own_contacts_q)]
+            if user and user.email:
+                conditions.append(Deal.owner_email == user.email)
+            stmt = stmt.where(or_(*conditions))
+        elif not company_wide:
+            # Safety gate: if not company-wide and no user_id, return empty list
+            return []
+
+        stmt = stmt.order_by(desc(Deal.amount))
+        result = await self.db.execute(stmt)
+        return list(result.scalars().all())
 
     async def _calculate_stage_velocity(self) -> Dict[str, float]:
         """Calculate average days spent in each stage over the last 90 days."""
@@ -190,9 +211,10 @@ class RevenueAgent:
                 logger.warning("Velocity calculation fallback", stage=stage, error=str(e))
         return velocity
 
-    async def _calculate_conversion_rates(self) -> Dict[str, float]:
-        """Calculate current (90-day rolling) stage-to-stage transition rates."""
+    async def _calculate_conversion_rates(self) -> Tuple[Dict[str, float], bool]:
+        """Calculate current (90-day rolling) stage-to-stage transition rates and data adequacy flag."""
         rates = dict(DEFAULT_STAGE_CONVERSION_BASELINES)
+        total_transitions_found = 0
         for i, stage in enumerate(STAGE_ORDER[:-1]):
             next_stage = STAGE_ORDER[i + 1]
             key = f"{stage}_to_{next_stage}"
@@ -220,9 +242,11 @@ class RevenueAgent:
 
                 if entered_count >= 2:
                     rates[key] = round(progressed_count / entered_count, 3)
+                    total_transitions_found += progressed_count
             except Exception as e:
                 logger.warning("Conversion rate calculation fallback", key=key, error=str(e))
-        return rates
+        has_real_stage_history = total_transitions_found >= 2
+        return rates, has_real_stage_history
 
     async def _get_historical_baselines(self) -> Dict[str, float]:
         """Historical conversion rate baseline across 365 days of won deals."""
@@ -269,18 +293,25 @@ class RevenueAgent:
         """
         Evaluate every single deal dynamically.
         Computes calibrated win probability, time-in-stage decay, and horizon allocation.
+        Unpriced deals (null or <=0) are treated as 0 value rather than substituting synthetic $25,000.
         """
         total_pipeline_val = 0.0
         day_30_total = 0.0
         day_60_total = 0.0
         day_90_total = 0.0
         deal_breakdown: List[Dict[str, Any]] = []
+        unpriced_deals_count = 0
 
         for deal in deals:
-            # 1. Resolve Deal Amount (fallback to realistic enterprise average if unset)
-            amount = float(deal.amount or 0.0)
-            if amount <= 0.0:
-                amount = 25000.0  # standard baseline deal amount
+            # 1. Resolve Deal Amount — do NOT substitute $25,000 for missing amounts
+            raw_amount = deal.amount
+            is_unpriced = raw_amount is None or float(raw_amount) <= 0.0
+            if is_unpriced:
+                amount = 0.0
+                unpriced_deals_count += 1
+            else:
+                amount = float(raw_amount)
+
             total_pipeline_val += amount
 
             # 2. Resolve Days in Current Stage
@@ -295,7 +326,7 @@ class RevenueAgent:
             # 4. Compute Estimated Days to Close
             days_to_close = self._estimate_days_to_close(deal.stage, days_in_stage, stage_velocity)
 
-            # 5. Expected Value
+            # 5. Expected Value (0 for unpriced deals)
             expected_val = amount * win_prob
 
             # 6. Horizon Allocation Factors
@@ -315,7 +346,8 @@ class RevenueAgent:
                 "deal_name": deal.name,
                 "company": company_name,
                 "stage": deal.stage,
-                "amount": amount,
+                "amount": float(raw_amount) if not is_unpriced else None,
+                "is_unpriced": is_unpriced,
                 "win_probability": round(win_prob * 100, 1),
                 "expected_value": round(expected_val, 2),
                 "days_in_stage": days_in_stage,
@@ -333,6 +365,8 @@ class RevenueAgent:
             "day_30": day_30_total,
             "day_60": day_60_total,
             "day_90": day_90_total,
+            "unpriced_deals_count": unpriced_deals_count,
+            "priced_deals_count": len(deals) - unpriced_deals_count,
             "deal_breakdown": deal_breakdown,
         }
 
@@ -434,40 +468,49 @@ class RevenueAgent:
         else: # prospecting
             return (0.00, 0.25, 0.60)
 
-    async def _calculate_top_of_funnel_inflow(self, active_deals: List[Deal]) -> Dict[str, float]:
+    async def _calculate_top_of_funnel_inflow(
+        self, active_deals: List[Deal], user_id: Optional[str] = None
+    ) -> Dict[str, float]:
         """
         Project new pipeline value generated by leading outbound and inbound funnel events.
+        Does not fabricate inflow when active pipeline is empty or unpriced.
         """
+        if not active_deals:
+            return {"inflow_30d": 0.0, "inflow_60d": 0.0, "inflow_90d": 0.0}
+
+        priced_amounts = [float(d.amount) for d in active_deals if d.amount and float(d.amount) > 0]
+        if not priced_amounts:
+            return {"inflow_30d": 0.0, "inflow_60d": 0.0, "inflow_90d": 0.0}
+
         cutoff = datetime.utcnow() - timedelta(days=30)
         try:
-            # 1. Count high-intent meetings booked or reply received
-            result = await self.db.execute(
-                select(func.count(FunnelEvent.id)).where(
-                    and_(
-                        FunnelEvent.event_type.in_(["meeting_booked", "reply_received", "inbound_email"]),
-                        FunnelEvent.timestamp >= cutoff,
-                    )
+            # 1. Count high-intent meetings booked or reply received for rep's contacts
+            funnel_stmt = select(func.count(FunnelEvent.id)).where(
+                and_(
+                    FunnelEvent.event_type.in_(["meeting_booked", "reply_received", "inbound_email"]),
+                    FunnelEvent.timestamp >= cutoff,
                 )
             )
+            # 2. Count active qualified contacts in pipeline for rep
+            contacts_stmt = select(func.count(Contact.id)).where(
+                and_(
+                    Contact.do_not_contact.is_(False),
+                    Contact.icp_score >= settings.ICP_SCORE_THRESHOLD,
+                )
+            )
+            if user_id:
+                user_contact_subq = select(Contact.id).where(Contact.user_id == user_id)
+                funnel_stmt = funnel_stmt.where(FunnelEvent.contact_id.in_(user_contact_subq))
+                contacts_stmt = contacts_stmt.where(Contact.user_id == user_id)
+
+            result = await self.db.execute(funnel_stmt)
             intent_events = result.scalar() or 0
 
-            # 2. Count active qualified contacts in pipeline
-            contacts_q = await self.db.execute(
-                select(func.count(Contact.id)).where(
-                    and_(
-                        Contact.do_not_contact.is_(False),
-                        Contact.icp_score >= settings.ICP_SCORE_THRESHOLD,
-                    )
-                )
-            )
+            contacts_q = await self.db.execute(contacts_stmt)
             qualified_contacts = contacts_q.scalar() or 0
 
-            # Average deal size
-            avg_deal_amount = 25000.0
-            if active_deals:
-                amounts = [float(d.amount or 0) for d in active_deals if d.amount and float(d.amount) > 0]
-                if amounts:
-                    avg_deal_amount = sum(amounts) / len(amounts)
+            # Average deal size calculated exclusively from confirmed priced deals
+            avg_deal_amount = sum(priced_amounts) / len(priced_amounts)
 
             # Inflow estimates: top of funnel converts across 60d-90d
             inflow_rate = min(intent_events * 0.15 + qualified_contacts * 0.02, 3.0)
@@ -483,11 +526,30 @@ class RevenueAgent:
             return {"inflow_30d": 0.0, "inflow_60d": 0.0, "inflow_90d": 0.0}
 
     async def _identify_constraint_and_levers(
-        self, current_rates: Dict[str, float], baselines: Dict[str, float], deals: List[Deal]
+        self,
+        current_rates: Dict[str, float],
+        baselines: Dict[str, float],
+        deals: List[Deal],
+        has_real_stage_history: bool = True,
     ) -> Dict[str, Optional[str]]:
         """
         Detect funnel bottlenecks and formulate executive-level tactical levers.
+        Never manufactures bottlenecks when historical evidence is absent or deficit is zero.
         """
+        if not deals:
+            return {
+                "stage": None,
+                "description": "Empty pipeline: No active deals to evaluate for stage bottlenecks.",
+                "lever": "Initiate A1 prospect search and A3 outreach to generate pipeline opportunities.",
+            }
+
+        if not has_real_stage_history:
+            return {
+                "stage": None,
+                "description": "Insufficient historical data to determine bottlenecks.",
+                "lever": "Insufficient historical data to determine bottlenecks.",
+            }
+
         max_deficit = 0.0
         bottleneck_key = None
 
@@ -495,15 +557,15 @@ class RevenueAgent:
             current = current_rates.get(key, 0.0)
             if baseline > 0:
                 deficit = (baseline - current) / baseline
-                if deficit > max_deficit:
+                if deficit > 0.05 and deficit > max_deficit:
                     max_deficit = deficit
                     bottleneck_key = key
 
-        if not bottleneck_key:
+        if not bottleneck_key or max_deficit <= 0.0:
             return {
-                "stage": "proposal",
-                "description": "Pipeline converting healthily across stages. Focus on expanding qualified discovery volume.",
-                "lever": "Scale outreach cadence in A1/A3 to increase top-of-funnel discovery pipeline.",
+                "stage": None,
+                "description": "Pipeline converting healthily across stages. No stage bottlenecks detected.",
+                "lever": "Maintain conversion momentum and scale top-of-funnel discovery volume.",
             }
 
         stage = bottleneck_key.split("_to_")[0]
@@ -537,12 +599,13 @@ class RevenueAgent:
             "lever": lever,
         }
 
-    async def send_weekly_digest(self):
+    async def send_weekly_digest(self, user_id: Optional[str] = None):
         """Send weekly digest email to stakeholders via Resend."""
+        stmt = select(RevenueForecast)
+        if user_id:
+            stmt = stmt.where(RevenueForecast.user_id == user_id)
         result = await self.db.execute(
-            select(RevenueForecast)
-            .order_by(RevenueForecast.calculated_at.desc())
-            .limit(1)
+            stmt.order_by(RevenueForecast.calculated_at.desc()).limit(1)
         )
         latest = result.scalar_one_or_none()
         if not latest:
@@ -553,7 +616,7 @@ class RevenueAgent:
             subject=f"GTM Platform Weekly — Pipeline ${latest.current_pipeline_value:,.0f} | 30d Forecast ${latest.forecast_30d:,.0f}",
             html=html,
         )
-        logger.info("Weekly digest sent via Resend")
+        logger.info("Weekly digest sent via Resend", user_id=user_id)
 
     def _build_digest_html(self, forecast: RevenueForecast) -> str:
         return f"""

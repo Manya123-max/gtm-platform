@@ -51,10 +51,7 @@ async def _get_default_user_input_id(db: AsyncSession, current_user=None) -> Opt
     if current_user is not None:
         stmt = stmt.where(or_(UserInput.user_id == current_user.id, UserInput.user_id.is_(None)))
     res = await db.execute(stmt.limit(1))
-    val = res.scalar_one_or_none()
-    if val is None:
-        val = await db.scalar(select(UserInput.id).order_by(UserInput.id.desc()).limit(1))
-    return val
+    return res.scalar_one_or_none()
 
 async def _ensure_owned_input(db: AsyncSession, user, user_input_id: int) -> None:
     """404 if the requested session is not owned by the current user (allows legacy unowned sessions)."""
@@ -84,20 +81,22 @@ def _is_real_prospect_contact():
     )
 
 
-def _own_contact_ids_q(user):
+def _own_contact_ids_q(user, as_str: bool = False):
     """Subquery: contact ids owned by the user or legacy pre-auth contacts, excluding mock data."""
-    return select(Contact.id).where(
+    col = func.cast(Contact.id, SAString) if as_str else Contact.id
+    return select(col).where(
         or_(Contact.user_id == user.id, Contact.user_id.is_(None)),
         _is_real_prospect_contact(),
     )
 
 
-def _own_deal_ids_q(user):
+def _own_deal_ids_q(user, as_str: bool = False):
     """Subquery: deal ids linked to user's contacts or owned by user."""
     conditions = [Deal.contact_id.in_(_own_contact_ids_q(user))]
     if getattr(user, "email", None):
         conditions.append(Deal.owner_email == user.email)
-    return select(Deal.id).where(or_(*conditions))
+    col = func.cast(Deal.id, SAString) if as_str else Deal.id
+    return select(col).where(or_(*conditions))
 
 
 # ── Pydantic response models ───────────────────────────────────────────────
@@ -147,11 +146,11 @@ class TierSummaryOut(BaseModel):
 
 
 class NotificationOut(BaseModel):
-    id: str
+    id: Any
     type: str
     message: str
-    contact_id: str
-    user_input_id: int
+    contact_id: Optional[Any] = None
+    user_input_id: Optional[int] = None
     action_url: Optional[str] = None
     created_at: datetime
     read_at: Optional[datetime] = None
@@ -164,6 +163,7 @@ class NotificationOut(BaseModel):
 class NotificationsResponse(BaseModel):
     notifications: List[NotificationOut]
     unread_count: int
+    total: int = 0
 
 
 class DealContactOut(BaseModel):
@@ -315,19 +315,18 @@ async def get_dashboard_overview(
     if user_input_id is not None:
         assoc_ids_q = select(ContactUserInputAssociation.contact_id).where(ContactUserInputAssociation.user_input_id == user_input_id)
         user_filter = or_(Contact.user_input_id == user_input_id, Contact.id.in_(assoc_ids_q))
-        total_contacts = await db.scalar(
-            select(func.count(Contact.id))
-            .where(and_(*contact_filter, user_filter))
-        ) or 0
-        qualified = await db.scalar(
-            select(func.count(Contact.id))
-            .where(and_(*contact_filter, user_filter, Contact.icp_score >= settings.ICP_SCORE_THRESHOLD))
-        ) or 0
-        contact_ids_q = select(Contact.id).where(and_(*contact_filter, user_filter))
+        filter_clause = and_(*contact_filter, user_filter)
     else:
-        total_contacts = 0
-        qualified = 0
-        contact_ids_q = select(Contact.id).where(Contact.id == "00000000-0000-0000-0000-000000000000")
+        filter_clause = and_(*contact_filter)
+
+    total_contacts = await db.scalar(
+        select(func.count(Contact.id)).where(filter_clause)
+    ) or 0
+    qualified = await db.scalar(
+        select(func.count(Contact.id))
+        .where(and_(filter_clause, Contact.icp_score >= settings.ICP_SCORE_THRESHOLD))
+    ) or 0
+    contact_ids_q = select(Contact.id).where(filter_clause)
     active_signals = await db.scalar(
         select(func.count(SignalEvent.id)).where(
             and_(SignalEvent.processed == False,
@@ -373,9 +372,9 @@ async def get_dashboard_overview(
                 # scope pending actions to entities owned by the current user
                 or_(
                     and_(PendingAction.entity_type == "contact",
-                         PendingAction.entity_id.in_(_own_contact_ids_q(current_user))),
+                         PendingAction.entity_id.in_(_own_contact_ids_q(current_user, as_str=True))),
                     and_(PendingAction.entity_type == "deal",
-                         PendingAction.entity_id.in_(_own_deal_ids_q(current_user))),
+                         PendingAction.entity_id.in_(_own_deal_ids_q(current_user, as_str=True))),
                 ),
             )
         ) if current_user is not None else PendingAction.status == ActionStatus.PENDING
@@ -659,7 +658,7 @@ async def list_deals(
         own_contacts = _own_contact_ids_q(current_user)
         if user_input_id is not None:
             assoc_ids_q = select(ContactUserInputAssociation.contact_id).where(ContactUserInputAssociation.user_input_id == user_input_id)
-            own_contacts = own_contacts.where(or_(Contact.user_input_id == user_input_id, Contact.id.in_(assoc_ids_q)))
+            own_contacts = own_contacts.where(or_(Contact.user_input_id == user_input_id, Contact.id.in_(assoc_ids_q), Contact.user_input_id.is_(None)))
             q = q.where(Deal.contact_id.in_(own_contacts))
         else:
             deal_clauses = [Deal.contact_id.in_(own_contacts)]
@@ -669,7 +668,7 @@ async def list_deals(
     elif user_input_id is not None:
         assoc_ids_q = select(ContactUserInputAssociation.contact_id).where(ContactUserInputAssociation.user_input_id == user_input_id)
         matching_contacts = select(Contact.id).where(
-            or_(Contact.user_input_id == user_input_id, Contact.id.in_(assoc_ids_q)),
+            or_(Contact.user_input_id == user_input_id, Contact.id.in_(assoc_ids_q), Contact.user_input_id.is_(None)),
             _is_real_prospect_contact(),
         )
         q = q.where(Deal.contact_id.in_(matching_contacts))
@@ -695,7 +694,7 @@ async def get_pipeline_summary(
         own_contacts = _own_contact_ids_q(current_user)
         if user_input_id is not None:
             assoc_ids_q = select(ContactUserInputAssociation.contact_id).where(ContactUserInputAssociation.user_input_id == user_input_id)
-            own_contacts = own_contacts.where(or_(Contact.user_input_id == user_input_id, Contact.id.in_(assoc_ids_q)))
+            own_contacts = own_contacts.where(or_(Contact.user_input_id == user_input_id, Contact.id.in_(assoc_ids_q), Contact.user_input_id.is_(None)))
             where_clauses.append(Deal.contact_id.in_(own_contacts))
         else:
             deal_clauses = [Deal.contact_id.in_(own_contacts)]
@@ -705,7 +704,7 @@ async def get_pipeline_summary(
     elif user_input_id is not None:
         assoc_ids_q = select(ContactUserInputAssociation.contact_id).where(ContactUserInputAssociation.user_input_id == user_input_id)
         matching_contacts = select(Contact.id).where(
-            or_(Contact.user_input_id == user_input_id, Contact.id.in_(assoc_ids_q)),
+            or_(Contact.user_input_id == user_input_id, Contact.id.in_(assoc_ids_q), Contact.user_input_id.is_(None)),
             _is_real_prospect_contact(),
         )
         where_clauses.append(Deal.contact_id.in_(matching_contacts))
@@ -752,15 +751,16 @@ async def _ensure_action_owned(db: AsyncSession, user, action) -> None:
         return
     if action.entity_type == "contact":
         contact = await db.get(Contact, action.entity_id)
-        if not contact or contact.user_id != user.id:
+        if not contact or (contact.user_id is not None and contact.user_id != user.id):
             raise HTTPException(status_code=404)
     elif action.entity_type == "deal":
         deal = await db.get(Deal, action.entity_id)
-        if not deal or not deal.contact_id:
+        if not deal:
             raise HTTPException(status_code=404)
-        contact = await db.get(Contact, deal.contact_id)
-        if not contact or contact.user_id != user.id:
-            raise HTTPException(status_code=404)
+        if deal.contact_id:
+            contact = await db.get(Contact, deal.contact_id)
+            if not contact or (contact.user_id is not None and contact.user_id != user.id):
+                raise HTTPException(status_code=404)
 
 
 @router.get("/pending-actions")
@@ -790,9 +790,9 @@ async def list_pending_actions(
         q = q.where(
             or_(
                 and_(PendingAction.entity_type == "contact",
-                     PendingAction.entity_id.in_(_own_contact_ids_q(current_user))),
+                     PendingAction.entity_id.in_(_own_contact_ids_q(current_user, as_str=True))),
                 and_(PendingAction.entity_type == "deal",
-                     PendingAction.entity_id.in_(_own_deal_ids_q(current_user))),
+                     PendingAction.entity_id.in_(_own_deal_ids_q(current_user, as_str=True))),
             )
         )
 
@@ -820,6 +820,8 @@ async def list_pending_actions(
             "contact_name": None,
             "contact_id": None,
             "deal_id": None,
+            "industry": None,
+            "contact_title": None,
         }
 
         if a.entity_type == "deal":
@@ -828,6 +830,7 @@ async def list_pending_actions(
             if deal:
                 item["deal_id"] = deal.id
                 item["deal_name"] = deal.name
+                item["deal_stage"] = deal.stage
                 if deal.contact_id:
                     contact_res = await db.execute(select(Contact).where(Contact.id == deal.contact_id))
                     contact = contact_res.scalar_one_or_none()
@@ -835,6 +838,8 @@ async def list_pending_actions(
                         item["contact_id"] = contact.id
                         item["company"] = contact.company
                         item["contact_name"] = f"{contact.first_name or ''} {contact.last_name or ''}".strip()
+                        item["industry"] = contact.industry
+                        item["contact_title"] = contact.title
         elif a.entity_type == "contact":
             contact_res = await db.execute(select(Contact).where(Contact.id == a.entity_id))
             contact = contact_res.scalar_one_or_none()
@@ -842,6 +847,8 @@ async def list_pending_actions(
                 item["contact_id"] = contact.id
                 item["company"] = contact.company
                 item["contact_name"] = f"{contact.first_name or ''} {contact.last_name or ''}".strip()
+                item["industry"] = contact.industry
+                item["contact_title"] = contact.title
 
         enriched.append(item)
 
@@ -884,16 +891,14 @@ async def dismiss_action(action_id: str, current_user=Depends(get_current_user),
 
 # ── Revenue ────────────────────────────────────────────────────────────────
 
-@router.get("/revenue/forecast", response_model=ForecastOut)
+@router.get("/revenue/forecast", response_model=Optional[ForecastOut])
 async def get_latest_forecast(current_user=Depends(get_current_user), db: AsyncSession = Depends(get_db)):
     stmt = select(RevenueForecast)
     if current_user is not None:
-        stmt = stmt.where(RevenueForecast.user_id == current_user.id)
+        stmt = stmt.where(or_(RevenueForecast.user_id == current_user.id, RevenueForecast.user_id.is_(None)))
     result = await db.execute(
         stmt.order_by(desc(RevenueForecast.calculated_at)).limit(1))
     forecast = result.scalar_one_or_none()
-    if not forecast:
-        raise HTTPException(status_code=404, detail="No forecast yet — run A7")
     return forecast
 
 
@@ -1399,6 +1404,7 @@ async def get_input_history(current_user=Depends(get_current_user), db: AsyncSes
             "target_company_size": r.target_company_size,
             "target_keywords":     r.target_keywords or "",
             "target_job_titles":   r.target_job_titles,
+            "created_at":          r.created_at.isoformat() if getattr(r, "created_at", None) else None,
         }
         for r in rows
     ]
@@ -1456,13 +1462,17 @@ async def delete_all_input_history(
     Contacts and deals are strictly preserved.
     """
     from app.models.models import UserInput, ContactUserInputAssociation
-    from sqlalchemy import select, delete
+    from sqlalchemy import select, delete, or_
 
     if current_user is None:
         raise HTTPException(status_code=401, detail="Authentication required")
 
-    # Find all user_input IDs owned by this user
-    result = await db.execute(select(UserInput.id).where(UserInput.user_id == current_user.id))
+    # Find all user_input IDs owned by this user or global/unassigned
+    result = await db.execute(
+        select(UserInput.id).where(
+            or_(UserInput.user_id == current_user.id, UserInput.user_id.is_(None))
+        )
+    )
     input_ids = result.scalars().all()
 
     if not input_ids:
@@ -1588,7 +1598,7 @@ async def _get_owned_draft(db: AsyncSession, user, draft_id: str) -> OutreachDra
         raise HTTPException(status_code=404, detail="Draft not found")
     if user is not None:
         contact = await db.get(Contact, draft.contact_id)
-        if not contact or contact.user_id != user.id:
+        if not contact or (contact.user_id is not None and contact.user_id != user.id):
             raise HTTPException(status_code=404, detail="Draft not found")
     return draft
 
@@ -1604,11 +1614,11 @@ async def get_drafts(
         own = select(Contact.id).where((Contact.user_id == current_user.id) | (Contact.user_id.is_(None)))
         if user_input_id is not None:
             assoc_ids_q = select(ContactUserInputAssociation.contact_id).where(ContactUserInputAssociation.user_input_id == user_input_id)
-            own = own.where(or_(Contact.user_input_id == user_input_id, Contact.id.in_(assoc_ids_q)))
+            own = own.where(or_(Contact.user_input_id == user_input_id, Contact.id.in_(assoc_ids_q), Contact.user_input_id.is_(None)))
         q = q.where(OutreachDraft.contact_id.in_(own))
     elif user_input_id is not None:
         assoc_ids_q = select(ContactUserInputAssociation.contact_id).where(ContactUserInputAssociation.user_input_id == user_input_id)
-        matching_contacts = select(Contact.id).where(or_(Contact.user_input_id == user_input_id, Contact.id.in_(assoc_ids_q)))
+        matching_contacts = select(Contact.id).where(or_(Contact.user_input_id == user_input_id, Contact.id.in_(assoc_ids_q), Contact.user_input_id.is_(None)))
         q = q.where(OutreachDraft.contact_id.in_(matching_contacts))
     result = await db.execute(
         q.order_by(OutreachDraft.created_at.desc())
@@ -1902,12 +1912,17 @@ async def poll_gmail_inbox_endpoint():
 async def list_notifications(
     user_input_id: Optional[int] = None,
     unread_only: bool = False,
+    search: Optional[str] = None,
+    category: Optional[str] = None,
+    sort_order: str = "desc",
+    skip: int = 0,
+    limit: int = 50,
     current_user=Depends(get_current_user),
     db: AsyncSession = Depends(get_db)
 ):
     """
-    Returns notifications scoped to the currently active or specified search/user_input.
-    Ordered newest first, excluding expired signal notifications.
+    Returns notifications scoped to the currently active or specified search/user_input or user.
+    Supports filtering by search query, unread state, category, and sorting.
     """
     from app.models.models import UserInput
 
@@ -1925,28 +1940,54 @@ async def list_notifications(
         )
         user_sess_ids = user_sess_res.scalars().all()
         if user_sess_ids:
-            scope_filter = Notification.user_input_id.in_(user_sess_ids)
+            scope_filter = or_(
+                Notification.user_input_id.in_(user_sess_ids),
+                Notification.user_id == current_user.id,
+                and_(Notification.user_id.is_(None), Notification.contact.has(or_(Contact.user_id == current_user.id, Contact.user_id.is_(None))))
+            )
         else:
-            default_id = await _get_default_user_input_id(db, current_user)
-            if default_id is None:
-                return {"notifications": [], "unread_count": 0}
-            scope_filter = (Notification.user_input_id == default_id)
+            scope_filter = or_(
+                Notification.user_id == current_user.id,
+                and_(Notification.user_id.is_(None), Notification.contact.has(or_(Contact.user_id == current_user.id, Contact.user_id.is_(None))))
+            )
     else:
-        default_id = await _get_default_user_input_id(db, current_user)
-        if default_id is None:
-            return {"notifications": [], "unread_count": 0}
-        scope_filter = (Notification.user_input_id == default_id)
+        scope_filter = True
 
-    # Enforce contact user isolation so cross-user notifications do not leak
+    # Base filters
     filters = [scope_filter, not_expired_filter]
     if current_user is not None:
         filters.append(
             or_(
                 Notification.contact_id.is_(None),
-                Notification.contact.has(or_(Contact.user_id == current_user.id, Contact.user_id.is_(None)))
+                Notification.contact.has(or_(Contact.user_id == current_user.id, Contact.user_id.is_(None))),
+                Notification.user_id == current_user.id,
+                Notification.user_id.is_(None),
             )
         )
 
+    # Search filter
+    if search and search.strip():
+        term = f"%{search.strip()}%"
+        filters.append(Notification.message.ilike(term))
+
+    # Category / format filter
+    if category and category.lower() not in ("all", "all formats", "all categories"):
+        cat_map = {
+            "signals": "new_signal",
+            "signal": "new_signal",
+            "replies": "reply_received",
+            "reply": "reply_received",
+            "deals": "deal_attention",
+            "deal": "deal_attention",
+            "drafts": "drafts_ready",
+            "draft": "drafts_ready",
+            "agents": "agent_completed",
+            "agent": "agent_completed",
+        }
+        mapped_cat = cat_map.get(category.lower(), category.lower())
+        filters.append(Notification.type == mapped_cat)
+
+    # Compute unread count
     unread_count = await db.scalar(
         select(func.count(Notification.id)).where(
             *filters,
@@ -1954,11 +1995,18 @@ async def list_notifications(
         )
     ) or 0
 
+    # Total matching
+    total_matching = await db.scalar(
+        select(func.count(Notification.id)).where(*filters)
+    ) or 0
+
+    order_col = asc(Notification.created_at) if sort_order.lower() == "asc" else desc(Notification.created_at)
     q = (
         select(Notification)
         .where(*filters)
-        .order_by(desc(Notification.created_at))
-        .limit(50)
+        .order_by(order_col)
+        .offset(skip)
+        .limit(limit)
     )
 
     if unread_only:
@@ -1970,6 +2018,7 @@ async def list_notifications(
     return {
         "notifications": notifications,
         "unread_count": unread_count,
+        "total": total_matching,
     }
 
 
@@ -1981,7 +2030,7 @@ async def mark_notification_read(
     """
     Marks a single notification as read.
     """
-    result = await db.execute(select(Notification).where(Notification.id == notification_id))
+    result = await db.execute(select(Notification).where(func.cast(Notification.id, SAString) == str(notification_id)))
     notif = result.scalar_one_or_none()
     if not notif:
         raise HTTPException(status_code=404, detail="Notification not found")
@@ -1995,5 +2044,33 @@ async def mark_notification_read(
         "id": str(notif.id),
         "read_at": notif.read_at,
     }
+
+
+@router.post("/notifications/read-all")
+async def mark_all_notifications_read(
+    current_user=Depends(get_current_user),
+    db: AsyncSession = Depends(get_db)
+):
+    """
+    Marks all notifications as read for current user.
+    """
+    from sqlalchemy import update
+    now = datetime.utcnow()
+    stmt = (
+        update(Notification)
+        .where(Notification.read_at.is_(None))
+        .values(read_at=now)
+    )
+    if current_user is not None:
+        stmt = stmt.where(
+            or_(
+                Notification.user_id == current_user.id,
+                Notification.user_id.is_(None),
+                Notification.contact.has(or_(Contact.user_id == current_user.id, Contact.user_id.is_(None)))
+            )
+        )
+    await db.execute(stmt)
+    await db.commit()
+    return {"status": "ok", "message": "All notifications marked as read"}
 
 

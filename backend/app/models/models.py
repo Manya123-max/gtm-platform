@@ -677,6 +677,7 @@ class Notification(Base):
     type: Mapped[str] = mapped_column(String(50), nullable=False, index=True)  # "reply_received" | "new_signal"
     contact_id: Mapped[str] = mapped_column(UUID(as_uuid=False), ForeignKey("contacts.id", ondelete="CASCADE"), nullable=False, index=True)
     user_input_id: Mapped[int] = mapped_column(Integer, ForeignKey("user_inputs.id", ondelete="CASCADE"), nullable=False, index=True)
+    user_id: Mapped[Optional[str]] = mapped_column(UUID(as_uuid=False), ForeignKey("users.id", ondelete="CASCADE"), nullable=True, index=True)
     message: Mapped[str] = mapped_column(Text, nullable=False)
     action_url: Mapped[Optional[str]] = mapped_column(String(255), nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow, index=True)

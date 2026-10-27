@@ -160,10 +160,14 @@ export const fetchAgentSchedules = () => unwrap(api.get('/agents/schedule'))
 export const updateAgentSchedule = (agent, enabled, cron = null) =>
   unwrap(api.post('/agents/schedule', { agent, enabled, cron }))
 
-export const fetchNotifications = (user_input_id) =>
-  unwrap(api.get('/notifications', { params: user_input_id ? { user_input_id } : {} }))
+export const fetchNotifications = (params = {}) => {
+  const queryParams = typeof params === 'object' ? params : (params ? { user_input_id: params } : {})
+  return unwrap(api.get('/notifications', { params: queryParams }))
+}
 export const markNotificationRead = id =>
   unwrap(api.post(`/notifications/${id}/read`))
+export const markAllNotificationsRead = () =>
+  unwrap(api.post('/notifications/read-all'))
 // User & Integrations API
 export const fetchIntegrations = () => unwrap(api.get('/integrations'))
 export const getGoogleConnectUrl = () => unwrap(api.get('/integrations/google/connect'))

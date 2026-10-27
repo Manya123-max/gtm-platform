@@ -87,6 +87,20 @@ export function AuthProvider({ children }) {
     return res.data.user
   }, [queryClient])
 
+  const forgotPassword = useCallback(async (email) => {
+    const res = await http.post('/auth/forgot-password', { email })
+    return res.data
+  }, [])
+
+  const resetPassword = useCallback(async ({ token, password, confirmPassword }) => {
+    const res = await http.post('/auth/reset-password', {
+      token,
+      password,
+      confirm_password: confirmPassword,
+    })
+    return res.data
+  }, [])
+
   const logout = useCallback(async () => {
     const token = localStorage.getItem(TOKEN_KEY)
     clearTokens()
@@ -102,7 +116,7 @@ export function AuthProvider({ children }) {
   }, [queryClient])
 
   return (
-    <AuthContext.Provider value={{ user, initializing, login, register, logout, authError }}>
+    <AuthContext.Provider value={{ user, initializing, login, register, logout, forgotPassword, resetPassword, authError }}>
       {children}
     </AuthContext.Provider>
   )

@@ -72,6 +72,15 @@ def create_refresh_token(user_id: str) -> str:
     )
 
 
+def create_reset_token(user_id: str) -> str:
+    expire = datetime.now(timezone.utc) + timedelta(minutes=30)
+    return jwt.encode(
+        {"sub": str(user_id), "type": "reset", "exp": expire},
+        _secret_key(),
+        algorithm=settings.JWT_ALGORITHM,
+    )
+
+
 def decode_token(token: str, expected_type: str = "access") -> str:
     """Returns the user id encoded in the token, or raises 401."""
     credentials_exception = HTTPException(

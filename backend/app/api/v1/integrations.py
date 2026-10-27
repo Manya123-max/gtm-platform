@@ -542,6 +542,7 @@ async def get_user_settings(
         "cal_com_resolved_url": resolved_url,
         "cal_com_status": "Configured" if resolved_url else "Mapping Required",
         "cal_com_source": "Admin/User Mapping" if resolved_url else None,
+        "avatar_url": "/avatar-shree.jpg" if (current_user.email == "shree.lakshmi@forcecloudlabs.com" or "shree" in (current_user.name or "").lower()) else None,
         "slack_user_id": current_user.slack_user_id,
     }
 

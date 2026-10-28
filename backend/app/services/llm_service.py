@@ -1,7 +1,7 @@
 """LLM wrapper used by all agents.
 
 Fallback chain (tried in order, skipped if key not set):
-  1. Groq      (llama-3.3-70b)     — fast & free, hits limits quickly
+  1. Groq      (compound)     — fast & free, hits limits quickly
   2. Gemini    (gemini-1.5-flash)  — Google free tier, generous quota
   3. Mistral   (mistral-small)     — fast OpenAI-compatible, good quality
   4. DeepSeek  (deepseek-chat)     — OpenAI-compatible, cheap & accurate
@@ -25,17 +25,17 @@ from app.core.config import settings
 logger = structlog.get_logger()
 
 # ── Model IDs ────────────────────────────────────────────────────────────────
-HAIKU_MODEL  = "claude-haiku-4-5-20251001"
-SONNET_MODEL = "claude-sonnet-4-6"
+HAIKU_MODEL  = "claude-3-haiku-20240307"
+SONNET_MODEL = "claude-3-5-sonnet-latest"
 
 GROQ_URL     = "https://api.groq.com/openai/v1/chat/completions"
-GEMINI_URL   = "https://generativelanguage.googleapis.com/v1beta/models/gemini-flash-latest:generateContent"
+GEMINI_URL   = "https://generativelanguage.googleapis.com/v1beta/models/gemini-flash-lite-latest:generateContent"
 MISTRAL_URL  = "https://api.mistral.ai/v1/chat/completions"
 DEEPSEEK_URL = "https://api.deepseek.com/v1/chat/completions"
 ANTHROPIC_URL = "https://api.anthropic.com/v1/messages"
 ANTHROPIC_VERSION = "2023-06-01"
 
-MAX_ATTEMPTS = 4   # per provider before moving to the next
+MAX_ATTEMPTS = 2   # per provider before moving to the next
 
 
 # ── Individual provider callers ───────────────────────────────────────────────
@@ -62,31 +62,63 @@ async def _call_openai_compat(
     }
     if force_json:
         payload["response_format"] = {"type": "json_object"}
-    async with httpx.AsyncClient(timeout=60) as client:
+    async with httpx.AsyncClient(timeout=30) as client:
         resp = await client.post(url, headers=headers, json=payload)
         resp.raise_for_status()
         return resp.json()["choices"][0]["message"]["content"].strip()
 
 
+GEMINI_MODELS = [
+    "gemini-3.5-flash-lite",
+    "gemini-flash-lite-latest",
+    "gemini-3.1-flash-lite",
+    "gemini-3.1-flash-lite-preview",
+    "gemini-3.6-flash",
+    "gemini-3.5-flash",
+    "gemini-flash-latest",
+    "gemini-3-flash-preview",
+]
+
+
 async def _call_gemini(
     system: str, user: str, max_tokens: int, force_json: bool = False
 ) -> str:
-    """Call Google Gemini 1.5 Flash via REST."""
-    combined = f"{system}\n\n{user}"
-    if force_json:
+    """Call Google Gemini via REST with fast multi-model fallback."""
+    combined = f"{system}\n\n{user}" if system else user
+    if force_json and "Return ONLY valid JSON" not in combined:
         combined += "\n\nReturn ONLY valid JSON. No markdown fences, no preamble."
     payload: Dict[str, Any] = {
         "contents": [{"parts": [{"text": combined}]}],
         "generationConfig": {"maxOutputTokens": max_tokens, "temperature": 0.3},
     }
-    url = f"{GEMINI_URL}?key={settings.GEMINI_API_KEY}"
-    async with httpx.AsyncClient(timeout=60) as client:
-        resp = await client.post(
-            url, headers={"Content-Type": "application/json"}, json=payload
-        )
-        resp.raise_for_status()
-        data = resp.json()
-        return data["candidates"][0]["content"]["parts"][0]["text"].strip()
+    if force_json:
+        payload["generationConfig"]["responseMimeType"] = "application/json"
+
+    last_err: Optional[Exception] = None
+    for model in GEMINI_MODELS:
+        url = f"https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent?key={settings.GEMINI_API_KEY}"
+        try:
+            async with httpx.AsyncClient(timeout=30) as client:
+                resp = await client.post(
+                    url, headers={"Content-Type": "application/json"}, json=payload
+                )
+                if resp.status_code == 200:
+                    data = resp.json()
+                    candidates = data.get("candidates", [])
+                    if candidates and "content" in candidates[0] and "parts" in candidates[0]["content"]:
+                        text = candidates[0]["content"]["parts"][0].get("text", "").strip()
+                        if text:
+                            return text
+                elif resp.status_code in (429, 404, 503):
+                    last_err = RuntimeError(f"{model} returned {resp.status_code}")
+                    continue
+                else:
+                    resp.raise_for_status()
+        except Exception as e:
+            last_err = e
+            continue
+
+    raise RuntimeError(f"All Gemini models failed. Last error: {last_err}")
 
 
 async def _call_anthropic(
@@ -104,7 +136,7 @@ async def _call_anthropic(
         "system":     system,
         "messages":   [{"role": "user", "content": user}],
     }
-    async with httpx.AsyncClient(timeout=60) as client:
+    async with httpx.AsyncClient(timeout=30) as client:
         resp = await client.post(ANTHROPIC_URL, headers=headers, json=payload)
         resp.raise_for_status()
         return resp.json()["content"][0]["text"].strip()
@@ -123,13 +155,20 @@ def _build_provider_chain(
     providers: List[Tuple[str, Any]] = []
 
     if settings.GROQ_API_KEY:
-        providers.append(("Groq", lambda s, u, t: _call_openai_compat(
-            GROQ_URL, settings.GROQ_API_KEY, "llama-3.1-8b-instant",
+        providers.append(("Groq-Qwen-27B", lambda s, u, t: _call_openai_compat(
+            GROQ_URL, settings.GROQ_API_KEY, "qwen/qwen3.8-27b",
             s, u, t, force_json=force_json,
         )))
 
+
     if settings.GEMINI_API_KEY:
         providers.append(("Gemini", lambda s, u, t: _call_gemini(
+            s, u, t, force_json=force_json,
+        )))
+
+    if settings.GROQ_API_KEY:
+        providers.append(("Groq-Compound-Mini", lambda s, u, t: _call_openai_compat(
+            GROQ_URL, settings.GROQ_API_KEY, "groq/compound-mini",
             s, u, t, force_json=force_json,
         )))
 
@@ -179,12 +218,9 @@ async def _call_with_fallback(
             except httpx.HTTPStatusError as e:
                 status = e.response.status_code
                 if status == 429:
-                    wait = 2 ** attempt  # 1s, 2s
-                    logger.warning("LLM rate limited, backing off",
-                                   provider=name, attempt=attempt + 1, wait_s=wait)
-                    await asyncio.sleep(wait)
+                    logger.warning("LLM provider rate limited (429), switching immediately to next provider", provider=name)
                     last_err = e
-                    continue  # retry same provider once
+                    break
                 else:
                     logger.warning("LLM HTTP error, trying next provider",
                                    provider=name, status=status)
@@ -202,14 +238,38 @@ async def _call_with_fallback(
 # ── JSON cleaner ──────────────────────────────────────────────────────────────
 
 def _clean_json(content: str) -> Dict[str, Any]:
-
-    """Strip markdown fences and parse JSON."""
-    if content.startswith("```"):
-        content = re.sub(r"^```(?:json)?\n?", "", content)
-        content = re.sub(r"\n?```$", "", content)
+    """Strip markdown fences, isolate JSON object, and parse JSON."""
+    if not content:
+        return {}
+    s = content.strip()
+    if "```json" in s:
+        s = s.split("```json", 1)[1].split("```", 1)[0]
+    elif "```" in s:
+        s = s.split("```", 1)[1].split("```", 1)[0]
+    first_brace = s.find("{")
+    last_brace = s.rfind("}")
+    if first_brace != -1 and last_brace != -1 and last_brace > first_brace:
+        s = s[first_brace:last_brace+1]
     try:
-        return json.loads(content)
+        return json.loads(s)
     except json.JSONDecodeError:
+        # Attempt auto-repair on truncated JSON
+        if first_brace != -1:
+            repaired = s.strip()
+            # Trim dangling commas or unclosed quotes
+            if repaired.endswith(","):
+                repaired = repaired[:-1]
+            open_braces = repaired.count("{") - repaired.count("}")
+            open_brackets = repaired.count("[") - repaired.count("]")
+            if open_braces > 0 or open_brackets > 0:
+                if repaired.count('"') % 2 != 0:
+                    repaired += '"'
+                repaired += ("]" * max(0, open_brackets)) + ("}" * max(0, open_braces))
+                try:
+                    return json.loads(repaired)
+                except Exception:
+                    pass
+
         logger.warning("JSON parse failed, attempting regex extraction fallback", preview=content[:200])
         subject_match = re.search(r'"subject"\s*:\s*"(.*?)"', content, re.DOTALL)
         body_match = re.search(r'"body"\s*:\s*"(.*?)"', content, re.DOTALL)
@@ -255,7 +315,7 @@ class LLMService:
         user: str,
         use_sonnet: bool = False,
         response_format: Optional[Dict[str, Any]] = None,
-        max_tokens: int = 1000,
+        max_tokens: int = 4000,
     ) -> Dict[str, Any]:
         """
         Return a parsed JSON dict.

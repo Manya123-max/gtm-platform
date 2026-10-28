@@ -62,6 +62,54 @@ class SlackService:
             logger.error("Slack approval send failed", error=str(e))
             return None
 
+    async def send_draft_approval_card(self, contact, draft) -> Optional[str]:
+        if not settings.SLACK_BOT_TOKEN:
+            return None
+
+        first_name = getattr(contact, "first_name", "") or ""
+        last_name = getattr(contact, "last_name", "") or ""
+        company = getattr(contact, "company", "") or "Unknown"
+        title = getattr(contact, "title", "") or "N/A"
+        email = getattr(contact, "email", "") or ""
+
+        blocks = [
+            {"type": "section", "text": {"type": "mrkdwn",
+                "text": f"🔥 *Outreach Draft for {first_name} {last_name}* ({company})\n*Email:* `{email}` | *Title:* `{title}`"}},
+            {"type": "section", "text": {"type": "mrkdwn",
+                "text": f"*Business Case:* {draft.business_case}\n*Subject:* `{draft.subject}`"}},
+            {"type": "section", "text": {"type": "mrkdwn",
+                "text": f"*Draft Preview:*\n```{draft.body[:500]}```"}},
+            {"type": "actions", "elements": [
+                {"type": "button", "text": {"type": "plain_text", "text": "✓ Approve & Send"},
+                 "style": "primary", "action_id": "approve_draft",
+                 "value": str(draft.id)},
+                {"type": "button", "text": {"type": "plain_text", "text": "✗ Reject"},
+                 "style": "danger", "action_id": "reject_draft",
+                 "value": str(draft.id)},
+            ]},
+        ]
+        try:
+            async with httpx.AsyncClient(timeout=10) as client:
+                resp = await client.post(
+                    "https://slack.com/api/chat.postMessage",
+                    headers={"Authorization": f"Bearer {settings.SLACK_BOT_TOKEN}"},
+                    json={
+                        "channel": settings.SLACK_APPROVAL_CHANNEL,
+                        "text": f"Outreach Draft for {first_name} {last_name} ({company})",
+                        "blocks": blocks,
+                    },
+                )
+                data = resp.json()
+                if data.get("ok"):
+                    logger.info("Slack draft approval card sent", draft_id=str(draft.id), ts=data.get("ts"))
+                    return data.get("ts")
+                else:
+                    logger.error("Slack API rejected draft approval card", error=data.get("error"), response=data)
+                    return None
+        except Exception as e:
+            logger.error("Slack draft approval send failed", error=str(e))
+            return None
+
     async def open_edit_modal(
         self, trigger_id: str, thread_event_id: str, current_draft: str
     ) -> bool:
@@ -151,24 +199,31 @@ class SlackService:
         if not settings.SLACK_BOT_TOKEN or not pending_actions:
             return False
 
-        lines = [f"*ðŸ“‹ Daily Deal Actions â€” {len(pending_actions)} pending*\n"]
+        lines = [f"*📋 Daily Deal Actions — {len(pending_actions)} pending*\n"]
         for action in pending_actions[:10]:
-            severity_emoji = "ðŸ”´" if "high" in (action.reason or "") else "ðŸŸ¡"
-            lines.append(f"{severity_emoji} *{action.action_type.replace('_', ' ').title()}*")
-            lines.append(f"   {action.reason}")
-            lines.append(f"   â†’ {action.recommended_value}\n")
+            severity_emoji = "🔴" if "high" in str(action.reason or "").lower() else "🟡"
+            action_name = str(action.action_type or "Action").replace('_', ' ').title()
+            lines.append(f"{severity_emoji} *{action_name}*")
+            if action.reason:
+                lines.append(f"   {action.reason}")
+            if action.recommended_value:
+                lines.append(f"   → {action.recommended_value}\n")
 
+        channel = settings.SLACK_ALERTS_CHANNEL or settings.SLACK_APPROVAL_CHANNEL
         try:
             async with httpx.AsyncClient(timeout=10) as client:
                 resp = await client.post(
                     "https://slack.com/api/chat.postMessage",
                     headers={"Authorization": f"Bearer {settings.SLACK_BOT_TOKEN}"},
                     json={
-                        "channel": settings.SLACK_ALERTS_CHANNEL,
+                        "channel": channel,
                         "text": "\n".join(lines),
                     },
                 )
-                return resp.json().get("ok", False)
+                data = resp.json()
+                if not data.get("ok"):
+                    logger.error("Slack daily digest rejected", error=data.get("error"), channel=channel)
+                return data.get("ok", False)
         except Exception as e:
             logger.error("Slack digest failed", error=str(e))
             return False
@@ -176,14 +231,18 @@ class SlackService:
     async def send_alert(self, message: str) -> bool:
         if not settings.SLACK_BOT_TOKEN:
             return False
+        channel = settings.SLACK_ALERTS_CHANNEL or settings.SLACK_APPROVAL_CHANNEL
         try:
             async with httpx.AsyncClient(timeout=10) as client:
                 resp = await client.post(
                     "https://slack.com/api/chat.postMessage",
                     headers={"Authorization": f"Bearer {settings.SLACK_BOT_TOKEN}"},
-                    json={"channel": settings.SLACK_ALERTS_CHANNEL, "text": message},
+                    json={"channel": channel, "text": message},
                 )
-                return resp.json().get("ok", False)
+                data = resp.json()
+                if not data.get("ok"):
+                    logger.error("Slack alert rejected", error=data.get("error"), channel=channel)
+                return data.get("ok", False)
         except Exception as e:
             logger.error("Slack alert failed", error=str(e))
             return False
@@ -234,65 +293,25 @@ class NtfyService:
             return False
 
 
-# â”€â”€ HubSpot Service â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+# ── Salesforce Service (Sole CRM Source of Truth) ───────────────────────────
+from app.services.salesforce_service import SalesforceService, SALESFORCE_STAGE_MAP
+
 
 class HubSpotService:
-    """HubSpot CRM API â€” free tier, 40K calls/day."""
+    """
+    Deprecated: HubSpot has been retired in favor of Salesforce CRM.
+    This class is maintained solely for backward compatibility.
+    """
+    def __init__(self):
+        pass
 
-    BASE = "https://api.hubapi.com"
+    async def log_activity(self, *args, **kwargs) -> bool:
+        logger.warning("HubSpotService.log_activity called but HubSpot is deprecated. Use SalesforceService.")
+        return False
 
-    @property
-    def headers(self):
-        return {"Authorization": f"Bearer {settings.HUBSPOT_ACCESS_TOKEN}",
-                "Content-Type": "application/json"}
-
-    async def log_activity(self, deal_id: Optional[str], activity_type: str, body: str) -> bool:
-        if not settings.HUBSPOT_ACCESS_TOKEN or not deal_id:
-            return False
-        try:
-            async with httpx.AsyncClient(timeout=15) as client:
-                resp = await client.post(
-                    f"{self.BASE}/crm/v3/objects/notes",
-                    headers=self.headers,
-                    json={"properties": {
-                        "hs_note_body": body,
-                        "hs_timestamp": str(int(__import__("time").time() * 1000)),
-                    }},
-                )
-                resp.raise_for_status()
-                note_id = resp.json().get("id")
-                if note_id and deal_id:
-                    await client.put(
-                        f"{self.BASE}/crm/v3/objects/notes/{note_id}/associations/deals/{deal_id}/note_to_deal",
-                        headers=self.headers,
-                    )
-                return True
-        except Exception as e:
-            logger.error("HubSpot activity log failed", error=str(e))
-            return False
-
-    async def sync_deals(self) -> List[Dict]:
-        """Pull active deals from HubSpot for A7 pipeline data."""
-        if not settings.HUBSPOT_ACCESS_TOKEN:
-            return []
-        try:
-            async with httpx.AsyncClient(timeout=20) as client:
-                resp = await client.post(
-                    f"{self.BASE}/crm/v3/objects/deals/search",
-                    headers=self.headers,
-                    json={
-                        "filterGroups": [{"filters": [
-                            {"propertyName": "dealstage", "operator": "NEQ", "value": "closedlost"}
-                        ]}],
-                        "properties": ["dealname", "amount", "dealstage", "closedate", "hubspot_owner_id"],
-                        "limit": 100,
-                    },
-                )
-                resp.raise_for_status()
-                return resp.json().get("results", [])
-        except Exception as e:
-            logger.error("HubSpot deal sync failed", error=str(e))
-            return []
+    async def sync_deals(self) -> list:
+        logger.warning("HubSpotService.sync_deals called but HubSpot is deprecated. Use SalesforceService.")
+        return []
 
 
 # â”€â”€ Cal.com Service â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
@@ -328,6 +347,9 @@ class CalService:
         """Resolve and cache https://cal.com/{username}/{event-slug} via the v2 API."""
         if self._booking_base:
             return self._booking_base
+        if settings.CAL_COM_EVENT_SLUG and settings.CAL_COM_EVENT_SLUG.startswith("http"):
+            self._booking_base = settings.CAL_COM_EVENT_SLUG
+            return self._booking_base
         if not settings.CAL_COM_API_KEY:
             return None
 
@@ -352,15 +374,126 @@ class CalService:
             logger.warning("Cal.com booking base resolution failed", error=str(e))
             return None
 
-    async def get_booking_link(self, contact_email: str, contact_name: str) -> str:
+    def resolve_user_booking_url(self, user: Optional[Any] = None) -> Optional[str]:
         """
-        Generate a pre-filled Cal.com booking link (v2). Falls back to a
-        generic cal.com link if the API key is unset or the call fails.
+        Explicitly resolve a sales rep's verified Cal.com booking URL:
+        1. Explicit booking URL if configured on user record: user.cal_com_booking_url
+        2. Explicit Cal.com username on user record: user.cal_com_username + event_slug
+        3. Explicit event slug if structured with username/event or full URL
+        4. Centralized Admin User Mapping: settings.CAL_COM_USER_MAPPINGS
+        5. Confirmed production identity mapping (shree.lakshmi@forcecloudlabs.com -> shree-lakshmi-iaqqsz/15min)
+        CRITICAL: Never silently guess or derive username from email prefix (email.split('@')[0]).
+        If unmapped, returns None to indicate 'Mapping Required'.
+        """
+        if not user:
+            return None
+
+        # 1. Explicit booking URL on user record
+        custom_url = getattr(user, "cal_com_booking_url", None)
+        if custom_url and isinstance(custom_url, str) and custom_url.strip():
+            url = custom_url.strip()
+            # Guard against legacy erroneous URL
+            if "shreelakshmipp" not in url:
+                return url
+
+        # 2. Explicit Cal.com username on user record
+        cal_username = getattr(user, "cal_com_username", None)
+        if cal_username and isinstance(cal_username, str) and cal_username.strip():
+            u = cal_username.strip()
+            slug = getattr(user, "cal_com_event_slug", None) or getattr(settings, "CAL_COM_DEFAULT_EVENT_SLUG", None) or "15min"
+            org = getattr(settings, "CAL_COM_ORG_SLUG", None)
+            if org and isinstance(org, str) and org.strip():
+                return f"https://cal.com/{org.strip().strip('/')}/{u}/{str(slug).strip().lstrip('/')}"
+            return f"https://cal.com/{u}/{str(slug).strip().lstrip('/')}"
+
+        # 3. Explicit event slug (if structured with username/slug or full URL)
+        custom_slug = getattr(user, "cal_com_event_slug", None)
+        if custom_slug and isinstance(custom_slug, str) and custom_slug.strip():
+            slug = custom_slug.strip()
+            if "shreelakshmipp" not in slug:
+                if slug.startswith("http"):
+                    return slug
+                if "/" in slug:
+                    return f"https://cal.com/{slug.lstrip('/')}"
+
+        # 4. Centralized Admin User Mapping (configured by company admin)
+        email = getattr(user, "email", None)
+        if email and isinstance(email, str) and "@" in email:
+            clean_email = email.strip().lower()
+            user_mappings = getattr(settings, "CAL_COM_USER_MAPPINGS", None)
+            if user_mappings:
+                import json
+                try:
+                    mapping_dict = json.loads(user_mappings) if isinstance(user_mappings, str) else user_mappings
+                    if isinstance(mapping_dict, dict) and clean_email in mapping_dict:
+                        mapped_val = mapping_dict[clean_email]
+                        if isinstance(mapped_val, dict):
+                            if mapped_val.get("booking_url"):
+                                b_url = str(mapped_val["booking_url"]).strip()
+                                if "shreelakshmipp" not in b_url:
+                                    return b_url
+                            m_user = mapped_val.get("username")
+                            m_slug = mapped_val.get("event_slug") or getattr(settings, "CAL_COM_DEFAULT_EVENT_SLUG", None) or "15min"
+                            if m_user and "shreelakshmipp" not in str(m_user):
+                                return f"https://cal.com/{str(m_user).strip()}/{str(m_slug).strip().lstrip('/')}"
+                        elif isinstance(mapped_val, str) and "shreelakshmipp" not in mapped_val:
+                            val = mapped_val.strip()
+                            return val if val.startswith("http") else f"https://cal.com/{val.lstrip('/')}"
+                except Exception as map_err:
+                    logger.warning("CalService: Failed to parse CAL_COM_USER_MAPPINGS", error=str(map_err))
+
+            # 5. Confirmed production company user mapping
+            if clean_email == "shree.lakshmi@forcecloudlabs.com":
+                return "https://cal.com/shree-lakshmi-iaqqsz/15min"
+
+        # Explicitly NO guessing (do NOT derive username from email prefix)
+        return None
+
+    async def get_booking_link(
+        self,
+        contact_email: str,
+        contact_name: str,
+        user: Optional[Any] = None,
+        user_booking_url: Optional[str] = None,
+    ) -> str:
+        """
+        Generate a pre-filled Cal.com booking link (v2).
+        If user has a specific booking URL or event slug configured, uses that rep's calendar.
+        Falls back to a generic cal.com link if the API key is unset or the call fails.
         """
         params = urlencode({"name": contact_name, "email": contact_email})
+
+        # 1. Per-sales-rep explicit booking URL
+        target_url = user_booking_url or (getattr(user, "cal_com_booking_url", None) if user else None)
+        if target_url and isinstance(target_url, str):
+            base_url = target_url.rstrip("/")
+            sep = "&" if "?" in base_url else "?"
+            return f"{base_url}{sep}{params}"
+
+        # 2. Per-sales-rep event slug (e.g. "https://cal.com/rep/15min" or "rep/15min")
+        event_slug = getattr(user, "cal_com_event_slug", None) if user else None
+        if event_slug and isinstance(event_slug, str):
+            slug = event_slug.strip()
+            if slug.startswith("http"):
+                base_url = slug.rstrip("/")
+            else:
+                base_url = f"https://cal.com/{slug.lstrip('/')}"
+            sep = "&" if "?" in base_url else "?"
+            return f"{base_url}{sep}{params}"
+
+        # 3. Automated organization / user booking profile resolution
+        if user:
+            auto_url = self.resolve_user_booking_url(user)
+            if auto_url and isinstance(auto_url, str):
+                base_url = auto_url.rstrip("/")
+                sep = "&" if "?" in base_url else "?"
+                return f"{base_url}{sep}{params}"
+
+        # 3. Global company-level Cal.com account resolution
         base = await self._resolve_booking_base()
         if base:
-            return f"{base}?{params}"
+            sep = "&" if "?" in base else "?"
+            return f"{base}{sep}{params}"
         return f"https://cal.com/book?{params}"
 
 
@@ -403,9 +536,11 @@ class ResendService:
             logger.info("Resend not configured — email not sent", to=to)
             return None
 
+        target_email = getattr(settings, "TEST_EMAIL_OVERRIDE", None) or to
+
         body = {
             "from": settings.RESEND_FROM_EMAIL,
-            "to": [to],
+            "to": [target_email],
             "subject": subject,
             "html": html,
         }
@@ -423,6 +558,92 @@ class ResendService:
                 return resp.json().get("id")
         except Exception as e:
             logger.error("Resend send_email failed", to=to, error=str(e))
+            return None
+
+
+# ── SMTP / Gmail Service ──────────────────────────────────────────────────
+
+class SMTPService:
+    """Standard SMTP / Gmail email sender."""
+
+    async def send_email(
+        self, to: str, subject: str, html: str, reply_to: Optional[str] = None
+    ) -> Optional[str]:
+        user = getattr(settings, "SMTP_USER", "")
+        password = getattr(settings, "SMTP_PASSWORD", "")
+        if not user or not password:
+            logger.info("SMTP not configured (missing SMTP_USER / SMTP_PASSWORD)")
+            return None
+
+        import os
+        import smtplib
+        import email.utils
+        import re
+        from email.mime.text import MIMEText
+        from email.mime.multipart import MIMEMultipart
+
+        # Safety gate: Never dispatch real emails in test environments or when sending is disabled
+        is_test_env = bool(
+            os.environ.get("PYTEST_CURRENT_TEST")
+            or getattr(settings, "AGENT3_TEST_MODE", False)
+            or getattr(settings, "DRY_RUN_OUTREACH", False)
+            or not getattr(settings, "ENABLE_EMAIL_SENDING", False)
+        )
+        if is_test_env:
+            logger.info(
+                "SMTPService: Live email sending suppressed (Safe/Test mode active)",
+                to=to,
+                subject=subject,
+                enable_email_sending=getattr(settings, "ENABLE_EMAIL_SENDING", False),
+            )
+            return "mock_smtp_msg_ok"
+
+        target_email = getattr(settings, "TEST_EMAIL_OVERRIDE", None) or to
+        host = getattr(settings, "SMTP_HOST", "smtp.gmail.com")
+        port = int(getattr(settings, "SMTP_PORT", 587))
+        raw_from = getattr(settings, "SMTP_FROM_EMAIL", None) or user
+        from_header = f"ForceCloud Labs GTM <{raw_from}>" if "<" not in raw_from else raw_from
+
+        msg = MIMEMultipart("alternative")
+        msg["Subject"] = subject
+        msg["From"] = from_header
+        msg["To"] = target_email
+        msg["Date"] = email.utils.formatdate(localtime=True)
+        msg["Message-ID"] = email.utils.make_msgid()
+        if reply_to:
+            msg["Reply-To"] = reply_to
+
+        # Attach plain text and HTML for maximum inbox deliverability
+        plain_text = re.sub(r"<[^>]+>", "", html).strip() or "Please view this email in an HTML-compatible client."
+        msg.attach(MIMEText(plain_text, "plain", "utf-8"))
+        msg.attach(MIMEText(html, "html", "utf-8"))
+
+        try:
+            recipients = [target_email]
+            if user.lower() not in [r.lower() for r in recipients]:
+                recipients.append(user)
+
+            with smtplib.SMTP(host, port) as server:
+                server.starttls()
+                server.login(user, password)
+                server.sendmail(raw_from, recipients, msg.as_string())
+            
+            # Append message to Gmail [Gmail]/Sent Mail folder so it appears in Gmail UI Sent Mails
+            try:
+                import imaplib
+                import time
+                mail = imaplib.IMAP4_SSL("imap.gmail.com", 993)
+                mail.login(user, password)
+                mail.append('"[Gmail]/Sent Mail"', "\\Seen", imaplib.Time2Internaldate(time.time()), msg.as_bytes())
+                mail.logout()
+                logger.info("Appended sent email to Gmail Sent Mail folder", to=target_email)
+            except Exception as imap_ex:
+                logger.warning("Could not append email to Gmail Sent Mail folder", error=str(imap_ex))
+
+            logger.info("Email sent via SMTP", to=target_email)
+            return "smtp_msg_ok"
+        except Exception as e:
+            logger.error("SMTP send_email failed", to=target_email, error=str(e))
             return None
 
 
@@ -467,3 +688,9 @@ class EmbeddingService:
         mag_a = math.sqrt(sum(x * x for x in a)) or 1.0
         mag_b = math.sqrt(sum(x * x for x in b)) or 1.0
         return dot / (mag_a * mag_b)
+
+
+from app.services.gmail_imap_service import GmailIMAPService
+from app.services.salesforce_service import SalesforceSyncService
+from app.services.token_encryption import encrypt_token, decrypt_token
+from app.services.google_oauth_service import GoogleOAuthService

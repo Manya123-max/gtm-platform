@@ -91,61 +91,66 @@ def run_agent_node(
                 current_agent_id,
             )
 
+            from app.models.models import WorkflowRun
+            workflow_record = await db.get(WorkflowRun, current_workflow_id)
+            auth_user_id = workflow_record.user_id if workflow_record else None
+
             try:
                 raw_result: Any
 
                 if current_agent_id == "A1":
+                    from app.services.icp_normalizer import normalize_icp_input
+                    from app.models.models import UserInput
+
                     cfg_value = payload_data.get("icp_config")
 
                     if isinstance(cfg_value, dict):
-                        cfg: Dict[str, Any] = dict(cfg_value)
+                        raw_dict = dict(cfg_value)
+                        if auth_user_id and not raw_dict.get("user_id"):
+                            raw_dict["user_id"] = auth_user_id
+                        norm_cfg = normalize_icp_input(raw_dict)
+                        cfg = norm_cfg.to_dict()
                     else:
-                        from app.models.models import UserInput
-                        from app.agents.industry_tag_map import resolve_industries
-                        from app.api.v1 import _expand_size_range
-                        stmt = select(UserInput).order_by(UserInput.id.desc()).limit(1)
+                        stmt = select(UserInput)
+                        if auth_user_id:
+                            stmt = stmt.where(UserInput.user_id == auth_user_id)
+                        stmt = stmt.order_by(UserInput.id.desc()).limit(1)
                         res = await db.execute(stmt)
                         user_input = res.scalars().first()
+
+                        if not user_input and auth_user_id:
+                            # Fallback to most recent intake if user has none
+                            stmt_fallback = select(UserInput).order_by(UserInput.id.desc()).limit(1)
+                            res_fallback = await db.execute(stmt_fallback)
+                            user_input = res_fallback.scalars().first()
+
                         if user_input:
-                            titles = [
-                                t.strip()
-                                for t in (user_input.target_job_titles or "").split(",")
-                                if t.strip()
-                            ]
-                            geographies = [
-                                g.strip()
-                                for g in (user_input.target_location or "").split(",")
-                                if g.strip()
-                            ]
-                            employee_ranges = _expand_size_range(
-                                user_input.target_company_size or "11-200"
-                            )
-                            industry_tag_ids, industry_kw_fallback = resolve_industries(
-                                user_input.target_industries or ""
-                            )
-                            kw_list = [
-                                k.strip()
-                                for k in (user_input.target_keywords or "").split(",")
-                                if k.strip()
-                            ]
-                            kw_list += industry_kw_fallback
-                            cfg = {
-                                "titles":                 titles,
-                                "organization_locations": geographies,
-                                "employee_ranges":        employee_ranges,
-                                "industry_tag_ids":       industry_tag_ids if industry_tag_ids else None,
-                                "org_keyword_tags":       kw_list if kw_list else None,
-                                "vendor_services":        user_input.our_services,
-                                "threshold":              0,
-                                "enrich_limit":           getattr(settings, "APOLLO_ENRICH_LIMIT", 25),
-                                "user_input_id":          user_input.id,
+                            raw_dict = {
+                                "our_company_name":    user_input.our_company_name,
+                                "our_services":        user_input.our_services,
+                                "target_location":     user_input.target_location,
+                                "target_industries":   user_input.target_industries,
+                                "target_company_size": user_input.target_company_size,
+                                "target_keywords":     user_input.target_keywords,
+                                "target_job_titles":   user_input.target_job_titles,
+                                "user_id":             auth_user_id or user_input.user_id,
+                                "user_input_id":       user_input.id,
+                                "threshold":           settings.ICP_SCORE_THRESHOLD,
+                                "enrich_limit":        getattr(settings, "APOLLO_ENRICH_LIMIT", 10),
+                                "candidate_pool_size": getattr(settings, "APOLLO_CANDIDATE_POOL_SIZE", 150),
                             }
+                            norm_cfg = normalize_icp_input(raw_dict)
+                            cfg = norm_cfg.to_dict()
                         else:
                             cfg = {
-                                # Empty titles keep manual test runs broad.
-                                "titles": [],
-                                "employee_ranges": ["11,200", "201,1000"],
-                                "enrich_limit": getattr(settings, "APOLLO_ENRICH_LIMIT", 25),
+                                "titles": ["VP of Sales", "Chief Revenue Officer", "Head of Sales"],
+                                "seniorities": ["c_suite", "vp", "head"],
+                                "organization_locations": ["United States"],
+                                "employee_ranges": ["51,200", "201,500"],
+                                "threshold": settings.ICP_SCORE_THRESHOLD,
+                                "enrich_limit": getattr(settings, "APOLLO_ENRICH_LIMIT", 10),
+                                "candidate_pool_size": getattr(settings, "APOLLO_CANDIDATE_POOL_SIZE", 150),
+                                "user_id": auth_user_id,
                             }
 
                     raw_result = await ProspectAgent(db).run(cfg)
@@ -157,9 +162,11 @@ def run_agent_node(
                         or previous.get("inserted_contact_ids")
                         or []
                     )
+                    user_input_id = payload_data.get("user_input_id") or previous.get("user_input_id")
 
                     raw_result = await SignalAgent(db).run(
-                        contact_ids
+                        contact_ids,
+                        user_input_id=user_input_id
                     )
 
                 elif current_agent_id == "A3":
@@ -189,7 +196,7 @@ def run_agent_node(
                     )
 
                 elif current_agent_id == "A7":
-                    raw_result = await RevenueAgent(db).run()
+                    raw_result = await RevenueAgent(db).run(user_id=auth_user_id)
 
                 else:
                     raise ValueError(

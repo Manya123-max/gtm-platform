@@ -1,9 +1,34 @@
 import axios from 'axios'
 
-const API_URL = ''
+export function resolveApiBaseUrl(envUrl, isProd) {
+  // If running in browser on localhost or local network, always use local proxy /api/v1
+  if (typeof window !== 'undefined' && window.location) {
+    const host = window.location.hostname
+    if (host === 'localhost' || host === '127.0.0.1' || host === '0.0.0.0' || host.startsWith('192.168.') || host.endsWith('.local')) {
+      return '/api/v1'
+    }
+  }
+
+  const trimmed = (envUrl || '').trim()
+  const base = trimmed || (isProd ? 'https://gtm-platform-3tp6.onrender.com' : '')
+  const clean = base.replace(/\/+$/, '')
+  if (!clean) {
+    return '/api/v1'
+  }
+  if (clean.endsWith('/api/v1')) {
+    return clean
+  }
+  if (clean.endsWith('/api')) {
+    return `${clean}/v1`
+  }
+  return `${clean}/api/v1`
+}
+
+export const API_URL = import.meta.env.VITE_API_URL || ''
+export const API_BASE_URL = resolveApiBaseUrl(import.meta.env.VITE_API_URL, import.meta.env.PROD)
 
 const api = axios.create({
-  baseURL: `${API_URL}/api/v1`,
+  baseURL: API_BASE_URL,
   headers: {
     'Content-Type': 'application/json',
     Accept: 'application/json',
@@ -19,9 +44,23 @@ function errorMessage(error) {
   return error?.response?.data?.message || error?.message || 'Unexpected API error'
 }
 
+// Attach the Bearer token to every request
+api.interceptors.request.use(config => {
+  const token = localStorage.getItem('gtm_access_token')
+  if (token) config.headers.Authorization = `Bearer ${token}`
+  return config
+})
+
 api.interceptors.response.use(
   response => response,
   error => {
+    // Session expired / invalid → clear local session and let the router
+    // redirect to /login. Auth endpoints themselves don't use this instance.
+    if (error?.response?.status === 401) {
+      localStorage.removeItem('gtm_access_token')
+      localStorage.removeItem('gtm_refresh_token')
+      window.dispatchEvent(new CustomEvent('auth:unauthorized'))
+    }
     const normalized = new Error(errorMessage(error))
     normalized.status = error?.response?.status
     normalized.data = error?.response?.data
@@ -33,10 +72,14 @@ const unwrap = request => request.then(response => response.data)
 
 export const fetchOverview = (user_input_id) => unwrap(api.get('/dashboard/overview', { params: user_input_id ? { user_input_id } : {} }))
 export const fetchContacts = (params = {}) => unwrap(api.get('/contacts', { params }))
+export const fetchTierSummary = (user_input_id) => unwrap(api.get('/contacts/tier-summary', { params: user_input_id ? { user_input_id } : {} }))
 export const fetchContact = id => unwrap(api.get(`/contacts/${id}`))
 export const fetchThread = id => unwrap(api.get(`/contacts/${id}/thread`))
 export const fetchSignals = id => unwrap(api.get(`/contacts/${id}/signals`))
+export const summarizeSignals = id => unwrap(api.post(`/contacts/${id}/summarize-signals`))
+export const syncContactToSalesforce = id => unwrap(api.post(`/contacts/${id}/sync-salesforce`))
 export const fetchDeals = (params = {}) => unwrap(api.get('/deals', { params }))
+export const fetchDeal = id => unwrap(api.get(`/deals/${id}`))
 export const fetchPipelineSummary = (user_input_id) => unwrap(api.get('/deals/pipeline-summary', { params: user_input_id ? { user_input_id } : {} }))
 export const fetchPendingActions = (params = {}) => unwrap(api.get('/pending-actions', { params }))
 export const approveAction = (id, approvedBy) => unwrap(api.post(`/pending-actions/${id}/approve`, { approved_by: approvedBy }))
@@ -52,7 +95,10 @@ export const rejectOutreachDraft = id => unwrap(api.post(`/drafts/${id}/reject`)
 export const editOutreachDraft = (id, subject, body) => unwrap(api.post(`/drafts/${id}/edit`, { subject, body }))
 export const previewOutreachDraft = id => unwrap(api.get(`/drafts/${id}/preview`))
 export const fetchOutreachAnalytics = () => unwrap(api.get('/dashboard/outreach-analytics'))
+export const submitInput = (payload) => unwrap(api.post('/submit-input', payload))
 export const fetchInputHistory = () => unwrap(api.get('/input-history'))
+export const deleteInputHistory = (id) => unwrap(api.delete(`/input-history/${id}`))
+export const deleteAllInputHistory = () => unwrap(api.delete('/input-history'))
 export const fetchActiveSession = () => unwrap(api.get('/active-session'))
 
 // Legacy endpoint retained for A4 development test mode.
@@ -113,3 +159,29 @@ export default api
 export const fetchAgentSchedules = () => unwrap(api.get('/agents/schedule'))
 export const updateAgentSchedule = (agent, enabled, cron = null) =>
   unwrap(api.post('/agents/schedule', { agent, enabled, cron }))
+
+export const fetchNotifications = (params = {}) => {
+  const queryParams = typeof params === 'object' ? params : (params ? { user_input_id: params } : {})
+  return unwrap(api.get('/notifications', { params: queryParams }))
+}
+export const markNotificationRead = id =>
+  unwrap(api.post(`/notifications/${id}/read`))
+export const markAllNotificationsRead = () =>
+  unwrap(api.post('/notifications/read-all'))
+// User & Integrations API
+export const fetchIntegrations = () => unwrap(api.get('/integrations'))
+export const getGoogleConnectUrl = () => unwrap(api.get('/integrations/google/connect'))
+export const disconnectGoogle = () => unwrap(api.post('/integrations/google/disconnect'))
+export const fetchUserSettings = () => unwrap(api.get('/user/settings'))
+export const updateUserSettings = data => unwrap(api.put('/user/settings', data))
+
+// Microsoft 365 (Production Company Email)
+export const getMicrosoftConnectUrl = () => unwrap(api.get('/integrations/microsoft/connect'))
+export const disconnectMicrosoft = () => unwrap(api.post('/integrations/microsoft/disconnect'))
+
+// Admin User Management (ADMIN role only)
+export const fetchAdminUsers = () => unwrap(api.get('/admin/users'))
+export const createAdminUser = (data) => unwrap(api.post('/admin/users', data))
+export const toggleAdminUserStatus = (userId, isActive) => unwrap(api.put(`/admin/users/${userId}/status`, { is_active: isActive }))
+export const updateAdminUserRole = (userId, role) => unwrap(api.put(`/admin/users/${userId}/role`, { role }))
+export const updateAdminUserCalMapping = (userId, data) => unwrap(api.put(`/admin/users/${userId}/cal-mapping`, data))

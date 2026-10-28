@@ -59,9 +59,11 @@ from sqlalchemy import select, and_, text, func
 from app.core.config import settings
 from app.models.models import (
     Deal, DealStageHistory, Contact, ConversationThread,
-    PendingAction, FunnelEvent, ActionStatus, DealStage, SignalEvent
+    PendingAction, FunnelEvent, ActionStatus, DealStage, SignalEvent,
+    UserInput, OutreachDraft
 )
 from app.services.llm_service import LLMService
+from app.services.salesforce_service import SalesforceService, SALESFORCE_STAGE_MAP
 from app.services.slack_service import SlackService
 
 logger = structlog.get_logger()
@@ -126,48 +128,51 @@ class DealAgent:
         self.llm = LLMService()
         self.slack = SlackService()
 
-    # ── HubSpot sync ────────────────────────────────────────────────────────
+    # ── Salesforce CRM Sync & Activity ──────────────────────────────────────
 
-    @property
-    def _hubspot_headers(self) -> Dict[str, str]:
-        return {
-            "Authorization": f"Bearer {settings.HUBSPOT_ACCESS_TOKEN}",
-            "Content-Type": "application/json",
-        }
-
-    async def sync_deals_from_hubspot(self) -> Dict[str, Any]:
+    async def sync_deals_from_salesforce(self) -> Dict[str, Any]:
         """
-        Pull active deals from HubSpot, upsert into `deals`, and write a
-        DealStageHistory row whenever a stage transition is detected. This is
-        the step that was entirely missing before — without it the deals
-        table stays empty and everything downstream has nothing to scan.
+        Pull active opportunities from Salesforce CRM (Sole CRM Source of Truth),
+        upsert into `deals`, and write a DealStageHistory row whenever a stage
+        transition is detected.
         """
-        if not settings.HUBSPOT_ACCESS_TOKEN:
-            return {"synced": 0, "created": 0, "updated": 0, "skipped": "no HUBSPOT_ACCESS_TOKEN configured"}
+        sf_service = SalesforceService()
+        if not sf_service.is_configured:
+            logger.info("A5: Salesforce CRM not configured (SALESFORCE_INSTANCE_URL/SALESFORCE_ACCESS_TOKEN unset). Skipping CRM sync.")
+            return {"synced": 0, "created": 0, "updated": 0, "skipped": "Salesforce CRM not configured"}
 
         created = 0
         updated = 0
         unchanged = 0
 
         try:
-            async with httpx.AsyncClient(timeout=20) as client:
-                raw_deals = await self._fetch_hubspot_deals(client)
-                for raw in raw_deals:
-                    contact_email = await self._get_associated_contact_email(client, raw["id"])
-                    _, was_created, was_stage_change = await self._upsert_deal(raw, contact_email)
-                    if was_created:
-                        created += 1
-                    elif was_stage_change:
-                        updated += 1
-                    else:
-                        unchanged += 1
+            raw_opps = await sf_service.sync_opportunities()
+            for opp in raw_opps:
+                contact_email = None
+                contact_id = opp.get("ContactId")
+                owner_email = opp.get("Owner", {}).get("Email")
+
+                # Try resolving contact by ContactId or Owner email
+                if contact_id:
+                    c_res = await self.db.execute(
+                        select(Contact).where(Contact.salesforce_contact_id == contact_id)
+                    )
+                    c = c_res.scalar_one_or_none()
+                    if c:
+                        contact_email = c.email
+
+                _, was_created, was_stage_change = await self._upsert_salesforce_deal(opp, contact_email)
+                if was_created:
+                    created += 1
+                elif was_stage_change:
+                    updated += 1
+                else:
+                    unchanged += 1
 
             await self.db.commit()
-        except httpx.HTTPStatusError as exc:
-            logger.error("HubSpot deal sync failed", status=exc.response.status_code, error=str(exc))
-            return {"synced": 0, "created": 0, "updated": 0, "error": str(exc)}
+            logger.info("A5 Salesforce CRM sync complete", created=created, updated=updated, unchanged=unchanged)
         except Exception as exc:
-            logger.error("HubSpot deal sync failed", error=str(exc))
+            logger.error("Salesforce deal sync failed", error=str(exc))
             return {"synced": 0, "created": 0, "updated": 0, "error": str(exc)}
 
         return {
@@ -177,76 +182,45 @@ class DealAgent:
             "unchanged": unchanged,
         }
 
-    async def _fetch_hubspot_deals(self, client: httpx.AsyncClient) -> List[Dict]:
-        """Raw HubSpot search call — deals not yet closed-lost."""
-        resp = await client.post(
-            f"{HUBSPOT_BASE}/crm/v3/objects/deals/search",
-            headers=self._hubspot_headers,
-            json={
-                "filterGroups": [{"filters": [
-                    {"propertyName": "dealstage", "operator": "NEQ", "value": "closedlost"}
-                ]}],
-                "properties": ["dealname", "amount", "dealstage", "closedate", "hubspot_owner_id"],
-                "limit": 100,
-            },
-        )
-        resp.raise_for_status()
-        return resp.json().get("results", [])
+    async def sync_deals_from_hubspot(self) -> Dict[str, Any]:
+        """
+        Backward-compatibility alias: redirects legacy HubSpot sync calls
+        to the Salesforce CRM sync service.
+        """
+        logger.info("A5: sync_deals_from_hubspot called (legacy alias) -> delegating to sync_deals_from_salesforce")
+        return await self.sync_deals_from_salesforce()
 
-    async def _get_associated_contact_email(
-        self, client: httpx.AsyncClient, hubspot_deal_id: str
-    ) -> Optional[str]:
-        """Best-effort lookup of the first associated contact's email."""
-        try:
-            assoc_resp = await client.get(
-                f"{HUBSPOT_BASE}/crm/v3/objects/deals/{hubspot_deal_id}/associations/contacts",
-                headers=self._hubspot_headers,
-            )
-            assoc_resp.raise_for_status()
-            results = assoc_resp.json().get("results", [])
-            if not results:
-                return None
-            contact_id = results[0]["id"]
-
-            contact_resp = await client.get(
-                f"{HUBSPOT_BASE}/crm/v3/objects/contacts/{contact_id}",
-                headers=self._hubspot_headers,
-                params={"properties": "email"},
-            )
-            contact_resp.raise_for_status()
-            return contact_resp.json().get("properties", {}).get("email")
-        except Exception as e:
-            logger.warning("Could not resolve HubSpot deal contact", deal_id=hubspot_deal_id, error=str(e))
-            return None
-
-    async def _upsert_deal(
-        self, raw: Dict, contact_email: Optional[str]
+    async def _upsert_salesforce_deal(
+        self, opp: Dict[str, Any], contact_email: Optional[str]
     ) -> Tuple[Deal, bool, bool]:
         """
-        Create or update a Deal from a raw HubSpot deal object.
+        Create or update a Deal from a raw Salesforce Opportunity object.
         Returns (deal, was_created, was_stage_change).
         """
-        props = raw.get("properties", {})
-        hs_id = raw["id"]
+        opp_id = opp["Id"]
+        opp_name = opp.get("Name") or "Untitled Salesforce Opportunity"
         now = datetime.utcnow()
 
-        raw_stage = props.get("dealstage")
-        mapped_stage = HUBSPOT_STAGE_MAP.get(raw_stage, raw_stage or DealStage.PROSPECTING)
-        outcome = "won" if mapped_stage == DealStage.CLOSED_WON else \
-                  "lost" if mapped_stage == DealStage.CLOSED_LOST else None
+        raw_stage = opp.get("StageName", "")
+        mapped_stage = SALESFORCE_STAGE_MAP.get(raw_stage, DealStage.PROSPECTING)
+        outcome = "won" if mapped_stage == DealStage.CLOSED_WON else                   "lost" if mapped_stage == DealStage.CLOSED_LOST else None
 
+        raw_amount = opp.get("Amount")
         amount = None
-        if props.get("amount"):
+        amount_source = "Not provided"
+        if raw_amount is not None:
             try:
-                amount = float(props["amount"])
+                amount = float(raw_amount)
+                amount_source = "Salesforce"
             except (TypeError, ValueError):
                 amount = None
+                amount_source = "Not provided"
 
         close_date = None
-        if props.get("closedate"):
+        if opp.get("CloseDate"):
             try:
-                close_date = datetime.utcfromtimestamp(int(props["closedate"]) / 1000)
-            except (TypeError, ValueError):
+                close_date = datetime.strptime(opp["CloseDate"], "%Y-%m-%d")
+            except Exception:
                 close_date = None
 
         contact_id = None
@@ -256,17 +230,26 @@ class DealAgent:
             if contact:
                 contact_id = contact.id
 
-        existing_result = await self.db.execute(select(Deal).where(Deal.hubspot_deal_id == hs_id))
+        owner_email = opp.get("Owner", {}).get("Email")
+
+        # Find existing deal by salesforce_opportunity_id or legacy hubspot_deal_id
+        existing_result = await self.db.execute(
+            select(Deal).where(
+                (Deal.salesforce_opportunity_id == opp_id) | (Deal.hubspot_deal_id == opp_id)
+            )
+        )
         existing = existing_result.scalar_one_or_none()
 
         if not existing:
             deal = Deal(
-                hubspot_deal_id=hs_id,
+                salesforce_opportunity_id=opp_id,
                 contact_id=contact_id,
-                name=props.get("dealname") or "Untitled Deal",
+                name=opp_name,
                 stage=mapped_stage,
                 amount=amount,
+                amount_source=amount_source,
                 close_date=close_date,
+                owner_email=owner_email,
                 outcome=outcome,
                 stage_entered_at=now,
                 days_in_current_stage=0,
@@ -287,9 +270,13 @@ class DealAgent:
             existing.stage_entered_at = now
             existing.days_in_current_stage = 0
 
-        existing.name = props.get("dealname") or existing.name
-        existing.amount = amount if amount is not None else existing.amount
+        existing.salesforce_opportunity_id = opp_id
+        existing.name = opp_name or existing.name
+        if amount is not None:
+            existing.amount = amount
+            existing.amount_source = "Salesforce"
         existing.close_date = close_date or existing.close_date
+        existing.owner_email = owner_email or existing.owner_email
         existing.outcome = outcome
         if contact_id and not existing.contact_id:
             existing.contact_id = contact_id
@@ -297,32 +284,17 @@ class DealAgent:
 
         return existing, False, stage_changed
 
+    async def _log_salesforce_activity(self, deal: Deal, body: str) -> bool:
+        """Log a call summary as an activity Task on the Salesforce Opportunity."""
+        opp_id = deal.salesforce_opportunity_id or deal.hubspot_deal_id
+        if not opp_id:
+            return False
+        sf_service = SalesforceService()
+        return await sf_service.log_activity(opp_id, "GTM Call Intelligence Note", body)
+
     async def _log_hubspot_note(self, deal: Deal, body: str) -> bool:
-        """Log a call summary as a HubSpot note on the deal. Inline, matching A1's
-        direct-httpx style rather than a separate service wrapper."""
-        if not settings.HUBSPOT_ACCESS_TOKEN or not deal.hubspot_deal_id:
-            return False
-        try:
-            async with httpx.AsyncClient(timeout=15) as client:
-                resp = await client.post(
-                    f"{HUBSPOT_BASE}/crm/v3/objects/notes",
-                    headers=self._hubspot_headers,
-                    json={"properties": {
-                        "hs_note_body": body,
-                        "hs_timestamp": str(int(datetime.utcnow().timestamp() * 1000)),
-                    }},
-                )
-                resp.raise_for_status()
-                note_id = resp.json().get("id")
-                if note_id:
-                    await client.put(
-                        f"{HUBSPOT_BASE}/crm/v3/objects/notes/{note_id}/associations/deals/{deal.hubspot_deal_id}/note_to_deal",
-                        headers=self._hubspot_headers,
-                    )
-                return True
-        except Exception as e:
-            logger.error("HubSpot note log failed", error=str(e))
-            return False
+        """Backward-compatible wrapper: delegates to Salesforce activity logging."""
+        return await self._log_salesforce_activity(deal, body)
 
     # ── Entry points ─────────────────────────────────────────────────────────
 
@@ -338,9 +310,9 @@ class DealAgent:
         deal, contact = await self._match_to_deal(attendees, meeting_title)
 
         if deal:
-            logger.info("A5: Matched transcript to HubSpot Deal", deal_id=deal.id, deal_name=deal.name)
+            logger.info("A5: Matched transcript to Salesforce Deal", deal_id=deal.id, deal_name=deal.name)
         else:
-            logger.info("A5: No matching HubSpot Deal found for transcript", transcript_id=transcript_id)
+            logger.info("A5: No matching Salesforce Deal found for transcript", transcript_id=transcript_id)
 
         extraction = await self._extract_from_transcript(transcript_text, meeting_title, contact)
         logger.info("A5: AI transcript extraction completed", transcript_id=transcript_id, sentiment=extraction.get("sentiment"))
@@ -360,8 +332,8 @@ class DealAgent:
                         budget_confirmed=deal.budget_confirmed,
                         timeline_confirmed=deal.timeline_confirmed)
 
-        if deal and settings.HUBSPOT_ACCESS_TOKEN:
-            await self._log_hubspot_note(deal, self._format_crm_note(extraction))
+        if deal:
+            await self._log_salesforce_activity(deal, self._format_crm_note(extraction))
 
         await self._log_funnel_event("transcript_processed", {
             "transcript_id": transcript_id,
@@ -378,36 +350,217 @@ class DealAgent:
             "deal_summary": self._build_deal_summary(deal, extraction, risk_flags) if deal else None,
         }
 
+    def _generate_simulated_fireflies_transcript(
+        self,
+        contact: Contact,
+        threads: List[ConversationThread],
+        vendor_company: str = "4CECloud labs",
+        vendor_services: str = "Core Salesforce Services, CRM Integration, AI Consulting, Data Cloud"
+    ) -> Tuple[str, str]:
+        """
+        Generate a realistic simulated Fireflies discovery/architecture call transcript
+        based on the prospect's real company, role, industry, and vendor services.
+        Returns (meeting_title, transcript_text).
+        """
+        full_name = f"{contact.first_name or ''} {contact.last_name or ''}".strip() or "Prospect"
+        title = contact.title or "Technology & Operations Leader"
+        company = contact.company or "Enterprise Prospect"
+        industry = contact.industry or "Technology"
+        meeting_title = f"{company} — Technical Discovery & CRM Architecture Review"
+
+        # Domain specific nuance for key enterprise prospects
+        comp_lower = company.lower()
+        if "thomas scientific" in comp_lower:
+            biz_context = "scientific supplies distribution and research lab operations"
+            pain_context = "synchronizing our enterprise Salesforce instance with our legacy warehouse ERP and supply-chain catalog. Sales reps spend 15 hours weekly fixing sync discrepancies"
+            security_req = "SOC2 Type II compliance and FDA CFR Part 11 validation guidelines for laboratory supply traceability"
+        elif "rhize" in comp_lower:
+            biz_context = "manufacturing data hub and industrial edge telemetry"
+            pain_context = "bridging plant-floor manufacturing metrics into our Salesforce pipeline for real-time customer account health monitoring"
+            security_req = "SOC2 Type II certification, IEC 62443 industrial security standards, and strict on-premise data residency"
+        elif "yodlee" in comp_lower:
+            biz_context = "financial data aggregation and Open Banking infrastructure"
+            pain_context = "scaling our Salesforce Financial Services Cloud (FSC) rollout and automating multi-entity account onboarding flows"
+            security_req = "SOC2 Type II, ISO 27001, and GLBA financial data privacy mandates"
+        elif "api connects" in comp_lower:
+            biz_context = "enterprise API integration and middleware consulting"
+            pain_context = "building high-throughput Salesforce middleware connectors for ANZ enterprise clients without bloating maintenance overhead"
+            security_req = "SOC2 Type II audit report and regional data sovereignty in Australia/New Zealand"
+        elif "paradise mobile" in comp_lower:
+            biz_context = "next-gen telecom network and cloud-native mobile services"
+            pain_context = "integrating telecom OSS/BSS subscriber provisioning directly into our Salesforce CRM for automated enterprise billing"
+            security_req = "SOC2 Type II compliance and telecom data privacy compliance"
+        elif "updater services" in comp_lower:
+            biz_context = "integrated facility management and enterprise workforce services"
+            pain_context = "scaling our Salesforce administrator bandwidth and automating field operations dispatch workflows across regional centers"
+            security_req = "SOC2 Type II compliance and ISO 9001 quality management standards"
+        else:
+            biz_context = f"{industry} operations"
+            pain_context = f"disjointed workflows between Salesforce CRM, internal operational databases, and automated reporting. Manual re-entry is costing our team significant engineering hours"
+            security_req = "SOC2 Type II compliance certification and end-to-end AES-256 data encryption in transit and at rest"
+
+        transcript_text = f"""[00:00] Alex Miller (Sales & Solutions Lead, {vendor_company}):
+Hi {contact.first_name}, thanks so much for taking the time to join today's discovery session. Following up on our email discussion regarding {vendor_services}, I wanted to dive into {company}'s current architecture and explore where your team is seeing operational friction.
+
+[00:50] {full_name} ({title}, {company}):
+Thanks for organizing this, Alex. Yeah, at {company}, we are rapidly scaling our {biz_context}, and our current tech stack is running into real bottlenecks. Specifically, we are dealing with {pain_context}.
+
+[02:15] Alex Miller (Sales & Solutions Lead, {vendor_company}):
+That is a very common challenge across growing enterprise teams. How are your engineering and operations teams currently handling that pipeline?
+
+[03:10] {full_name} ({title}, {company}):
+Right now it's heavily fragmented and requires ongoing manual maintenance. We actually evaluated alternatives like MuleSoft and Zapier Enterprise last quarter. MuleSoft's licensing and implementation overhead was far too heavy for our scope, and Zapier lacked the custom enterprise compliance controls and bi-directional depth we need.
+
+[04:40] Alex Miller (Sales & Solutions Lead, {vendor_company}):
+That makes total sense. That's exactly where {vendor_company} comes in. We deliver direct Salesforce integration, automated CRM pipelines, and intelligent AI workflows that bridge your operational systems seamlessly without heavyweight middleware overhead. In terms of team and decision making, who else on your side will be involved in evaluating and approving this?
+
+[05:55] {full_name} ({title}, {company}):
+As {title}, I oversee our engineering and operational systems budget. Final sign-off will be between myself and our VP of Operations / Chief Revenue Officer. If your platform passes our architectural review and security checks, we hold the authority to approve the engagement.
+
+[07:05] Alex Miller (Sales & Solutions Lead, {vendor_company}):
+Understood. What does your timeline and budget allocation look like for kicking off this initiative?
+
+[07:50] {full_name} ({title}, {company}):
+We have an approved budget of approximately $50,000 to $75,000 allocated for this project this fiscal year. On timing, we want to kick off implementation in Q3 and have the first production milestone live within 4 to 6 weeks so our teams are ready for the next quarter.
+
+[09:00] {full_name} ({title}, {company}):
+One critical requirement from our side though: our SecOps team has strict compliance mandates. We will need to review your {security_req} before signing the final MSA.
+
+[10:10] Alex Miller (Sales & Solutions Lead, {vendor_company}):
+Absolutely. We maintain strict SOC2 Type II compliance and AES-256 encryption across all data pipelines. I will send over our complete security whitepaper, SOC2 summary, and a formal draft Statement of Work by Thursday. Then we can schedule a 30-minute technical deep-dive with your SecOps and engineering leads next Tuesday at 2:00 PM.
+
+[11:05] {full_name} ({title}, {company}):
+That sounds great, Alex. That timeline works for us. Please send over the documents and the calendar invite for Tuesday.
+
+[11:35] Alex Miller (Sales & Solutions Lead, {vendor_company}):
+Will do! Thanks so much for your time today, {contact.first_name}. Looking forward to partnering with {company}.
+"""
+        return meeting_title, transcript_text.strip()
+
+    async def _identify_and_process_meeting_prospects(self) -> Dict[str, Any]:
+        """
+        Identify prospects who engaged in calendar/meeting emails or outreach,
+        generate a simulated Fireflies meeting transcript tailored to their
+        company/industry context, and process it through the AI extraction engine.
+        Disabled by default in production (requires A5_SIMULATION_MODE=True).
+        """
+        if not getattr(settings, "A5_SIMULATION_MODE", False):
+            logger.info("A5: Simulation mode disabled (A5_SIMULATION_MODE=False). Skipping synthetic Fireflies transcripts.")
+            return {"transcripts_processed": 0, "deals_created": 0}
+        logger.info("A5: Scanning prospects for meeting outreach and transcript generation")
+        user_input_res = await self.db.execute(select(UserInput).order_by(UserInput.id.desc()).limit(1))
+        user_input = user_input_res.scalar_one_or_none()
+        vendor_company = user_input.our_company_name if user_input and user_input.our_company_name else "4CECloud labs"
+        vendor_services = user_input.our_services if user_input and user_input.our_services else "Core Salesforce Services, CRM Integration, AI Consulting, Data Cloud"
+
+        # Find contacts with conversation threads (both inbound and outbound)
+        contacts_res = await self.db.execute(
+            select(Contact).join(ConversationThread, ConversationThread.contact_id == Contact.id).distinct()
+        )
+        thread_contacts = list(contacts_res.scalars().all())
+
+        # Also find contacts with outreach drafts
+        draft_contacts_res = await self.db.execute(
+            select(Contact).join(OutreachDraft, OutreachDraft.contact_id == Contact.id).distinct()
+        )
+        draft_contacts = list(draft_contacts_res.scalars().all())
+
+        candidate_map: Dict[str, Contact] = {}
+        for c in thread_contacts + draft_contacts:
+            if c and c.company and c.company.lower() not in ("inbound company", "unknown") and c.email:
+                candidate_map[c.id] = c
+
+        processed_count = 0
+        deals_created_count = 0
+
+        for contact_id, contact in candidate_map.items():
+            threads_res = await self.db.execute(
+                select(ConversationThread)
+                .where(ConversationThread.contact_id == contact.id)
+                .order_by(ConversationThread.occurred_at.asc())
+            )
+            threads = list(threads_res.scalars().all())
+
+            # Qualifying signals: meeting request, inbound email, demo/calendar/outreach keywords
+            has_meeting_intent = any(
+                t.intent == "meeting_request" or
+                any(k in (t.content or "").lower() for k in ["meeting", "demo", "call", "calendar", "connect", "sync", "15-min"])
+                for t in threads
+            )
+            has_inbound = any(t.direction == "inbound" for t in threads)
+            has_outreach = len(threads) > 0
+
+            if not (has_meeting_intent or has_inbound or has_outreach):
+                continue
+
+            # Generate simulated Fireflies transcript
+            meeting_title, transcript_text = self._generate_simulated_fireflies_transcript(
+                contact=contact,
+                threads=threads,
+                vendor_company=vendor_company,
+                vendor_services=vendor_services,
+            )
+
+            # Check if deal already exists for this contact and is already evaluated
+            existing_deal_res = await self.db.execute(
+                select(Deal).where(and_(Deal.contact_id == contact.id, Deal.outcome.is_(None)))
+            )
+            existing_deal = existing_deal_res.scalars().first()
+            if existing_deal and existing_deal.deal_health_score is not None:
+                continue
+
+            webhook_payload = {
+                "transcriptId": f"ff_{contact.id[:8]}_{int(datetime.utcnow().timestamp())}",
+                "title": meeting_title,
+                "attendees": [
+                    {"email": contact.email, "name": f"{contact.first_name} {contact.last_name}"},
+                    {"email": "alex.miller@4cecloudlabs.com", "name": "Alex Miller"}
+                ],
+                "transcript": transcript_text,
+            }
+
+            logger.info("A5: Processing simulated Fireflies transcript for prospect",
+                        contact=f"{contact.first_name} {contact.last_name}",
+                        company=contact.company)
+
+            result = await self.process_transcript(webhook_payload)
+            processed_count += 1
+            if not existing_deal and result.get("deal_matched"):
+                deals_created_count += 1
+
+        await self.db.commit()
+        return {
+            "transcripts_processed": processed_count,
+            "deals_created": deals_created_count,
+        }
+
     async def run_daily_deal_scan(self) -> Dict[str, Any]:
         """
-        Nightly scan: sync fresh deal data from HubSpot first (best-effort),
-        then re-check every open deal against risk patterns, even without a
-        new transcript.
+        Comprehensive deal scan:
+        1. Identify prospects who engaged in calendar/meeting emails and process Fireflies call transcripts.
+        2. Sync deals from HubSpot (best-effort).
+        3. Re-evaluate all active deals against risk patterns and compute AI deal health and win probability.
         """
         logger.info("A5 running daily deal scan")
 
-        sync_result = await self.sync_deals_from_hubspot()
-        logger.info("A5 HubSpot sync complete", **sync_result)
+        # Step 1: Process Fireflies transcripts for engaged meeting/calendar prospects (only when simulation mode is enabled)
+        if getattr(settings, "A5_SIMULATION_MODE", False):
+            logger.info("A5: [SIMULATED] Running simulated Fireflies transcript processing (A5_SIMULATION_MODE=True)")
+            meeting_result = await self._identify_and_process_meeting_prospects()
+            logger.info("A5: [SIMULATED] Meeting prospect transcripts processed", **meeting_result)
+        else:
+            logger.info("A5: Production mode active (A5_SIMULATION_MODE=False). Skipping synthetic Fireflies transcripts.")
+            meeting_result = {"transcripts_processed": 0, "deals_created": 0}
 
-        # Only scan active deals that have supporting data (conversation history, transcripts, or CRM stage history)
+        # Step 2: Sync fresh deals from Salesforce CRM (Sole CRM source of truth)
+        sync_result = await self.sync_deals_from_salesforce()
+        logger.info("A5 Salesforce CRM sync complete", **sync_result)
+
+        # Step 3: Scan all active deals in the system
         deals_result = await self.db.execute(
-            select(Deal).where(
-                and_(
-                    Deal.outcome.is_(None),
-                    Deal.contact_id.isnot(None),
-                )
-            )
+            select(Deal).where(Deal.outcome.is_(None))
         )
-        all_deals = list(deals_result.scalars().all())
-        
-        # Filter to deals with actual conversation or stage progression history
-        deals = []
-        for d in all_deals:
-            has_threads = await self.db.scalar(
-                select(func.count(ConversationThread.id)).where(ConversationThread.contact_id == d.contact_id)
-            )
-            if (has_threads and has_threads > 0) or d.days_in_current_stage > 0:
-                deals.append(d)
+        deals = list(deals_result.scalars().all())
 
         flagged = 0
         for deal in deals:
@@ -434,17 +587,14 @@ class DealAgent:
 
         return {
             "agent": "A5",
+            "transcripts_processed": meeting_result.get("transcripts_processed", 0),
+            "deals_created": meeting_result.get("deals_created", 0),
+            "salesforce_sync": sync_result,
             "hubspot_sync": sync_result,
             "deals_scanned": len(deals),
             "deals_flagged": flagged,
             "pending_actions": len(pending),
-            "reason": (
-                "No active deals found — check HUBSPOT_ACCESS_TOKEN and that deals exist in your pipeline"
-                if not deals else
-                "No risk patterns detected"
-                if flagged == 0 else
-                "Risk actions created for review"
-            ),
+            "reason": f"Processed {meeting_result.get('transcripts_processed', 0)} meeting transcripts, scanned {len(deals)} deals ({flagged} flagged).",
         }
 
     async def _extract_from_transcript(
@@ -496,8 +646,11 @@ If a field is unclear, use null. Do not invent information not in the transcript
             )
             # Safe JSON parse
             import json
+            if isinstance(raw_result, dict):
+                return raw_result
             if isinstance(raw_result, str):
-                return json.loads(raw_result)
+                cleaned = _clean_json_str(raw_result)
+                return json.loads(cleaned)
             return raw_result
         except Exception as e:
             logger.error("Transcript extraction failed", error=str(e))
@@ -811,8 +964,8 @@ If a field is unclear, use null. Do not invent information not in the transcript
             )
             thread_events = list(result.scalars().all())
 
-            # Automatically extract BANT details from email conversation history if available
-            if thread_events:
+            # Automatically extract BANT details from email conversation history if not already analyzed
+            if thread_events and (deal.budget_confirmed is None or deal.deal_health_score is None):
                 thread_text = "\n".join([
                     f"{'Sales Rep' if t.direction == 'outbound' else 'Prospect'}: {t.content or ''}"
                     for t in thread_events
@@ -964,11 +1117,21 @@ If a field is unclear, use null. Do not invent information not in the transcript
         """Send immediate Slack notification when a new high-severity risk is identified."""
         if not settings.ENABLE_SLACK_APPROVALS and settings.NOTIFICATION_PROVIDER != "slack":
             return
-        lines = [f"*🚨 Immediate Risk Alert for Deal: {deal.name}* (Stage: {deal.stage})\n"]
+        if not settings.SLACK_BOT_TOKEN:
+            return
+
+        lines = [f"🔴 *Immediate Risk Alert — {deal.name}*"]
+        if deal.owner_email:
+            lines.append(f"Owner: {deal.owner_email}")
+        lines.append(f"Stage: {deal.stage} | ${deal.amount:,.0f}" if deal.amount else f"Stage: {deal.stage}")
         for r in high_risks:
-            lines.append(f"• *{r.get('type', 'Risk').replace('_', ' ').title()}*: {r.get('description', '')}")
-            if r.get('recommended_action'):
-                lines.append(f"  → _Action:_ {r['recommended_action']}")
+            r_type = str(r.get("type", "Risk")).replace("_", " ").title()
+            desc = r.get("description", "")
+            action = r.get("recommended_action", "")
+            lines.append(f"\n• *{r_type}*: {desc}")
+            if action:
+                lines.append(f"   → _Action:_ {action}")
+
         await self.slack.send_alert("\n".join(lines))
 
     async def _evaluate_deal_with_ai(
@@ -985,7 +1148,7 @@ If a field is unclear, use null. Do not invent information not in the transcript
         ]) if thread_events else "No prior conversation thread history."
 
         prompt = f"""You are a senior enterprise Sales Operations & Deal Intelligence AI.
-Analyze this HubSpot Deal opportunity and provide a deep intelligence evaluation.
+Analyze this Salesforce Deal opportunity and provide a deep intelligence evaluation.
 
 Opportunity Details:
 - Name: {deal.name}
@@ -996,7 +1159,7 @@ Opportunity Details:
 - Meeting count: {deal.meeting_count or 0}
 - Stakeholder count: {deal.stakeholder_count or 1}
 - Buying Intent (AI-detected): {deal.buying_intent or "unknown"}
-- Contact Readiness Score (from Agent 4 Outreach): {deal.contact.readiness_score if (deal.contact or contact) else 0.0}
+- Contact Readiness Score (from Agent 4 Outreach): {deal.contact.readiness_score if getattr(deal, "contact", None) else 0.0}
 
 BANT Checklist (AI-detected):
 - Budget Confirmed: {deal.budget_confirmed}
@@ -1068,31 +1231,6 @@ Return ONLY valid JSON. Do not write markdown blocks or text wrapper."""
                 "risk_evaluations": risk_flags
             }
 
-    async def _send_immediate_risk_alert(self, deal: Deal, new_high_risks: List[Dict]):
-        """
-        Immediate Slack ping for a newly-detected high-severity risk.
-        Inline httpx, matching this file's style for HubSpot calls, rather
-        than adding a method to the shared SlackService — this alert format
-        is A5-specific and only used here.
-        """
-        if not settings.SLACK_BOT_TOKEN:
-            return
-        lines = [f"🔴 *New high-risk flag — {deal.name}*"]
-        if deal.owner_email:
-            lines.append(f"Owner: {deal.owner_email}")
-        lines.append(f"Stage: {deal.stage} | ${deal.amount:,.0f}" if deal.amount else f"Stage: {deal.stage}")
-        for f in new_high_risks:
-            lines.append(f"\n• {f['description']}\n   → {f['recommended_action']}")
-        try:
-            async with httpx.AsyncClient(timeout=10) as client:
-                await client.post(
-                    "https://slack.com/api/chat.postMessage",
-                    headers={"Authorization": f"Bearer {settings.SLACK_BOT_TOKEN}"},
-                    json={"channel": settings.SLACK_APPROVAL_CHANNEL, "text": "\n".join(lines)},
-                )
-        except Exception as e:
-            logger.error("Immediate risk alert failed", deal_id=deal.id, error=str(e))
-
     async def _update_deal(self, deal: Deal, extraction: Dict):
         logger.info("A5: Updating deal signals and parameters", deal_id=deal.id)
         bant = extraction.get("bant_signals", {})
@@ -1106,19 +1244,120 @@ Return ONLY valid JSON. Do not write markdown blocks or text wrapper."""
         if extraction.get("stage_confidence") is not None:
             deal.stage_confidence = extraction["stage_confidence"]
         deal.objections = extraction.get("objections", [])
+        # Set amount and amount_source from extraction or CRM
+        extracted_amount = extraction.get("deal_amount") or extraction.get("budget_amount")
+        if extracted_amount and isinstance(extracted_amount, (int, float)) and extracted_amount > 0:
+            deal.amount = float(extracted_amount)
+            deal.amount_source = "Prospect conversation"
+        elif (deal.salesforce_opportunity_id or deal.hubspot_deal_id) and not deal.amount_source:
+            deal.amount_source = "Salesforce"
+        elif not deal.amount_source:
+            deal.amount_source = "Not provided"
+        elif not deal.amount_source:
+            deal.amount_source = "Not provided"
+
         deal.updated_at = datetime.utcnow()
         await self.db.commit()
         logger.info("A5: Deal signals updated successfully", deal_id=deal.id)
 
+    async def _resolve_deal_owner_email(
+        self,
+        contact: Optional[Contact] = None,
+        attendee_emails: Optional[List[str]] = None,
+    ) -> Optional[str]:
+        """
+        Dynamically resolves the Deal Owner email from the authenticated user context.
+        Priority:
+        1. If attendee_emails are provided from the call transcript (e.g. Fireflies),
+           check if any attendee matches an active registered User in the platform.
+        2. If contact is linked to a user (contact.user_id), look up that User's email.
+        3. If contact is linked to a user_input (contact.user_input_id), look up the User's email for that intake form.
+        4. Look up the user who submitted the most recent UserInput session.
+        5. Look up the most recently registered active User in the database.
+        6. Explicit configured environment fallback (settings.DEAL_OWNER_EMAIL or settings.NOTIFICATION_EMAIL).
+        7. If none found, log a warning and return None (never invent placeholder fallbacks).
+        """
+        from app.models.models import User, UserInput
+
+        # 1. Check if any attendee in the meeting transcript is an active registered platform user (e.g. rep on the call)
+        if attendee_emails:
+            clean_emails = [e.strip().lower() for e in attendee_emails if e and "@" in e]
+            if clean_emails:
+                res = await self.db.execute(
+                    select(User.email).where(
+                        User.email.in_(clean_emails),
+                        User.is_active == True,
+                    ).limit(1)
+                )
+                user_email = res.scalar_one_or_none()
+                if user_email:
+                    logger.info("A5: Resolved deal owner from call attendee", email=user_email)
+                    return user_email
+
+        # 2. Check if contact is owned by a specific user
+        if contact and getattr(contact, "user_id", None):
+            res = await self.db.execute(
+                select(User.email).where(User.id == contact.user_id, User.is_active == True)
+            )
+            user_email = res.scalar_one_or_none()
+            if user_email:
+                logger.info("A5: Resolved deal owner from contact.user_id", email=user_email)
+                return user_email
+
+        # 3. Check if contact is associated with a user_input that has an owner
+        if contact and getattr(contact, "user_input_id", None):
+            res = await self.db.execute(
+                select(User.email)
+                .join(UserInput, UserInput.user_id == User.id)
+                .where(UserInput.id == contact.user_input_id, User.is_active == True)
+            )
+            user_email = res.scalar_one_or_none()
+            if user_email:
+                logger.info("A5: Resolved deal owner from contact.user_input_id", email=user_email)
+                return user_email
+
+        # 4. Check the latest UserInput session that has an owner
+        res = await self.db.execute(
+            select(User.email)
+            .join(UserInput, UserInput.user_id == User.id)
+            .where(User.is_active == True)
+            .order_by(UserInput.id.desc())
+            .limit(1)
+        )
+        user_email = res.scalar_one_or_none()
+        if user_email:
+            logger.info("A5: Resolved deal owner from latest active UserInput", email=user_email)
+            return user_email
+
+        # 5. Check the most recent active User
+        res = await self.db.execute(
+            select(User.email).where(User.is_active == True).order_by(User.created_at.desc()).limit(1)
+        )
+        user_email = res.scalar_one_or_none()
+        if user_email:
+            logger.info("A5: Resolved deal owner from latest active User", email=user_email)
+            return user_email
+
+        # 6. Check environment settings fallback
+        env_fallback = getattr(settings, "DEAL_OWNER_EMAIL", None) or getattr(settings, "NOTIFICATION_EMAIL", None)
+        if env_fallback and env_fallback.strip():
+            logger.info("A5: Resolved deal owner from environment settings", email=env_fallback)
+            return env_fallback.strip()
+
+        # 7. Safe fail: log warning, do not invent placeholder
+        logger.warning("A5: Unable to resolve authenticated deal owner; setting owner_email to None")
+        return None
+
     async def _match_to_deal(
         self, attendees: List[Dict], title: str
     ) -> Tuple[Optional[Deal], Optional[Contact]]:
-        """Match Fireflies transcript to a deal via attendee email."""
+        """Match Fireflies transcript to a deal via attendee email, company name, or meeting title."""
         emails = [a.get("email", "") for a in attendees if a.get("email")]
         for email in emails:
             contact_result = await self.db.execute(select(Contact).where(Contact.email == email))
             contact = contact_result.scalar_one_or_none()
             if contact:
+                # 1. Match deal directly by contact_id
                 deal_result = await self.db.execute(
                     select(Deal).where(
                         and_(Deal.contact_id == contact.id, Deal.outcome.is_(None))
@@ -1127,6 +1366,54 @@ Return ONLY valid JSON. Do not write markdown blocks or text wrapper."""
                 deal = deal_result.scalars().first()
                 if deal:
                     return deal, contact
+
+                # 2. Match deal by contact's company name
+                if contact.company:
+                    comp_deal_result = await self.db.execute(
+                        select(Deal).where(
+                            and_(Deal.name.ilike(f"%{contact.company}%"), Deal.outcome.is_(None))
+                        ).order_by(Deal.updated_at.desc())
+                    )
+                    comp_deal = comp_deal_result.scalars().first()
+                    if comp_deal:
+                        if not comp_deal.contact_id:
+                            comp_deal.contact_id = contact.id
+                            await self.db.commit()
+                        return comp_deal, contact
+
+                # 3. If no active deal found for this contact, create one
+                new_deal = Deal(
+                    name=f"{contact.company or contact.first_name} — Enterprise Solution",
+                    contact_id=contact.id,
+                    stage=DealStage.DISCOVERY,
+                    amount=None,
+                    amount_source="Not provided",
+                    owner_email=await self._resolve_deal_owner_email(contact=contact, attendee_emails=emails),
+                )
+                self.db.add(new_deal)
+                await self.db.commit()
+                await self.db.refresh(new_deal)
+                return new_deal, contact
+
+        # 4. If no attendee email matched contact, search existing deals matching words in meeting title
+        if title:
+            clean_title = title.replace("—", "-").replace(":", "-").replace("|", "-")
+            for part in clean_title.split("-"):
+                part_clean = part.strip()
+                if len(part_clean) >= 3 and not any(skip in part_clean.lower() for skip in ["call", "demo", "review", "meeting", "sync", "pricing"]):
+                    deal_res = await self.db.execute(
+                        select(Deal).where(
+                            and_(Deal.name.ilike(f"%{part_clean}%"), Deal.outcome.is_(None))
+                        ).order_by(Deal.updated_at.desc())
+                    )
+                    deal = deal_res.scalars().first()
+                    if deal:
+                        contact = None
+                        if deal.contact_id:
+                            c_res = await self.db.execute(select(Contact).where(Contact.id == deal.contact_id))
+                            contact = c_res.scalar_one_or_none()
+                        return deal, contact
+
         return None, None
 
     async def _get_pending_actions(self) -> List[PendingAction]:
@@ -1190,11 +1477,14 @@ Return ONLY valid JSON. Do not write markdown blocks or text wrapper."""
 
 
 def _clean_json_str(s: str) -> str:
-    """Clean markdown code block wrappers from JSON string if present."""
+    """Clean markdown code block wrappers and find outermost JSON object."""
     s = s.strip()
-    if s.startswith("```"):
-        # Remove opening ```json or ```
-        s = s.split("\n", 1)[1]
-    if s.endswith("```"):
-        s = s.rsplit("\n", 1)[0]
+    if "```json" in s:
+        s = s.split("```json", 1)[1].split("```", 1)[0]
+    elif "```" in s:
+        s = s.split("```", 1)[1].split("```", 1)[0]
+    first_brace = s.find("{")
+    last_brace = s.rfind("}")
+    if first_brace != -1 and last_brace != -1 and last_brace > first_brace:
+        s = s[first_brace:last_brace+1]
     return s.strip()

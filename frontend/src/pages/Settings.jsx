@@ -233,7 +233,7 @@ export default function Settings() {
   }, [adminUsersData, user?.id, displayName, displayEmail, resolvedCalUsername, resolvedCalSlug])
 
   return (
-    <div className="max-w-6xl mx-auto space-y-7 pb-12">
+    <div className="w-full space-y-7 pb-12">
       {/* Page Header */}
       <div>
         <h1 className="text-2xl font-bold text-gray-900 tracking-tight">Profile &amp; Settings</h1>

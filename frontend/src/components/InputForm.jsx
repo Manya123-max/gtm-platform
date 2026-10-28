@@ -78,7 +78,7 @@ function InputForm() {
     };
 
     return (
-        <div className="max-w-5xl mx-auto space-y-6 pb-12 selection:bg-[#5B4EFF]/15">
+        <div className="w-full space-y-6 pb-12 selection:bg-[#5B4EFF]/15">
             {/* ── Page Header ── */}
             <div>
                 <h1 className="text-2xl font-bold text-[#111827] tracking-tight">

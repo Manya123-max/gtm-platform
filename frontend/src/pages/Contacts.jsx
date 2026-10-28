@@ -144,7 +144,7 @@ export default function Contacts() {
   }, [filteredContacts, currentPage, pageSize])
 
   return (
-    <div className="max-w-7xl mx-auto space-y-6 pb-12 selection:bg-[#5B4EFF]/15">
+    <div className="w-full space-y-6 pb-12 selection:bg-[#5B4EFF]/15">
       
       {/* ── Page Header ────────────────────────────────────────────── */}
       <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-4">
@@ -162,9 +162,9 @@ export default function Contacts() {
           type="button"
           onClick={handleRunFullGtm}
           disabled={isRunningGtm}
-          className="self-start sm:self-auto py-2.5 px-4.5 rounded-xl font-bold text-xs text-white bg-[#5B4EFF] hover:bg-[#4C3FF0] active:scale-[0.98] shadow-sm transition-all flex items-center gap-2 cursor-pointer disabled:opacity-60"
+          className="self-start sm:self-auto py-2.5 px-5 sm:px-6 rounded-xl font-semibold text-sm text-white bg-[#5B4EFF] hover:bg-[#4E41E6] active:scale-[0.98] shadow-sm transition-all flex items-center justify-center gap-2.5 cursor-pointer disabled:opacity-60 whitespace-nowrap"
         >
-          <Play size={12} className={isRunningGtm ? 'animate-spin' : 'fill-white text-white'} />
+          <Play size={14} className={isRunningGtm ? 'animate-spin' : 'fill-white text-white'} />
           <span>{isRunningGtm ? 'Running GTM...' : 'Run Full GTM'}</span>
         </button>
       </div>

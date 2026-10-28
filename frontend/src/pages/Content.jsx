@@ -138,7 +138,7 @@ export default function Content() {
   }
 
   return (
-    <div className="max-w-7xl mx-auto space-y-6 pb-12 font-sans">
+    <div className="w-full space-y-6 pb-12 font-sans">
       {/* Page Header */}
       <div className="flex items-start justify-between flex-wrap gap-4 pt-1">
         <div>

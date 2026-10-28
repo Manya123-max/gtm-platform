@@ -103,7 +103,7 @@ export default function Revenue() {
   }, [metrics])
 
   return (
-    <div className="max-w-7xl mx-auto space-y-6 pb-12 font-sans">
+    <div className="w-full space-y-6 pb-12 font-sans">
       {/* Page Header */}
       <div className="pt-1">
         <h1 className="text-2xl font-bold text-gray-900 tracking-tight">Revenue</h1>

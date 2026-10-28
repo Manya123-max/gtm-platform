@@ -9,7 +9,7 @@ from contextlib import asynccontextmanager
 from typing import Dict, Any, Optional
 from fastapi import FastAPI, Request, HTTPException, Depends, BackgroundTasks
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import JSONResponse
+from fastapi.responses import JSONResponse, RedirectResponse
 from pydantic import BaseModel
 import structlog
  
@@ -48,6 +48,14 @@ app = FastAPI(
 @app.get("/")
 async def root():
     return {"message": "GTM Platform API Running"}
+
+@app.get("/docs", include_in_schema=False)
+async def docs_redirect():
+    return RedirectResponse(url="/api/docs")
+
+@app.get("/redoc", include_in_schema=False)
+async def redoc_redirect():
+    return RedirectResponse(url="/api/redoc")
  
 # ── CORS ──────────────────────────────────────────────────────────────────
 app.add_middleware(

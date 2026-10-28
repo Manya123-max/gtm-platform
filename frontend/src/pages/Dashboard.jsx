@@ -140,7 +140,7 @@ export default function Dashboard() {
   const maxVal = Math.max(val90, val60, val30, 200000)
 
   return (
-    <div className="max-w-7xl mx-auto space-y-6 pb-12 selection:bg-[#5B4EFF]/15">
+    <div className="w-full space-y-6 pb-12 selection:bg-[#5B4EFF]/15">
       
       {/* ── Page Header ────────────────────────────────────────────── */}
       <div className="space-y-0.5">

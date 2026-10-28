@@ -195,30 +195,30 @@ export default function Layout() {
 
   return (
     <div className="flex h-screen overflow-hidden bg-[#F8F9FD]">
-      {/* ── Sidebar ──────────────────────────────────────────────── */}
-      <aside className="w-60 flex-shrink-0 flex flex-col justify-between bg-white border-r border-gray-100 z-20">
-        <div>
+      {/* ── Aside - Sidebar ────────────────────────────────────────── */}
+      <aside className="w-[211px] min-w-[211px] max-w-[211px] shrink-0 h-full min-h-[1024px] flex flex-col justify-between p-5 bg-[#FFFFFF] border-r border-[#EDF1F7] z-20 overflow-y-auto">
+        <div className="flex flex-col">
           {/* Brand Logo */}
-          <div className="px-6 pt-6 pb-6">
+          <div className="pb-5">
             <G2MLogo />
           </div>
 
           {/* Navigation Links */}
-          <nav className="px-4 space-y-1.5">
+          <nav className="space-y-1">
             {NAV.map(({ to, icon: Icon, label }) => (
               <NavLink
                 key={to}
                 to={to}
                 className={({ isActive }) =>
                   clsx(
-                    'flex items-center gap-3 px-3.5 py-2.5 rounded-2xl text-xs font-semibold transition-all',
+                    'flex items-center gap-2.5 px-3 py-2 rounded-2xl text-xs font-semibold transition-all',
                     isActive
-                      ? 'bg-[#ECE8FE] text-[#5B4EFF] shadow-sm'
+                      ? 'bg-[#ECE8FE] text-[#5B4EFF] shadow-2xs'
                       : 'text-gray-500 hover:text-gray-900 hover:bg-gray-50/80'
                   )
                 }
               >
-                <Icon size={17} strokeWidth={2.2} />
+                <Icon size={16} strokeWidth={2.2} />
                 <span>{label}</span>
               </NavLink>
             ))}
@@ -226,11 +226,11 @@ export default function Layout() {
         </div>
 
         {/* Bottom Sidebar: Agent Status pill button, user role & copyright */}
-        <div className="p-4 border-t border-gray-100 space-y-3">
+        <div className="pt-4 border-t border-[#EDF1F7] space-y-3">
           <button
             type="button"
             onClick={() => navigate('/agents')}
-            className="w-full py-2.5 px-4 bg-[#5B4EFF] hover:bg-[#4C3FF0] active:scale-[0.98] text-white rounded-2xl text-xs font-semibold flex items-center justify-between shadow-[0_4px_14px_rgba(91,78,255,0.25)] transition-all cursor-pointer"
+            className="w-full py-2.5 px-3.5 bg-[#5B4EFF] hover:bg-[#4C3FF0] active:scale-[0.98] text-white rounded-2xl text-xs font-semibold flex items-center justify-between shadow-[0_4px_14px_rgba(91,78,255,0.25)] transition-all cursor-pointer"
           >
             <span>Agent Status</span>
             <ChevronRight size={15} />
@@ -247,11 +247,11 @@ export default function Layout() {
         </div>
       </aside>
 
-      {/* ── Main Area ─────────────────────────────────────────────────── */}
-      <div className="flex-1 flex flex-col min-w-0">
+      {/* ── Main Dashboard Content Area ────────────────────────────── */}
+      <div className="flex-1 min-w-0 flex flex-col h-full overflow-hidden">
 
         {/* Topbar: Search Bar on Left, Notifications & Profile Badge on Right */}
-        <header className="h-16 flex items-center justify-between px-8 bg-white border-b border-gray-100 flex-shrink-0 z-10">
+        <header className="h-16 flex items-center justify-between px-5 bg-white border-b border-[#EDF1F7] shrink-0 z-10">
           
           {/* Search Bar matching Figma */}
           <div className="relative w-80 sm:w-96">
@@ -424,8 +424,8 @@ export default function Layout() {
           </div>
         </header>
 
-        {/* Page content */}
-        <main className="flex-1 overflow-y-auto p-6 sm:p-8 bg-[#F8F9FD]">
+        {/* Page content: Scroll overflow: Horizontal and vertical */}
+        <main className="flex-1 overflow-auto p-5 bg-[#F8F9FD]">
           <Outlet />
         </main>
       </div>

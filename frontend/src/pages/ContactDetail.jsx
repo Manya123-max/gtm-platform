@@ -18,7 +18,8 @@ import {
   Briefcase,
   Zap,
   Radio,
-  X
+  X,
+  ChevronRight
 } from 'lucide-react'
 
 function formatDisplayDate(dateStr) {
@@ -105,6 +106,212 @@ function getSignalMeta(sig) {
   }
 }
 
+function humanizeSource(source) {
+  if (!source) return 'Verified Signal'
+  const s = String(source).toLowerCase()
+  if (s.includes('adzuna')) return 'Adzuna'
+  if (s.includes('currents')) return 'Currents'
+  if (s.includes('newsapi')) return 'NewsAPI'
+  if (s.includes('predictleads')) return 'PredictLeads'
+  if (s.includes('google')) return 'Google News'
+  if (s.includes('linkedin')) return 'LinkedIn'
+  if (s.includes('sec')) return 'SEC Edgar'
+  return source.charAt(0).toUpperCase() + source.slice(1)
+}
+
+function inferDepartment(text) {
+  if (!text) return 'Go-To-Market Operations'
+  const t = text.toLowerCase()
+  if (t.match(/account|finance|payroll|audit|treasur|cfo|controller|billing|tax/)) {
+    return 'Finance & Accounting'
+  }
+  if (t.match(/sales|bdr|sdr|account exec|revenue|cro|business develop|commercial/)) {
+    return 'Sales & Revenue'
+  }
+  if (t.match(/engineer|software|developer|devops|data|qa|architect|tech|frontend|backend|fullstack|it /)) {
+    return 'Engineering & IT'
+  }
+  if (t.match(/market|growth|content|seo|campaign|brand|demand gen|pr/)) {
+    return 'Marketing & Growth'
+  }
+  if (t.match(/product|ux|ui|designer/)) {
+    return 'Product Management'
+  }
+  if (t.match(/people|hr|talent|recruit|staffing/)) {
+    return 'People & Talent'
+  }
+  if (t.match(/operat|logistics|supply|procure|facility|admin/)) {
+    return 'Operations'
+  }
+  if (t.match(/legal|counsel|compliance|regulatory/)) {
+    return 'Legal & Compliance'
+  }
+  if (t.match(/medical|clinical|healthcare|physician|nurse/)) {
+    return 'Clinical & Healthcare'
+  }
+  return 'Corporate Operations'
+}
+
+function inferEmploymentType(raw, sigType) {
+  if (raw.employment_type) return String(raw.employment_type)
+  if (raw.contract_type) {
+    const ct = String(raw.contract_type).toLowerCase()
+    if (ct.includes('perm') || ct.includes('full')) return 'Full Time, Permanent'
+    if (ct.includes('contract')) return 'Contract'
+    return raw.contract_type
+  }
+  if (raw.contract_time) {
+    const ct = String(raw.contract_time).toLowerCase()
+    if (ct.includes('full')) return 'Full Time, Exempt'
+    if (ct.includes('part')) return 'Part Time'
+    return raw.contract_time
+  }
+  if (raw.trigger) {
+    return raw.trigger.replace(/_/g, ' ').replace(/\b\w/g, c => c.toUpperCase())
+  }
+  if (sigType.includes('job') || sigType.includes('hire')) {
+    return 'Full Time, Exempt'
+  }
+  if (Array.isArray(raw.locations) && raw.locations.length > 0) {
+    return `${raw.locations.length} Locations`
+  }
+  return 'Verified Active'
+}
+
+function extractSignalDetails(sig, contact) {
+  if (!sig) return null
+  const meta = getSignalMeta(sig)
+  const raw = sig.raw_data || {}
+  const company = contact?.company || 'Account'
+  const sigType = (sig.signal_type || '').toLowerCase()
+
+  // Real headline extraction
+  let headline = raw.headline || raw.title
+  if (!headline && Array.isArray(raw.roles) && raw.roles.length > 0) {
+    headline = typeof raw.roles[0] === 'string' ? raw.roles[0] : (raw.roles[0]?.title || '')
+  }
+  if (!headline && sig.summary) {
+    headline = sig.summary
+  }
+  if (!headline) {
+    headline = meta.displayType
+  }
+  if (headline && typeof headline === 'string' && headline === headline.toLowerCase()) {
+    headline = headline.replace(/\b[a-z]/g, c => c.toUpperCase())
+  }
+
+  // Activity label for subtitle: e.g. "Impiricus • Hiring activity"
+  let activityLabel = 'Market activity'
+  if (sigType.includes('job') || sigType.includes('hire')) {
+    activityLabel = 'Hiring activity'
+  } else if (sigType.includes('expansion') || sigType.includes('news')) {
+    activityLabel = raw.trigger ? raw.trigger.replace(/_/g, ' ') : 'Geographic expansion'
+  } else if (sigType.includes('funding')) {
+    activityLabel = 'Funding round'
+  } else if (sigType.includes('tech')) {
+    activityLabel = 'Tech stack update'
+  } else if (sigType.includes('earnings')) {
+    activityLabel = 'Earnings & Financials'
+  }
+
+  // What happened narrative
+  let whatHappened = ''
+  if (sig.summary && !sig.summary.toLowerCase().startsWith('detected')) {
+    whatHappened = sig.summary
+  } else if (raw.description && raw.description.length > 15) {
+    whatHappened = raw.description
+  } else if (sigType.includes('job') || sigType.includes('hire')) {
+    whatHappened = `${company} reported hiring activity for this role.`
+  } else if (sigType.includes('expansion')) {
+    whatHappened = `${company} reported expansion activity into new regional markets.`
+  } else if (sigType.includes('funding')) {
+    whatHappened = `${company} secured new financing round to accelerate growth.`
+  } else {
+    whatHappened = `Verified ${meta.displayType.toLowerCase()} signal detected for ${company}.`
+  }
+
+  // Department
+  let department = raw.department || raw.category
+  if (!department) {
+    department = inferDepartment(`${headline} ${whatHappened} ${(raw.roles || []).join(' ')}`)
+  }
+
+  // Employment Type
+  const employmentType = inferEmploymentType(raw, sigType)
+
+  // Company context
+  let companyContext = contact?.selection_summary
+  if (!companyContext || companyContext.length < 30) {
+    const ind = contact?.industry ? ` in the ${contact.industry} industry` : ''
+    const geo = contact?.geography ? ` based in ${contact.geography}` : ''
+    const icp = contact?.icp_score != null ? ` with an ICP fit score of ${Math.round(contact.icp_score)}/100` : ''
+    companyContext = `${company} is an active enterprise account${ind}${geo}${icp}. Recent market and hiring activity indicate high go-to-market relevance.`
+  }
+
+  // Roles or Locations Mentioned
+  let pillsTitle = 'Roles mentioned'
+  let pills = []
+  let totalCount = 0
+
+  if (Array.isArray(raw.roles) && raw.roles.length > 0) {
+    pillsTitle = 'Roles mentioned'
+    const cleaned = raw.roles
+      .map(r => typeof r === 'string' ? r.trim() : (r?.title || r?.name || String(r)).trim())
+      .filter(Boolean)
+    totalCount = cleaned.length
+    pills = Array.from(new Set(cleaned))
+      .slice(0, 8)
+      .map(r => r.replace(/\b[a-z]/g, c => c.toUpperCase()))
+  } else if (Array.isArray(raw.locations) && raw.locations.length > 0) {
+    pillsTitle = 'Locations detected'
+    const cleaned = raw.locations.map(l => String(l).trim()).filter(Boolean)
+    totalCount = cleaned.length
+    pills = Array.from(new Set(cleaned)).slice(0, 8)
+  } else if (Array.isArray(raw.keywords) && raw.keywords.length > 0) {
+    pillsTitle = 'Topics mentioned'
+    const cleaned = raw.keywords.map(k => String(k).trim()).filter(Boolean)
+    totalCount = cleaned.length
+    pills = Array.from(new Set(cleaned)).slice(0, 8)
+  }
+
+  // Signal Score (0 - 100)
+  let score = 50
+  if (sig.confidence != null) {
+    score = Math.round(sig.confidence > 1 ? sig.confidence : sig.confidence * 100)
+  } else if (sig.conversion_weight != null) {
+    score = Math.round(sig.conversion_weight > 1 ? sig.conversion_weight : sig.conversion_weight * 100)
+  } else if (contact?.signal_score != null) {
+    score = Math.round(contact.signal_score)
+  }
+  score = Math.min(100, Math.max(0, score))
+
+  // Source URL
+  let sourceUrl = raw.url || raw.redirect_url
+  if (!sourceUrl && contact?.website) {
+    sourceUrl = contact.website.startsWith('http') ? contact.website : `https://${contact.website}`
+  }
+  if (!sourceUrl) {
+    sourceUrl = `https://www.google.com/search?q=${encodeURIComponent(`${company} ${headline}`)}`
+  }
+
+  return {
+    meta,
+    company,
+    activityLabel,
+    headline,
+    whatHappened,
+    department,
+    employmentType,
+    companyContext,
+    pillsTitle,
+    pills,
+    totalCount,
+    score,
+    sourceUrl,
+    sourceName: humanizeSource(sig.signal_source),
+  }
+}
+
 export default function ContactDetail() {
   const { id } = useParams()
   const navigate = useNavigate()
@@ -176,7 +383,7 @@ export default function ContactDetail() {
   )
 
   return (
-    <div className="max-w-7xl mx-auto space-y-6 pb-16 selection:bg-[#5B4EFF]/15">
+    <div className="w-full space-y-6 pb-16 selection:bg-[#5B4EFF]/15">
       
       {/* ── Breadcrumb & Page Header matching Figma ── */}
       <div>
@@ -380,7 +587,7 @@ export default function ContactDetail() {
               {defaultSummary}
             </div>
 
-            {/* Signals List */}
+            {/* Signals List / Grid matching Figma */}
             <div className="space-y-3">
               {signals.length === 0 ? (
                 <div className="py-8 text-center text-xs text-gray-400">
@@ -388,23 +595,53 @@ export default function ContactDetail() {
                 </div>
               ) : (
                 signals.map((sig) => {
-                  const meta = getSignalMeta(sig)
+                  const details = extractSignalDetails(sig, contact)
+                  const meta = details.meta
                   const Icon = meta.icon
+
                   return (
                     <div
                       key={sig.id}
                       onClick={() => setSelectedSignal(sig)}
-                      className="rounded-2xl border border-gray-100/90 bg-white p-3.5 flex items-center gap-3.5 hover:border-[#D6CEFC] hover:shadow-xs transition-all cursor-pointer group"
+                      className="rounded-2xl border border-gray-100/90 bg-white p-4 flex items-center justify-between gap-4 hover:border-[#5B4EFF]/40 hover:shadow-xs transition-all cursor-pointer group"
                     >
-                      <div className="w-10 h-10 rounded-xl bg-[#F3F0FF] text-[#5B4EFF] flex items-center justify-center shrink-0 group-hover:bg-[#ECE8FE] transition-colors">
-                        <Icon size={16} />
-                      </div>
-                      <div className="flex-1 min-w-0 pr-2">
-                        <div className="text-xs font-bold text-gray-900 group-hover:text-[#5B4EFF] transition-colors truncate">
-                          {meta.displayType}
+                      <div className="flex items-center gap-3.5 min-w-0">
+                        <div className="w-11 h-11 rounded-2xl bg-[#F7F5FF] border border-[#ECE8FE] text-[#5B4EFF] flex items-center justify-center shrink-0 group-hover:bg-[#ECE8FE] transition-colors">
+                          <Icon size={18} />
                         </div>
-                        <div className="text-[11px] text-gray-400 mt-0.5 font-normal truncate">
-                          Detected on {formatDisplayDate(sig.detected_at)}
+                        <div className="min-w-0 space-y-0.5">
+                          <div className="flex items-center gap-2">
+                            <span className="text-xs font-bold text-gray-900 group-hover:text-[#5B4EFF] transition-colors truncate">
+                              {meta.displayType}
+                            </span>
+                            <span className="bg-gray-100 text-gray-500 rounded-md px-1.5 py-0.5 text-[10px] font-medium shrink-0">
+                              {details.sourceName}
+                            </span>
+                          </div>
+                          <div className="text-xs text-gray-600 font-medium truncate">
+                            {details.headline}
+                          </div>
+                          <div className="text-[11px] text-gray-400 font-normal flex items-center gap-2">
+                            <span>Detected on {formatDisplayDate(sig.detected_at)}</span>
+                            {details.pills.length > 0 && (
+                              <>
+                                <span>•</span>
+                                <span className="text-[#5B4EFF] font-medium">
+                                  {details.totalCount || details.pills.length} {details.pillsTitle.toLowerCase()}
+                                </span>
+                              </>
+                            )}
+                          </div>
+                        </div>
+                      </div>
+
+                      <div className="flex items-center gap-3 shrink-0">
+                        <div className="text-right">
+                          <div className="text-[10px] text-gray-400 font-medium">Score</div>
+                          <div className="text-xs font-bold text-gray-900">{details.score}/100</div>
+                        </div>
+                        <div className="w-7 h-7 rounded-lg bg-gray-50 group-hover:bg-[#F3F0FF] text-gray-400 group-hover:text-[#5B4EFF] flex items-center justify-center transition-colors">
+                          <ChevronRight size={14} />
                         </div>
                       </div>
                     </div>
@@ -462,46 +699,206 @@ export default function ContactDetail() {
 
       </div>
 
-      {/* ── Optional Signal Detail Modal ── */}
-      {selectedSignal && (
-        <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/40 backdrop-blur-xs">
-          <div className="bg-white rounded-3xl max-w-lg w-full p-6 shadow-2xl border border-gray-100 space-y-4 animate-in fade-in duration-150">
-            <div className="flex items-start justify-between">
-              <div>
-                <h3 className="text-sm font-bold text-gray-900">
-                  {getSignalMeta(selectedSignal).displayType}
-                </h3>
-                <p className="text-[11px] text-gray-400 mt-0.5">
-                  Detected on {formatDisplayDate(selectedSignal.detected_at)}
-                </p>
+      {/* ── Signal Detail Modal matching Figma ── */}
+      {selectedSignal && (() => {
+        const details = extractSignalDetails(selectedSignal, contact)
+        const meta = details.meta
+        const Icon = meta.icon
+
+        return (
+          <div
+            className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/40 backdrop-blur-xs animate-in fade-in duration-150"
+            onClick={() => setSelectedSignal(null)}
+          >
+            <div
+              className="bg-white rounded-3xl max-w-2xl sm:max-w-3xl w-full p-6 sm:p-7 shadow-2xl border border-gray-100 relative max-h-[92vh] overflow-y-auto space-y-6 animate-in zoom-in-95 duration-150"
+              onClick={(e) => e.stopPropagation()}
+            >
+              {/* Header */}
+              <div className="flex items-start justify-between gap-4">
+                <div className="flex items-center gap-3.5 min-w-0">
+                  <div className="w-12 h-12 rounded-2xl bg-[#F7F5FF] border border-[#ECE8FE] text-[#5B4EFF] flex items-center justify-center shrink-0">
+                    <Icon size={22} />
+                  </div>
+                  <div className="min-w-0">
+                    <div className="text-xs font-semibold text-gray-400">
+                      Signal detail
+                    </div>
+                    <h2 className="text-xl sm:text-2xl font-bold text-gray-900 leading-tight truncate">
+                      {meta.displayType}
+                    </h2>
+                    <p className="text-xs text-gray-500 font-medium mt-0.5 truncate">
+                      {details.company} • {details.activityLabel}
+                    </p>
+                  </div>
+                </div>
+
+                <button
+                  type="button"
+                  onClick={() => setSelectedSignal(null)}
+                  className="text-gray-400 hover:text-gray-600 p-1.5 rounded-full hover:bg-gray-100 transition-colors cursor-pointer shrink-0"
+                >
+                  <X size={18} />
+                </button>
               </div>
-              <button
-                type="button"
-                onClick={() => setSelectedSignal(null)}
-                className="text-gray-400 hover:text-gray-600 p-1 rounded-full cursor-pointer"
-              >
-                <X size={16} />
-              </button>
-            </div>
 
-            <div className="p-4 rounded-2xl bg-[#F9F8FE] border border-[#ECE8FE] text-xs text-gray-700 leading-relaxed">
-              {selectedSignal.summary || selectedSignal.raw_data?.description || 'Event verified from external signal source.'}
-            </div>
+              {/* Two-Column Body */}
+              <div className="grid grid-cols-1 md:grid-cols-12 gap-6 items-start">
+                
+                {/* Left Column (What happened, Source details, Company context, Roles mentioned) */}
+                <div className="md:col-span-7 space-y-5 min-w-0">
+                  
+                  {/* What happened */}
+                  <div>
+                    <div className="text-xs font-semibold text-gray-400">
+                      What happened
+                    </div>
+                    <h3 className="text-base sm:text-lg font-bold text-gray-900 mt-1 leading-snug">
+                      {details.headline}
+                    </h3>
+                    <p className="text-xs text-gray-500 leading-relaxed font-normal mt-1">
+                      {details.whatHappened}
+                    </p>
+                  </div>
 
-            {selectedSignal.raw_data?.url && (
-              <a
-                href={selectedSignal.raw_data.url}
-                target="_blank"
-                rel="noopener noreferrer"
-                className="inline-flex items-center gap-1.5 text-xs font-semibold text-[#5B4EFF] hover:underline"
-              >
-                <span>View Original Source</span>
-                <ExternalLink size={12} />
-              </a>
-            )}
+                  {/* Source details */}
+                  <div>
+                    <div className="text-xs font-semibold text-gray-400 mb-2">
+                      Source details
+                    </div>
+                    <div className="grid grid-cols-2 gap-4">
+                      <div>
+                        <div className="text-[11px] font-semibold text-gray-400">
+                          Department
+                        </div>
+                        <div className="text-xs font-bold text-gray-900 mt-0.5 truncate">
+                          {details.department}
+                        </div>
+                      </div>
+                      <div>
+                        <div className="text-[11px] font-semibold text-gray-400">
+                          Employment type
+                        </div>
+                        <div className="text-xs font-bold text-gray-900 mt-0.5 truncate">
+                          {details.employmentType}
+                        </div>
+                      </div>
+                    </div>
+                  </div>
+
+                  {/* Company context */}
+                  <div>
+                    <div className="text-xs font-semibold text-gray-400 mb-1">
+                      Company context
+                    </div>
+                    <p className="text-xs text-gray-600 leading-relaxed font-normal">
+                      {details.companyContext}
+                    </p>
+                  </div>
+
+                  {/* Roles mentioned (or Locations detected) */}
+                  {details.pills.length > 0 && (
+                    <div>
+                      <div className="flex items-center gap-2 mb-2">
+                        <span className="text-xs font-bold text-gray-900">{details.pillsTitle}</span>
+                        <span className="bg-[#F3F0FF] text-[#5B4EFF] font-bold text-[10px] px-2 py-0.5 rounded-full border border-[#ECE8FE]">
+                          {details.totalCount || details.pills.length}
+                        </span>
+                      </div>
+                      <div className="flex flex-wrap gap-2">
+                        {details.pills.map((item, idx) => (
+                          <span
+                            key={idx}
+                            className="bg-[#F8F7FF] text-[#5B4EFF] border border-[#ECE8FE] rounded-full px-3 py-1 text-xs font-medium"
+                          >
+                            {item}
+                          </span>
+                        ))}
+                      </div>
+                    </div>
+                  )}
+
+                </div>
+
+                {/* Right Column (Signal overview) */}
+                <div className="md:col-span-5 min-w-0">
+                  <div className="rounded-2xl border border-gray-100/90 bg-[#FBFBFE] p-5 space-y-4 shadow-xs">
+                    <h4 className="text-xs font-bold text-gray-900">
+                      Signal overview
+                    </h4>
+
+                    <div>
+                      <div className="text-[11px] font-semibold text-gray-400">
+                        Signal type
+                      </div>
+                      <div className="text-xs font-bold text-gray-900 mt-0.5">
+                        {meta.displayType}
+                      </div>
+                    </div>
+
+                    <div>
+                      <div className="text-[11px] font-semibold text-gray-400">
+                        Detected
+                      </div>
+                      <div className="text-xs font-bold text-gray-900 mt-0.5">
+                        {formatDisplayDate(selectedSignal.detected_at)}
+                      </div>
+                    </div>
+
+                    <div>
+                      <div className="text-[11px] font-semibold text-gray-400">
+                        Source
+                      </div>
+                      <div className="text-xs font-bold text-gray-900 mt-0.5">
+                        {details.sourceName}
+                      </div>
+                    </div>
+
+                    <div>
+                      <div className="text-[11px] font-semibold text-gray-400">
+                        Signal score
+                      </div>
+                      <div className="text-2xl font-bold text-gray-900 mt-0.5">
+                        {details.score}{' '}
+                        <span className="text-sm font-semibold text-gray-400">/ 100</span>
+                      </div>
+                      <div className="w-full bg-[#EAE8F8] h-2 rounded-full overflow-hidden mt-2">
+                        <div
+                          className="bg-[#5B4EFF] h-full rounded-full transition-all duration-300"
+                          style={{ width: `${details.score}%` }}
+                        />
+                      </div>
+                    </div>
+                  </div>
+                </div>
+
+              </div>
+
+              {/* Modal Footer */}
+              <div className="flex items-center justify-end gap-3 pt-3 border-t border-gray-100">
+                <button
+                  type="button"
+                  onClick={() => setSelectedSignal(null)}
+                  className="px-5 py-2 rounded-xl text-xs font-semibold text-gray-700 bg-white border border-gray-200 hover:bg-gray-50 active:scale-[0.98] transition-all cursor-pointer"
+                >
+                  Close
+                </button>
+                
+                <a
+                  href={details.sourceUrl}
+                  target="_blank"
+                  rel="noopener noreferrer"
+                  className="px-5 py-2 rounded-xl text-xs font-semibold text-white bg-[#5B4EFF] hover:bg-[#4C3FF0] active:scale-[0.98] transition-all flex items-center gap-1.5 shadow-sm cursor-pointer"
+                >
+                  <span>View original source</span>
+                  <ExternalLink size={12} />
+                </a>
+              </div>
+
+            </div>
           </div>
-        </div>
-      )}
+        )
+      })()}
 
     </div>
   )

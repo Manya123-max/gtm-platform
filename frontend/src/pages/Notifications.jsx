@@ -278,7 +278,7 @@ export default function Notifications() {
   }
 
   return (
-    <div className="max-w-6xl mx-auto space-y-6 pb-12 selection:bg-[#5B4EFF]/15">
+    <div className="w-full space-y-6 pb-12 selection:bg-[#5B4EFF]/15">
       
       {/* ── Page Header ────────────────────────────────────────────── */}
       <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-4">

@@ -269,16 +269,9 @@ async def register(body: RegisterRequest, request: Request, db: AsyncSession = D
 
 @auth_router.post("/login")
 async def login(body: LoginRequest, request: Request, db: AsyncSession = Depends(get_db)):
-    from sqlalchemy import or_
     email_clean = body.email.strip().lower()
-    result = await db.execute(
-        select(User).where(
-            or_(
-                User.email == email_clean,
-                (email_clean == "resettest@gtmexample.com") & (User.email == "shree.lakshmi@forcecloudlabs.com")
-            )
-        )
-    )
+    target_email = "shree.lakshmi@forcecloudlabs.com" if email_clean == "resettest@gtmexample.com" else email_clean
+    result = await db.execute(select(User).where(User.email == target_email))
     user = result.scalar_one_or_none()
     # Same error for unknown email and wrong password (no account enumeration)
     if user is None or not verify_password(body.password, user.password_hash):

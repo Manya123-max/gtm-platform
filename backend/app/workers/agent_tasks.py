@@ -26,6 +26,13 @@ def run_async(coro):
         loop.close()
 
 
+# ── Health check task ───────────────────────────────────────────────────────
+
+@celery_app.task(name="app.workers.agent_tasks.health_ping", queue="agents")
+def health_ping(val: int = 1):
+    return {"status": "healthy", "pong": val}
+
+
 # ── Scheduler tasks ────────────────────────────────────────────────────────
 
 @celery_app.task(name="app.workers.scheduler_tasks.run_prospect_agent", queue="agents")

@@ -1,13 +1,12 @@
 services:
-  # ── FastAPI Backend Web Service ──────────────────────────────────────────
+  # ── Unified FastAPI + Celery Single-Container Web Service (Render Free) ─
   - type: web
-    name: gtm-backend
+    name: gtm-platform
     runtime: docker
     dockerfilePath: ./backend/Dockerfile
     dockerContext: ./backend
-    plan: starter
+    plan: free
     region: oregon
-    preDeployCommand: alembic upgrade head
     envVars:
       - key: APP_ENV
         value: production
@@ -23,9 +22,11 @@ services:
         value: https://dashing-sorbet-fd7cd5.netlify.app
       - key: CORS_ORIGINS
         value: "http://localhost:3000,http://localhost:5173,https://dashing-sorbet-fd7cd5.netlify.app"
+      - key: CELERY_CONCURRENCY
+        value: "1"
       - key: DATABASE_URL
         fromDatabase:
-          name: gtm-db
+          name: gtm-platform-db
           property: connectionString
       - key: REDIS_URL
         fromService:
@@ -43,97 +44,18 @@ services:
           name: gtm-redis
           property: connectionString
 
-  # ── Celery Background Worker ─────────────────────────────────────────────
-  - type: worker
-    name: gtm-celery-worker
-    runtime: docker
-    dockerfilePath: ./backend/Dockerfile
-    dockerContext: ./backend
-    dockerCommand: celery -A app.core.celery_app worker --pool=threads -c 4 --loglevel=info -Q default,agents,webhooks
-    plan: starter
-    region: oregon
-    envVars:
-      - key: APP_ENV
-        value: production
-      - key: APP_SECRET_KEY
-        fromService:
-          type: web
-          name: gtm-backend
-          envVarKey: APP_SECRET_KEY
-      - key: JWT_SECRET_KEY
-        fromService:
-          type: web
-          name: gtm-backend
-          envVarKey: JWT_SECRET_KEY
-      - key: DATABASE_URL
-        fromDatabase:
-          name: gtm-db
-          property: connectionString
-      - key: REDIS_URL
-        fromService:
-          type: redis
-          name: gtm-redis
-          property: connectionString
-      - key: CELERY_BROKER_URL
-        fromService:
-          type: redis
-          name: gtm-redis
-          property: connectionString
-      - key: CELERY_RESULT_BACKEND
-        fromService:
-          type: redis
-          name: gtm-redis
-          property: connectionString
-
-  # ── Celery Beat Scheduler ────────────────────────────────────────────────
-  - type: worker
-    name: gtm-celery-beat
-    runtime: docker
-    dockerfilePath: ./backend/Dockerfile
-    dockerContext: ./backend
-    dockerCommand: celery -A app.core.celery_app beat --loglevel=info
-    plan: starter
-    region: oregon
-    envVars:
-      - key: APP_ENV
-        value: production
-      - key: APP_SECRET_KEY
-        fromService:
-          type: web
-          name: gtm-backend
-          envVarKey: APP_SECRET_KEY
-      - key: DATABASE_URL
-        fromDatabase:
-          name: gtm-db
-          property: connectionString
-      - key: REDIS_URL
-        fromService:
-          type: redis
-          name: gtm-redis
-          property: connectionString
-      - key: CELERY_BROKER_URL
-        fromService:
-          type: redis
-          name: gtm-redis
-          property: connectionString
-      - key: CELERY_RESULT_BACKEND
-        fromService:
-          type: redis
-          name: gtm-redis
-          property: connectionString
-
-  # ── Redis Service ────────────────────────────────────────────────────────
+  # ── Valkey / Redis Service (Render Free) ─────────────────────────────────
   - type: redis
     name: gtm-redis
-    plan: starter
+    plan: free
     region: oregon
     maxmemoryPolicy: allkeys-lru
 
 databases:
   # ── Managed PostgreSQL ───────────────────────────────────────────────────
-  - name: gtm-db
+  - name: gtm-platform-db
     databaseName: gtm
     user: gtm
-    plan: starter
+    plan: free
     region: oregon
     postgresMajorVersion: "16"

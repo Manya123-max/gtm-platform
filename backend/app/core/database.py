@@ -76,6 +76,9 @@ async def _bootstrap_multi_user_schema(conn, migration_owner_email: Optional[str
         "ALTER TABLE users ADD COLUMN IF NOT EXISTS cal_com_booking_url VARCHAR(255)",
         "ALTER TABLE users ADD COLUMN IF NOT EXISTS slack_user_id VARCHAR(50)",
         "ALTER TABLE user_inputs ADD COLUMN IF NOT EXISTS user_id UUID REFERENCES users(id)",
+        "ALTER TABLE user_inputs ADD COLUMN IF NOT EXISTS company_lookalike TEXT",
+        "ALTER TABLE user_inputs ADD COLUMN IF NOT EXISTS signals TEXT",
+        "ALTER TABLE user_inputs ADD COLUMN IF NOT EXISTS funding_stages TEXT",
         "ALTER TABLE contacts ADD COLUMN IF NOT EXISTS user_id UUID REFERENCES users(id)",
         "ALTER TABLE contacts ADD COLUMN IF NOT EXISTS prospect_location VARCHAR(200)",
         "ALTER TABLE contacts ADD COLUMN IF NOT EXISTS work_mode VARCHAR(50) DEFAULT 'Not specified'",
@@ -178,13 +181,15 @@ async def _bootstrap_multi_user_schema(conn, migration_owner_email: Optional[str
     await conn.execute(text(
         "UPDATE contacts c SET user_id = ui.user_id "
         "FROM user_inputs ui WHERE c.user_input_id = ui.id "
-        "AND c.user_id IS NULL AND ui.user_id IS NOT NULL"
+        "AND c.user_id IS NULL AND ui.user_id IS NOT NULL "
+        "AND NOT EXISTS (SELECT 1 FROM contacts c2 WHERE c2.user_id = ui.user_id AND c2.email = c.email)"
     ))
     await conn.execute(text(
         "UPDATE user_inputs SET user_id = :owner WHERE user_id IS NULL"
     ), {"owner": owner_id})
     await conn.execute(text(
-        "UPDATE contacts SET user_id = :owner WHERE user_id IS NULL"
+        "UPDATE contacts c SET user_id = :owner WHERE c.user_id IS NULL "
+        "AND NOT EXISTS (SELECT 1 FROM contacts c2 WHERE c2.user_id = :owner AND c2.email = c.email)"
     ), {"owner": owner_id})
     await conn.execute(text(
         "UPDATE workflow_runs SET user_id = :owner WHERE user_id IS NULL"

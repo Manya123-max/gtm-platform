@@ -7,6 +7,7 @@ services:
     dockerContext: ./backend
     plan: starter
     region: oregon
+    preDeployCommand: alembic upgrade head
     envVars:
       - key: APP_ENV
         value: production

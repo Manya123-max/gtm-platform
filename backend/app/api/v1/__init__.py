@@ -2,14 +2,14 @@
 REST API v1 — all endpoints consumed by the React frontend.
 """
 from datetime import datetime, timedelta
-from typing import List, Optional, Dict, Any, cast
+from typing import List, Optional, Dict, Any, cast, Union
 from uuid import UUID
 
 from fastapi import APIRouter, Depends, HTTPException, Query, BackgroundTasks
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select, and_, or_, func, desc, asc, String as SAString
 from sqlalchemy.orm import selectinload
-from pydantic import BaseModel
+from pydantic import BaseModel, field_validator
 
 from app.core.config import settings
 from app.core.database import get_db
@@ -1630,16 +1630,29 @@ def _expand_size_range(size_str: str) -> list:
 
 
 class InputData(BaseModel):
-    our_company_name:    str          # vendor's company name
-    our_services:        str          # what we sell — personalization context only
-    target_location:     str          # where prospect companies are based
-    target_industries:   str = ""    # optional: "SaaS, Fintech"
-    target_company_size: str          # range: "50-5000"
-    target_keywords:     str = ""    # optional: "cloud, kubernetes"
-    company_lookalike:   str = ""    # optional: "Google, RadNet, Salesforce"
-    signals:             str = ""    # optional: "Office expansion, New partnership"
-    funding_stages:      str = ""    # optional: "Seed, Series A"
-    target_job_titles:   str          # "CTO, VP Engineering"
+    our_company_name:    str                                      # vendor's company name
+    our_services:        str                                      # what we sell — personalization context only
+    target_location:     str                                      # where prospect companies are based
+    target_industries:   Optional[Union[str, List[str]]] = ""     # optional: "SaaS, Fintech"
+    target_company_size: str                                      # range: "50-5000"
+    target_keywords:     Optional[Union[str, List[str]]] = ""     # optional: "cloud, kubernetes"
+    company_lookalike:   Optional[Union[str, List[str]]] = ""     # optional: "Google, RadNet, Salesforce"
+    signals:             Optional[Union[str, List[str]]] = ""     # optional: "Office expansion, New partnership"
+    funding_stages:      Optional[Union[str, List[str]]] = ""     # optional: "Seed, Series A"
+    target_job_titles:   str                                      # "CTO, VP Engineering"
+
+    @field_validator(
+        "company_lookalike", "signals", "funding_stages",
+        "target_industries", "target_keywords",
+        mode="before"
+    )
+    @classmethod
+    def normalize_optional_inputs(cls, v: Any) -> str:
+        if v is None:
+            return ""
+        if isinstance(v, list):
+            return ", ".join(str(item).strip() for item in v if str(item).strip())
+        return str(v).strip()
 
 
 @router.get("/input-history")

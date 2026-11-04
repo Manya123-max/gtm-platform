@@ -236,3 +236,17 @@ async def update_cal_mapping(
         "cal_com_booking_url": user.cal_com_booking_url,
         "cal_com_resolved_url": resolved,
     }
+
+
+@admin_users_router.post("/migrate-schema")
+async def trigger_schema_migration(
+    admin: User = Depends(require_admin),
+):
+    """Admin-only endpoint to safely and idempotently ensure all database columns exist."""
+    from app.core.database import engine, _bootstrap_multi_user_schema
+
+    async with engine.begin() as conn:
+        await _bootstrap_multi_user_schema(conn)
+
+    logger.info("Admin triggered idempotent database schema migration", admin_id=admin.id)
+    return {"success": True, "message": "Production database schema migrated successfully."}

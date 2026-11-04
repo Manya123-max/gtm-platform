@@ -258,17 +258,14 @@ async def _handle_unsubscribe(email: str):
     """Mark contact as do_not_contact in PIG."""
     if not email:
         return
-    from sqlalchemy import select
     from app.core.database import AsyncSessionLocal
-    from app.models.models import Contact
- 
+    from app.services.suppression_service import SuppressionService
+
     async with AsyncSessionLocal() as db:
-        result = await db.execute(select(Contact).where(Contact.email == email))
-        contact = result.scalar_one_or_none()
-        if contact:
-            contact.do_not_contact = True
-            await db.commit()
-            logger.info("Contact marked DNC", email=email)
+        updated_count = await SuppressionService.suppress_email(
+            db, email, source="resend_webhook", reason="unsubscribe"
+        )
+        logger.info("Resend webhook: email centrally suppressed", email=email, updated_records=updated_count)
  
  
 async def _approve_reply(thread_event_id: str, approved_by: str, custom_content: Optional[str] = None, response_url: Optional[str] = None):

@@ -22,6 +22,7 @@ def generate_uuid():
 
 class SignalType(str, enum.Enum):
     TECH_STACK_CHANGE = "tech_stack_change"
+    TECH_STACK_OBSERVED = "tech_stack_observed"
     NEW_HIRE = "new_hire"
     FUNDING_ROUND = "funding_round"
     JOB_POSTING = "job_posting"
@@ -596,6 +597,9 @@ class UserInput(Base):
     target_industries: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
     target_company_size: Mapped[str]   = mapped_column(String(50), nullable=False)
     target_keywords: Mapped[Optional[str]]   = mapped_column(Text, nullable=True)
+    company_lookalike: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    signals: Mapped[Optional[str]]           = mapped_column(Text, nullable=True)
+    funding_stages: Mapped[Optional[str]]    = mapped_column(Text, nullable=True)
     target_job_titles: Mapped[str]     = mapped_column(Text, nullable=False)
     created_at: Mapped[datetime]       = mapped_column(DateTime, default=datetime.utcnow)
 
@@ -687,4 +691,78 @@ class Notification(Base):
 
     contact: Mapped["Contact"] = relationship("Contact")
     user_input: Mapped["UserInput"] = relationship("UserInput")
+
+
+class SuppressedEmail(Base):
+    """
+    Central store for suppressed / DNC emails across all workspaces and contacts.
+    Ensures that unsubscribed or suppressed emails are never contacted even if
+    re-discovered through another search, another user, or another route.
+    """
+    __tablename__ = "suppressed_emails"
+
+    email: Mapped[str] = mapped_column(String(255), primary_key=True, index=True)
+    reason: Mapped[Optional[str]] = mapped_column(String(255), nullable=True)
+    source: Mapped[Optional[str]] = mapped_column(String(100), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow, nullable=False)
+
+
+class CompanySalesforceVerification(Base):
+    """
+    Account-level Salesforce verification record per unique company/domain.
+    Captures whether credible evidence of Salesforce adoption exists.
+    """
+    __tablename__ = "company_salesforce_verifications"
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=lambda: str(uuid.uuid4()))
+    company_name: Mapped[str] = mapped_column(String(255), index=True, nullable=False)
+    company_domain: Mapped[Optional[str]] = mapped_column(String(255), index=True, nullable=True)
+    apollo_organization_id: Mapped[Optional[str]] = mapped_column(String(100), index=True, nullable=True)
+    verification_status: Mapped[str] = mapped_column(
+        String(50), default="not_verified", index=True, nullable=False
+    )  # 'verified', 'not_verified', 'unable_to_verify'
+    verification_summary: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    last_checked_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow, nullable=False)
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime, default=datetime.utcnow, onupdate=datetime.utcnow, nullable=False
+    )
+
+    evidence_items: Mapped[List["SalesforceVerificationEvidence"]] = relationship(
+        "SalesforceVerificationEvidence",
+        back_populates="verification",
+        cascade="all, delete-orphan",
+        order_by="desc(SalesforceVerificationEvidence.checked_at)",
+    )
+
+
+class SalesforceVerificationEvidence(Base):
+    """
+    Individual evidence records supporting account-level Salesforce verification.
+    """
+    __tablename__ = "salesforce_verification_evidences"
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=lambda: str(uuid.uuid4()))
+    verification_id: Mapped[str] = mapped_column(
+        String(36), ForeignKey("company_salesforce_verifications.id", ondelete="CASCADE"), index=True, nullable=False
+    )
+    evidence_type: Mapped[str] = mapped_column(
+        String(100), index=True, nullable=False
+    )  # 'apollo_technographic', 'website_fingerprint', 'career_page', 'adzuna_job', 'official_announcement', 'salesforce_customer_story', 'news_article', 'dns_supporting'
+    evidence_description: Mapped[str] = mapped_column(Text, nullable=False)
+    source_name: Mapped[str] = mapped_column(String(255), nullable=False)
+    source_url: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    evidence_excerpt: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    evidence_date: Mapped[Optional[datetime]] = mapped_column(DateTime, nullable=True)
+    checked_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow, nullable=False)
+    is_valid: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow, nullable=False)
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime, default=datetime.utcnow, onupdate=datetime.utcnow, nullable=False
+    )
+
+    verification: Mapped["CompanySalesforceVerification"] = relationship(
+        "CompanySalesforceVerification", back_populates="evidence_items"
+    )
+
 

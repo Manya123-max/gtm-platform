@@ -263,7 +263,6 @@ async def register(body: RegisterRequest, request: Request, db: AsyncSession = D
     await db.commit()
     await db.refresh(user)
     token_resp = _token_response(user)
-    await _shift_history_to_user(db, user)
     return token_resp
 
 
@@ -283,7 +282,6 @@ async def login(body: LoginRequest, request: Request, db: AsyncSession = Depends
     if not user.is_active:
         raise HTTPException(status_code=403, detail="Account is disabled")
     token_resp = _token_response(user)
-    await _shift_history_to_user(db, user)
     return token_resp
 
 

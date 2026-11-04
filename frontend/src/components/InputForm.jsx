@@ -3,6 +3,26 @@ import { useNavigate } from 'react-router-dom';
 import { useQueryClient } from '@tanstack/react-query';
 import { useSession } from '../context/SessionContext';
 import { submitInput } from '../api';
+import SearchableMultiSelect from './SearchableMultiSelect';
+import { APOLLO_SIGNALS } from '../constants/apolloSignals';
+
+const FUNDING_OPTIONS = [
+    'Seed',
+    'Angel',
+    'Venture (Round not Specified)',
+    'Series A',
+    'Series B',
+    'Series C',
+    'Series D',
+    'Series E',
+    'Series F',
+    'Debt Financing',
+    'Equity Crowdfunding',
+    'Convertible Note',
+    'Private Equity',
+    'Merger / Acquisition',
+    'Other',
+];
 
 function InputForm() {
     const navigate = useNavigate();
@@ -16,6 +36,9 @@ function InputForm() {
         targetIndustries: '',
         targetCompanySize: '',
         targetKeywords: '',
+        companyLookalike: '',
+        signals: [],
+        fundingStages: [],
         targetJobTitles: '',
     });
 
@@ -32,6 +55,29 @@ function InputForm() {
         setSubmitting(true);
         setStatus({ type: '', message: '' });
 
+        // Validate and normalize Company Look-alike (comma-separated, max 5, remove duplicates)
+        const rawLookalikes = formData.companyLookalike
+            ? formData.companyLookalike.split(',').map(s => s.trim()).filter(Boolean)
+            : [];
+        const seen = new Set();
+        const normalizedLookalikes = [];
+        for (const comp of rawLookalikes) {
+            const lower = comp.toLowerCase();
+            if (!seen.has(lower)) {
+                seen.add(lower);
+                normalizedLookalikes.push(comp);
+            }
+        }
+
+        if (normalizedLookalikes.length > 5) {
+            setStatus({
+                type: 'error',
+                message: 'A maximum of 5 reference companies is supported for Company Look-alike.',
+            });
+            setSubmitting(false);
+            return;
+        }
+
         // Convert camelCase form state -> snake_case expected by backend
         const payload = {
             our_company_name: formData.ourCompanyName.trim(),
@@ -40,6 +86,9 @@ function InputForm() {
             target_industries: formData.targetIndustries.trim(),
             target_company_size: formData.targetCompanySize.trim(),
             target_keywords: formData.targetKeywords.trim(),
+            company_lookalike: normalizedLookalikes.join(', '),
+            signals: (formData.signals || []).join(', '),
+            funding_stages: (formData.fundingStages || []).join(', '),
             target_job_titles: formData.targetJobTitles.trim(),
         };
 
@@ -211,7 +260,45 @@ function InputForm() {
                         </p>
                     </div>
 
-                    {/* 7. Target Job Titles * */}
+                    {/* Company Look-alike */}
+                    <div>
+                        <label className="block text-xs font-bold text-[#1E1B4B] mb-2">
+                            Company Look-alike <span className="text-gray-400 font-normal">(Optional)</span>
+                        </label>
+                        <input
+                            type="text"
+                            name="companyLookalike"
+                            value={formData.companyLookalike}
+                            onChange={handleChange}
+                            placeholder="e.g. Google, RadNet, Salesforce"
+                            className="w-full bg-[#FBFBFE] hover:bg-white focus:bg-white border border-[#ECE8FE] hover:border-[#D6CEFC] focus:border-[#5B4EFF] rounded-xl py-3 px-4 text-xs sm:text-[13px] text-gray-800 placeholder:text-gray-400 focus:outline-none focus:ring-2 focus:ring-[#5B4EFF]/15 transition-all shadow-sm"
+                        />
+                        <p className="text-[11px] text-gray-400 mt-1.5 font-normal">
+                            Find prospects at companies similar to your reference companies.
+                        </p>
+                    </div>
+
+                    {/* Signals Filter */}
+                    <SearchableMultiSelect
+                        label="Signals"
+                        options={APOLLO_SIGNALS}
+                        selectedValues={formData.signals}
+                        onChange={(vals) => setFormData(prev => ({ ...prev, signals: vals }))}
+                        placeholder="Select Apollo signals (e.g. Recent funding, Office expansion, High buying intent)..."
+                        helperText="Target accounts exhibiting verified company buying triggers (evaluated using OR logic where supported)."
+                    />
+
+                    {/* Funding Filter */}
+                    <SearchableMultiSelect
+                        label="Funding"
+                        options={FUNDING_OPTIONS}
+                        selectedValues={formData.fundingStages}
+                        onChange={(vals) => setFormData(prev => ({ ...prev, fundingStages: vals }))}
+                        placeholder="Select funding stages (e.g. Seed, Series A)..."
+                        helperText="Select one or more stages without default minimum amount restrictions (evaluated using OR logic)."
+                    />
+
+                    {/* 8. Target Job Titles * */}
                     <div>
                         <label className="block text-xs font-bold text-[#1E1B4B] mb-2">
                             Target Job Titles <span className="text-[#EF4444] font-bold">*</span>

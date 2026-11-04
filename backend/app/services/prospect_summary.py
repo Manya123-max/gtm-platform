@@ -88,7 +88,15 @@ def generate_selection_summary(
     else:
         role_label = None
 
-    if not industry and not company_size and not company_location:
+    lookalike_seeds = get_attr("lookalike_seed_companies")
+    if lookalike_seeds and isinstance(lookalike_seeds, list) and len(lookalike_seeds) > 0:
+        seeds_str = ", ".join(lookalike_seeds[:3])
+        subj = f"{first_name}'s" if first_name else "The prospect's"
+        if role_label:
+            sentences.append(f"{subj} {role_label} at {company} matches search criteria and was identified via company look-alike targeting similar to {seeds_str}.")
+        else:
+            sentences.append(f"{subj} profile at {company} was identified via company look-alike targeting similar to {seeds_str}.")
+    elif not industry and not company_size and not company_location:
         # Minimal contact fallback (preserves test suite compatibility)
         sentences.append("Matches the selected industry and role criteria.")
     else:
@@ -99,6 +107,21 @@ def generate_selection_summary(
             sentences.append(f"{subj} profile matches the targeting criteria for this search.")
 
     # ── Sentence 3: Genuine Recent A2 Signal & Outreach Context ────────────────
+    funding_stage = (get_attr("funding_stage") or "").strip()
+    funding_amount = (get_attr("funding_amount") or "").strip()
+    matched_signals = get_attr("matched_signals") or []
+
+    if funding_stage:
+        if funding_amount:
+            sentences.append(f"The company is at the {funding_stage.title()} funding stage ({funding_amount}).")
+        else:
+            sentences.append(f"The company is at the {funding_stage.title()} funding stage.")
+
+    if matched_signals and isinstance(matched_signals, list):
+        clean_sigs = [str(s).strip() for s in matched_signals if str(s).strip()]
+        if clean_sigs:
+            sentences.append(f"Signal keyword match: {', '.join(clean_sigs)}.")
+
     signal_labels = []
     if raw_signals:
         for s in raw_signals:

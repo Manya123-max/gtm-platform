@@ -22,6 +22,9 @@ async def sync_schema():
             "ALTER TABLE user_inputs ADD COLUMN IF NOT EXISTS target_industries TEXT;",
             "ALTER TABLE user_inputs ADD COLUMN IF NOT EXISTS target_company_size VARCHAR(50);",
             "ALTER TABLE user_inputs ADD COLUMN IF NOT EXISTS target_keywords TEXT;",
+            "ALTER TABLE user_inputs ADD COLUMN IF NOT EXISTS company_lookalike TEXT;",
+            "ALTER TABLE user_inputs ADD COLUMN IF NOT EXISTS signals TEXT;",
+            "ALTER TABLE user_inputs ADD COLUMN IF NOT EXISTS funding_stages TEXT;",
             "ALTER TABLE user_inputs ADD COLUMN IF NOT EXISTS target_job_titles TEXT;",
             "ALTER TABLE user_inputs ADD COLUMN IF NOT EXISTS created_at TIMESTAMP WITHOUT TIME ZONE DEFAULT NOW();",
 

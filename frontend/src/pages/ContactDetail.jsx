@@ -5,8 +5,16 @@ import {
   fetchContact,
   fetchThread,
   fetchSignals,
-  summarizeSignals
+  summarizeSignals,
+  fetchSalesforceVerification,
+  verifySalesforce
 } from '../api'
+import {
+  extractSignalDetails,
+  getSignalMeta,
+  humanizeSource,
+  formatDisplayDate,
+} from '../utils/signalPresentationMapper'
 import {
   Mail,
   ExternalLink,
@@ -19,22 +27,12 @@ import {
   Zap,
   Radio,
   X,
-  ChevronRight
+  ChevronRight,
+  ShieldCheck,
+  CheckCircle2,
+  AlertCircle,
+  HelpCircle
 } from 'lucide-react'
-
-function formatDisplayDate(dateStr) {
-  if (!dateStr) return ''
-  try {
-    const s = String(dateStr).trim()
-    const isIsoNaive = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(\.\d+)?$/.test(s)
-    const normalizedStr = isIsoNaive ? `${s}Z` : s
-    const d = new Date(normalizedStr)
-    if (isNaN(d.getTime())) return String(dateStr)
-    return d.toLocaleDateString('en-GB', { day: 'numeric', month: 'short', year: 'numeric' })
-  } catch {
-    return String(dateStr)
-  }
-}
 
 function formatSignalRecency(dateStr) {
   if (!dateStr) return 'recently'
@@ -58,265 +56,12 @@ function formatSignalRecency(dateStr) {
   }
 }
 
-function getSignalMeta(sig) {
-  const t = (sig.signal_type || '').toLowerCase()
-  const raw = sig.raw_data || {}
-  const headline = raw.headline || raw.title || sig.summary || ''
-
-  if (t.includes('expansion') || t.includes('news')) {
-    return {
-      title: headline && !headline.toLowerCase().startsWith('news') ? headline : 'News Expansion',
-      displayType: 'News Expansion',
-      icon: FileText,
-    }
-  }
-  if (t.includes('funding')) {
-    return {
-      title: headline && !headline.toLowerCase().startsWith('funding') ? headline : 'Funding Round',
-      displayType: 'Funding Round',
-      icon: CreditCard,
-    }
-  }
-  if (t.includes('job') || t.includes('hire') || t.includes('posting')) {
-    return {
-      title: headline && !headline.toLowerCase().startsWith('job') ? headline : 'Job Posting',
-      displayType: 'Job Posting',
-      icon: Briefcase,
-    }
-  }
-  if (t.includes('tech') || t.includes('stack')) {
-    return {
-      title: headline && !headline.toLowerCase().startsWith('tech') ? headline : 'Tech Change',
-      displayType: 'Tech Change',
-      icon: Zap,
-    }
-  }
-  if (t.includes('earnings')) {
-    return {
-      title: headline && !headline.toLowerCase().startsWith('earnings') ? headline : 'Earnings Call',
-      displayType: 'Earnings Call',
-      icon: Radio,
-    }
-  }
-
-  return {
-    title: headline || 'Business Activity',
-    displayType: sig.signal_type ? sig.signal_type.replace(/_/g, ' ') : 'Market Signal',
-    icon: FileText,
-  }
-}
-
-function humanizeSource(source) {
-  if (!source) return 'Verified Signal'
-  const s = String(source).toLowerCase()
-  if (s.includes('adzuna')) return 'Adzuna'
-  if (s.includes('currents')) return 'Currents'
-  if (s.includes('newsapi')) return 'NewsAPI'
-  if (s.includes('predictleads')) return 'PredictLeads'
-  if (s.includes('google')) return 'Google News'
-  if (s.includes('linkedin')) return 'LinkedIn'
-  if (s.includes('sec')) return 'SEC Edgar'
-  return source.charAt(0).toUpperCase() + source.slice(1)
-}
-
-function inferDepartment(text) {
-  if (!text) return 'Go-To-Market Operations'
-  const t = text.toLowerCase()
-  if (t.match(/account|finance|payroll|audit|treasur|cfo|controller|billing|tax/)) {
-    return 'Finance & Accounting'
-  }
-  if (t.match(/sales|bdr|sdr|account exec|revenue|cro|business develop|commercial/)) {
-    return 'Sales & Revenue'
-  }
-  if (t.match(/engineer|software|developer|devops|data|qa|architect|tech|frontend|backend|fullstack|it /)) {
-    return 'Engineering & IT'
-  }
-  if (t.match(/market|growth|content|seo|campaign|brand|demand gen|pr/)) {
-    return 'Marketing & Growth'
-  }
-  if (t.match(/product|ux|ui|designer/)) {
-    return 'Product Management'
-  }
-  if (t.match(/people|hr|talent|recruit|staffing/)) {
-    return 'People & Talent'
-  }
-  if (t.match(/operat|logistics|supply|procure|facility|admin/)) {
-    return 'Operations'
-  }
-  if (t.match(/legal|counsel|compliance|regulatory/)) {
-    return 'Legal & Compliance'
-  }
-  if (t.match(/medical|clinical|healthcare|physician|nurse/)) {
-    return 'Clinical & Healthcare'
-  }
-  return 'Corporate Operations'
-}
-
-function inferEmploymentType(raw, sigType) {
-  if (raw.employment_type) return String(raw.employment_type)
-  if (raw.contract_type) {
-    const ct = String(raw.contract_type).toLowerCase()
-    if (ct.includes('perm') || ct.includes('full')) return 'Full Time, Permanent'
-    if (ct.includes('contract')) return 'Contract'
-    return raw.contract_type
-  }
-  if (raw.contract_time) {
-    const ct = String(raw.contract_time).toLowerCase()
-    if (ct.includes('full')) return 'Full Time, Exempt'
-    if (ct.includes('part')) return 'Part Time'
-    return raw.contract_time
-  }
-  if (raw.trigger) {
-    return raw.trigger.replace(/_/g, ' ').replace(/\b\w/g, c => c.toUpperCase())
-  }
-  if (sigType.includes('job') || sigType.includes('hire')) {
-    return 'Full Time, Exempt'
-  }
-  if (Array.isArray(raw.locations) && raw.locations.length > 0) {
-    return `${raw.locations.length} Locations`
-  }
-  return 'Verified Active'
-}
-
-function extractSignalDetails(sig, contact) {
-  if (!sig) return null
-  const meta = getSignalMeta(sig)
-  const raw = sig.raw_data || {}
-  const company = contact?.company || 'Account'
-  const sigType = (sig.signal_type || '').toLowerCase()
-
-  // Real headline extraction
-  let headline = raw.headline || raw.title
-  if (!headline && Array.isArray(raw.roles) && raw.roles.length > 0) {
-    headline = typeof raw.roles[0] === 'string' ? raw.roles[0] : (raw.roles[0]?.title || '')
-  }
-  if (!headline && sig.summary) {
-    headline = sig.summary
-  }
-  if (!headline) {
-    headline = meta.displayType
-  }
-  if (headline && typeof headline === 'string' && headline === headline.toLowerCase()) {
-    headline = headline.replace(/\b[a-z]/g, c => c.toUpperCase())
-  }
-
-  // Activity label for subtitle: e.g. "Impiricus • Hiring activity"
-  let activityLabel = 'Market activity'
-  if (sigType.includes('job') || sigType.includes('hire')) {
-    activityLabel = 'Hiring activity'
-  } else if (sigType.includes('expansion') || sigType.includes('news')) {
-    activityLabel = raw.trigger ? raw.trigger.replace(/_/g, ' ') : 'Geographic expansion'
-  } else if (sigType.includes('funding')) {
-    activityLabel = 'Funding round'
-  } else if (sigType.includes('tech')) {
-    activityLabel = 'Tech stack update'
-  } else if (sigType.includes('earnings')) {
-    activityLabel = 'Earnings & Financials'
-  }
-
-  // What happened narrative
-  let whatHappened = ''
-  if (sig.summary && !sig.summary.toLowerCase().startsWith('detected')) {
-    whatHappened = sig.summary
-  } else if (raw.description && raw.description.length > 15) {
-    whatHappened = raw.description
-  } else if (sigType.includes('job') || sigType.includes('hire')) {
-    whatHappened = `${company} reported hiring activity for this role.`
-  } else if (sigType.includes('expansion')) {
-    whatHappened = `${company} reported expansion activity into new regional markets.`
-  } else if (sigType.includes('funding')) {
-    whatHappened = `${company} secured new financing round to accelerate growth.`
-  } else {
-    whatHappened = `Verified ${meta.displayType.toLowerCase()} signal detected for ${company}.`
-  }
-
-  // Department
-  let department = raw.department || raw.category
-  if (!department) {
-    department = inferDepartment(`${headline} ${whatHappened} ${(raw.roles || []).join(' ')}`)
-  }
-
-  // Employment Type
-  const employmentType = inferEmploymentType(raw, sigType)
-
-  // Company context
-  let companyContext = contact?.selection_summary
-  if (!companyContext || companyContext.length < 30) {
-    const ind = contact?.industry ? ` in the ${contact.industry} industry` : ''
-    const geo = contact?.geography ? ` based in ${contact.geography}` : ''
-    const icp = contact?.icp_score != null ? ` with an ICP fit score of ${Math.round(contact.icp_score)}/100` : ''
-    companyContext = `${company} is an active enterprise account${ind}${geo}${icp}. Recent market and hiring activity indicate high go-to-market relevance.`
-  }
-
-  // Roles or Locations Mentioned
-  let pillsTitle = 'Roles mentioned'
-  let pills = []
-  let totalCount = 0
-
-  if (Array.isArray(raw.roles) && raw.roles.length > 0) {
-    pillsTitle = 'Roles mentioned'
-    const cleaned = raw.roles
-      .map(r => typeof r === 'string' ? r.trim() : (r?.title || r?.name || String(r)).trim())
-      .filter(Boolean)
-    totalCount = cleaned.length
-    pills = Array.from(new Set(cleaned))
-      .slice(0, 8)
-      .map(r => r.replace(/\b[a-z]/g, c => c.toUpperCase()))
-  } else if (Array.isArray(raw.locations) && raw.locations.length > 0) {
-    pillsTitle = 'Locations detected'
-    const cleaned = raw.locations.map(l => String(l).trim()).filter(Boolean)
-    totalCount = cleaned.length
-    pills = Array.from(new Set(cleaned)).slice(0, 8)
-  } else if (Array.isArray(raw.keywords) && raw.keywords.length > 0) {
-    pillsTitle = 'Topics mentioned'
-    const cleaned = raw.keywords.map(k => String(k).trim()).filter(Boolean)
-    totalCount = cleaned.length
-    pills = Array.from(new Set(cleaned)).slice(0, 8)
-  }
-
-  // Signal Score (0 - 100)
-  let score = 50
-  if (sig.confidence != null) {
-    score = Math.round(sig.confidence > 1 ? sig.confidence : sig.confidence * 100)
-  } else if (sig.conversion_weight != null) {
-    score = Math.round(sig.conversion_weight > 1 ? sig.conversion_weight : sig.conversion_weight * 100)
-  } else if (contact?.signal_score != null) {
-    score = Math.round(contact.signal_score)
-  }
-  score = Math.min(100, Math.max(0, score))
-
-  // Source URL
-  let sourceUrl = raw.url || raw.redirect_url
-  if (!sourceUrl && contact?.website) {
-    sourceUrl = contact.website.startsWith('http') ? contact.website : `https://${contact.website}`
-  }
-  if (!sourceUrl) {
-    sourceUrl = `https://www.google.com/search?q=${encodeURIComponent(`${company} ${headline}`)}`
-  }
-
-  return {
-    meta,
-    company,
-    activityLabel,
-    headline,
-    whatHappened,
-    department,
-    employmentType,
-    companyContext,
-    pillsTitle,
-    pills,
-    totalCount,
-    score,
-    sourceUrl,
-    sourceName: humanizeSource(sig.signal_source),
-  }
-}
-
 export default function ContactDetail() {
   const { id } = useParams()
   const navigate = useNavigate()
 
   const [isRefreshing, setIsRefreshing] = useState(false)
+  const [isVerifyingSalesforce, setIsVerifyingSalesforce] = useState(false)
   const [isSummaryExpanded, setIsSummaryExpanded] = useState(false)
   const [selectedSignal, setSelectedSignal] = useState(null)
 
@@ -325,6 +70,12 @@ export default function ContactDetail() {
     queryKey: ['contact', id],
     queryFn: () => fetchContact(id),
     refetchInterval: 15_000,
+  })
+
+  const { data: salesforceVer, refetch: refetchSalesforceVer } = useQuery({
+    queryKey: ['salesforceVerification', id],
+    queryFn: () => fetchSalesforceVerification(id),
+    refetchInterval: 30_000,
   })
 
   const { data: signals = [], refetch: refetchSignals } = useQuery({
@@ -338,6 +89,19 @@ export default function ContactDetail() {
     queryFn: () => fetchThread(id),
     refetchInterval: 10_000,
   })
+
+  // Handle Manual Salesforce Verification / Re-verify
+  const handleVerifySalesforce = async () => {
+    setIsVerifyingSalesforce(true)
+    try {
+      await verifySalesforce(id)
+      await Promise.all([refetchContact(), refetchSalesforceVer()])
+    } catch (err) {
+      console.error('Verify Salesforce failed:', err)
+    } finally {
+      setIsVerifyingSalesforce(false)
+    }
+  }
 
   // Handle Signal Summarization / Refresh
   const handleRefreshSignals = async () => {
@@ -381,6 +145,18 @@ export default function ContactDetail() {
   const defaultSummary = contact.signal_summary || (
     `${contact.company || 'The account'} has recent activity associated with ${sigTypeLabel}. These events indicate business activity relevant to go-to-market operations.`
   )
+
+  // Salesforce Account Verification Data (Phase 2)
+  const verData = contact.salesforce_verification || salesforceVer
+  const verStatus = verData?.verification_status || 'pending'
+  const evidenceList = verData?.evidence_items || verData?.evidence || []
+  const lastCheckedText = useMemo(() => {
+    if (verStatus === 'pending') return 'Verification pending'
+    if (verData?.last_checked_at) {
+      return formatDisplayDate(verData.last_checked_at) || 'Checked recently'
+    }
+    return 'Not yet verified'
+  }, [verStatus, verData?.last_checked_at])
 
   return (
     <div className="w-full space-y-6 pb-16 selection:bg-[#5B4EFF]/15">
@@ -548,18 +324,171 @@ export default function ContactDetail() {
               </div>
               <div>
                 <div className="text-[11px] text-gray-400 font-medium mb-1">Status</div>
-                <span className="inline-block bg-[#DCFCE7] text-[#16A34A] border border-[#BBF7D0] rounded-full px-3 py-0.5 text-xs font-medium">
-                  Active
-                </span>
+                {contact.do_not_contact ? (
+                  <span className="inline-block bg-red-100 text-red-700 border border-red-200 rounded-full px-3 py-0.5 text-xs font-semibold">
+                    Do Not Contact
+                  </span>
+                ) : (
+                  <span className="inline-block bg-[#DCFCE7] text-[#16A34A] border border-[#BBF7D0] rounded-full px-3 py-0.5 text-xs font-medium">
+                    Active
+                  </span>
+                )}
               </div>
             </div>
           </div>
 
         </div>
 
-        {/* ── Right Column: Signal Intelligence & Conversation Thread ── */}
+        {/* ── Right Column: Salesforce Verification, Signal Intelligence & Conversation Thread ── */}
         <div className="flex-1 space-y-6 min-w-0 w-full">
           
+          {/* ── Salesforce Account Verification Card (Phase 2) ── */}
+          <div className="bg-white rounded-3xl border border-gray-100 shadow-[0_2px_16px_rgba(30,27,75,0.03)] p-6 sm:p-7 space-y-4">
+            
+            {/* Header & Status */}
+            <div className="flex items-center justify-between gap-3 flex-wrap">
+              <div className="flex items-center gap-3">
+                <div className="w-10 h-10 rounded-2xl bg-[#00A1E0]/10 text-[#00A1E0] flex items-center justify-center shrink-0">
+                  <ShieldCheck size={20} />
+                </div>
+                <div>
+                  <h3 className="text-sm font-bold text-gray-900 tracking-tight">
+                    Salesforce Account Verification
+                  </h3>
+                  <p className="text-xs text-gray-500 font-medium">
+                    Company: <span className="font-bold text-gray-800">{contact.company || 'Not specified'}</span>
+                  </p>
+                </div>
+              </div>
+
+              <div className="flex items-center gap-2">
+                {verStatus === 'verified' && (
+                  <span className="inline-flex items-center gap-1.5 bg-[#DCFCE7] text-[#16A34A] border border-[#BBF7D0] rounded-xl px-3 py-1 text-xs font-bold shadow-xs">
+                    <CheckCircle2 size={13} />
+                    <span>Salesforce Verified</span>
+                  </span>
+                )}
+                {verStatus === 'not_verified' && (
+                  <span className="inline-flex items-center gap-1.5 bg-amber-50 text-amber-700 border border-amber-200 rounded-xl px-3 py-1 text-xs font-bold shadow-xs">
+                    <AlertCircle size={13} />
+                    <span>Not Verified</span>
+                  </span>
+                )}
+                {verStatus === 'unable_to_verify' && (
+                  <span className="inline-flex items-center gap-1.5 bg-gray-100 text-gray-600 border border-gray-200 rounded-xl px-3 py-1 text-xs font-bold shadow-xs">
+                    <HelpCircle size={13} />
+                    <span>Unable to Verify</span>
+                  </span>
+                )}
+                {verStatus === 'pending' && (
+                  <span className="inline-flex items-center gap-1.5 bg-slate-100 text-slate-600 border border-slate-200 rounded-xl px-3 py-1 text-xs font-semibold">
+                    <span>Verification Pending</span>
+                  </span>
+                )}
+
+                <button
+                  type="button"
+                  onClick={handleVerifySalesforce}
+                  disabled={isVerifyingSalesforce}
+                  className="bg-white hover:bg-gray-50 border border-gray-200 text-gray-700 rounded-xl px-3 py-1 text-xs font-semibold flex items-center gap-1.5 transition-colors cursor-pointer disabled:opacity-50"
+                  title="Check or refresh Salesforce account verification"
+                >
+                  <RefreshCw size={12} className={isVerifyingSalesforce ? 'animate-spin' : ''} />
+                  <span>{isVerifyingSalesforce ? 'Verifying…' : 'Re-verify'}</span>
+                </button>
+              </div>
+            </div>
+
+            {/* Timestamps */}
+            <div className="text-xs text-gray-400 font-medium pt-0.5">
+              <span>Last checked: {lastCheckedText}</span>
+            </div>
+
+            {/* Status explanation callouts */}
+            {verStatus === 'not_verified' && (
+              <div className="bg-amber-50/60 border border-amber-100 text-amber-900 rounded-2xl p-3.5 text-xs leading-relaxed font-normal">
+                No reliable Salesforce adoption evidence was found during the verification process. This does not establish that the company does not use Salesforce.
+              </div>
+            )}
+
+            {verStatus === 'unable_to_verify' && (
+              <div className="bg-gray-50 border border-gray-200 text-gray-700 rounded-2xl p-3.5 text-xs leading-relaxed font-normal">
+                Verification could not be completed. One or more required sources were unavailable or the company could not be reliably identified.
+              </div>
+            )}
+
+            {verStatus === 'pending' && (
+              <div className="bg-slate-50 border border-slate-200 text-slate-600 rounded-2xl p-3.5 text-xs leading-relaxed font-normal">
+                Salesforce verification is pending.
+              </div>
+            )}
+
+            {verData?.verification_summary && verStatus === 'verified' && (
+              <div className="bg-[#F0FDF4] border border-[#DCFCE7] text-gray-700 rounded-2xl p-3.5 text-xs leading-relaxed font-normal">
+                {verData.verification_summary}
+              </div>
+            )}
+
+            {/* Evidence items list */}
+            <div className="space-y-3 pt-1">
+              <div className="text-xs font-bold text-gray-700 uppercase tracking-wider">
+                Verification evidence
+              </div>
+
+              {evidenceList.length === 0 ? (
+                <div className="py-4 text-center text-xs text-gray-400 bg-gray-50/50 rounded-2xl border border-dashed border-gray-200">
+                  {verStatus === 'pending' ? 'Verification has not run yet.' : 'No reliable evidence records captured.'}
+                </div>
+              ) : (
+                evidenceList.map((item, idx) => (
+                  <div key={item.id || idx} className="rounded-2xl border border-gray-100 bg-[#FAFAFC] p-4 text-xs space-y-2">
+                    <div className="flex items-center justify-between gap-2">
+                      <span className="font-bold text-gray-900 flex items-center gap-2">
+                        <span className="w-5 h-5 rounded-full bg-white border border-gray-200 text-gray-600 text-[10px] flex items-center justify-center font-bold">
+                          {idx + 1}
+                        </span>
+                        <span>{item.source_name || humanizeSource(item.evidence_type)}</span>
+                      </span>
+                      {item.checked_at && (
+                        <span className="text-[11px] text-gray-400 font-normal">
+                          Checked {formatDisplayDate(item.checked_at)}
+                        </span>
+                      )}
+                    </div>
+
+                    <p className="text-gray-600 leading-relaxed font-normal pl-7">
+                      {item.evidence_description}
+                    </p>
+
+                    <div className="pl-7 pt-0.5 flex items-center justify-between gap-3 flex-wrap">
+                      {item.source_url ? (
+                        <a
+                          href={item.source_url}
+                          target="_blank"
+                          rel="noopener noreferrer"
+                          className="inline-flex items-center gap-1 text-[#5B4EFF] hover:underline font-semibold"
+                        >
+                          <span>Source: [View original evidence]</span>
+                          <ExternalLink size={11} />
+                        </a>
+                      ) : (
+                        <span className="text-gray-400 italic">
+                          Direct source link unavailable (Apollo structured technographic profile)
+                        </span>
+                      )}
+
+                      {item.evidence_date && (
+                        <span className="text-[11px] text-gray-400">
+                          Evidence date: {formatDisplayDate(item.evidence_date)}
+                        </span>
+                      )}
+                    </div>
+                  </div>
+                ))
+              )}
+            </div>
+          </div>
+
           {/* Card 1: Signal Intelligence */}
           <div className="bg-white rounded-3xl border border-[#ECE8FE] shadow-[0_2px_16px_rgba(30,27,75,0.03)] p-6 sm:p-7 space-y-4">
             
@@ -623,7 +552,7 @@ export default function ContactDetail() {
                           </div>
                           <div className="text-[11px] text-gray-400 font-normal flex items-center gap-2">
                             <span>Detected on {formatDisplayDate(sig.detected_at)}</span>
-                            {details.pills.length > 0 && (
+                            {details.pills && details.pills.length > 0 && details.pillsTitle && (
                               <>
                                 <span>•</span>
                                 <span className="text-[#5B4EFF] font-medium">
@@ -761,32 +690,28 @@ export default function ContactDetail() {
                     </p>
                   </div>
 
-                  {/* Source details */}
-                  <div>
-                    <div className="text-xs font-semibold text-gray-400 mb-2">
-                      Source details
-                    </div>
-                    <div className="grid grid-cols-2 gap-4">
-                      <div>
-                        <div className="text-[11px] font-semibold text-gray-400">
-                          Department
-                        </div>
-                        <div className="text-xs font-bold text-gray-900 mt-0.5 truncate">
-                          {details.department}
-                        </div>
+                  {/* Source details - Dynamic 2-column grid driven by signal type */}
+                  {details.sourceDetails && details.sourceDetails.length > 0 && (
+                    <div>
+                      <div className="text-xs font-semibold text-gray-400 mb-2">
+                        Source details
                       </div>
-                      <div>
-                        <div className="text-[11px] font-semibold text-gray-400">
-                          Employment type
-                        </div>
-                        <div className="text-xs font-bold text-gray-900 mt-0.5 truncate">
-                          {details.employmentType}
-                        </div>
+                      <div className="grid grid-cols-2 gap-4">
+                        {details.sourceDetails.map((item, idx) => (
+                          <div key={idx} className="min-w-0">
+                            <div className="text-[11px] font-semibold text-gray-400">
+                              {item.label}
+                            </div>
+                            <div className="text-xs font-bold text-gray-900 mt-0.5 truncate" title={item.value}>
+                              {item.value}
+                            </div>
+                          </div>
+                        ))}
                       </div>
                     </div>
-                  </div>
+                  )}
 
-                  {/* Company context */}
+                  {/* Company context - Strictly signal-grounded, zero prospect summary leakage */}
                   <div>
                     <div className="text-xs font-semibold text-gray-400 mb-1">
                       Company context
@@ -796,8 +721,8 @@ export default function ContactDetail() {
                     </p>
                   </div>
 
-                  {/* Roles mentioned (or Locations detected) */}
-                  {details.pills.length > 0 && (
+                  {/* Roles / Locations / Technologies Mentioned */}
+                  {details.pills && details.pills.length > 0 && details.pillsTitle && (
                     <div>
                       <div className="flex items-center gap-2 mb-2">
                         <span className="text-xs font-bold text-gray-900">{details.pillsTitle}</span>
@@ -884,15 +809,21 @@ export default function ContactDetail() {
                   Close
                 </button>
                 
-                <a
-                  href={details.sourceUrl}
-                  target="_blank"
-                  rel="noopener noreferrer"
-                  className="px-5 py-2 rounded-xl text-xs font-semibold text-white bg-[#5B4EFF] hover:bg-[#4C3FF0] active:scale-[0.98] transition-all flex items-center gap-1.5 shadow-sm cursor-pointer"
-                >
-                  <span>View original source</span>
-                  <ExternalLink size={12} />
-                </a>
+                {details.sourceUrl ? (
+                  <a
+                    href={details.sourceUrl}
+                    target="_blank"
+                    rel="noopener noreferrer"
+                    className="px-5 py-2 rounded-xl text-xs font-semibold text-white bg-[#5B4EFF] hover:bg-[#4C3FF0] active:scale-[0.98] transition-all flex items-center gap-1.5 shadow-sm cursor-pointer"
+                  >
+                    <span>View original source</span>
+                    <ExternalLink size={12} />
+                  </a>
+                ) : (
+                  <span className="px-4 py-2 rounded-xl text-xs font-medium text-gray-400 bg-gray-50 border border-gray-200">
+                    Direct source link unavailable
+                  </span>
+                )}
               </div>
 
             </div>

@@ -4,7 +4,8 @@ import {
   Mail, Calendar, CheckCircle, XCircle, AlertCircle,
   ExternalLink, Shield, Key, RefreshCw, Save, User, Building,
   Check, Lock, Info, Sparkles, Edit3, UserPlus, Users,
-  ToggleLeft, ToggleRight, Trash2, ArrowRight
+  ToggleLeft, ToggleRight, Trash2, ArrowRight, Server,
+  X, Cloud, CheckCircle2
 } from 'lucide-react'
 import { useAuth } from '../context/AuthContext'
 import {
@@ -64,11 +65,11 @@ export default function Settings() {
   })
 
   // Fetch admin user list (only if admin)
-  const isAdmin = user?.role === 'ADMIN' || true // default to admin view per Figma
+  const isAdmin = (user?.role || '').toUpperCase() === 'ADMIN'
   const { data: adminUsersData = [], refetch: refetchAdminUsers } = useQuery({
     queryKey: ['admin-users'],
     queryFn: fetchAdminUsers,
-    enabled: !!isAdmin,
+    enabled: isAdmin,
   })
 
   useEffect(() => {
@@ -202,12 +203,12 @@ export default function Settings() {
   }
 
   // Active / Logged-in Rep Info
-  const displayName = settingsData?.name || user?.name || 'P P Shree Lakshmi'
-  const displayEmail = settingsData?.email || user?.email || 'shree.lakshmi@forcecloudlabs.com'
-  const displayRole = (settingsData?.role || user?.role || 'ADMIN').toUpperCase() === 'ADMIN' ? 'Administrator' : 'Sales Representative'
-  const resolvedCalUsername = calUsername || settingsData?.cal_com_username || 'shree-lakshmi-iaqqsz'
+  const displayName = settingsData?.name || user?.name || user?.email?.split('@')[0] || 'Sales Representative'
+  const displayEmail = settingsData?.email || user?.email || ''
+  const displayRole = (settingsData?.role || user?.role || 'SALES_REPRESENTATIVE').toUpperCase() === 'ADMIN' ? 'Administrator' : 'Sales Representative'
+  const resolvedCalUsername = calUsername || settingsData?.cal_com_username || user?.cal_com_username || ''
   const resolvedCalSlug = calSlug || settingsData?.cal_com_event_slug || '15min'
-  const resolvedCalUrl = calUrl || settingsData?.cal_com_booking_url || `https://cal.com/${resolvedCalUsername}/30min`
+  const resolvedCalUrl = calUrl || settingsData?.cal_com_booking_url || (resolvedCalUsername ? `https://cal.com/${resolvedCalUsername}/${resolvedCalSlug}` : '')
 
   // Sort admin users so the primary admin appears at top of table
   const sortedAdminUsers = useMemo(() => {
@@ -217,7 +218,7 @@ export default function Settings() {
           id: user?.id || 'current-user',
           name: displayName,
           email: displayEmail,
-          role: 'ADMIN',
+          role: user?.role || 'SALES_REPRESENTATIVE',
           cal_com_username: resolvedCalUsername,
           cal_com_event_slug: resolvedCalSlug,
           is_active: true,
@@ -230,7 +231,7 @@ export default function Settings() {
       if (b.id === currentId || b.email === displayEmail) return 1
       return 0
     })
-  }, [adminUsersData, user?.id, displayName, displayEmail, resolvedCalUsername, resolvedCalSlug])
+  }, [adminUsersData, user?.id, user?.role, displayName, displayEmail, resolvedCalUsername, resolvedCalSlug])
 
   return (
     <div className="w-full space-y-7 pb-12">
@@ -321,118 +322,120 @@ export default function Settings() {
       </div>
 
       {/* ──────────────────────────────────────────────────────────
-          SECTION 2: User Management & Sales Representatives
+          SECTION 2: User Management & Sales Representatives (Admin Only)
       ────────────────────────────────────────────────────────── */}
-      <div className="space-y-3">
-        <div className="flex items-center justify-between">
-          <div className="flex items-center gap-2">
-            <Users size={16} className="text-[#5B4EFF]" />
-            <h2 className="text-sm font-bold text-gray-900">User Management &amp; Sales Representatives</h2>
-            <span className="border border-gray-200 bg-white text-gray-500 text-[11px] font-medium px-2.5 py-0.5 rounded-full ml-1">
-              Admin Privilege
-            </span>
+      {isAdmin && (
+        <div className="space-y-3">
+          <div className="flex items-center justify-between">
+            <div className="flex items-center gap-2">
+              <Users size={16} className="text-[#5B4EFF]" />
+              <h2 className="text-sm font-bold text-gray-900">User Management &amp; Sales Representatives</h2>
+              <span className="border border-gray-200 bg-white text-gray-500 text-[11px] font-medium px-2.5 py-0.5 rounded-full ml-1">
+                Admin Privilege
+              </span>
+            </div>
+
+            <button
+              onClick={() => {
+                setUserManageError(null)
+                setShowAddUserModal(true)
+              }}
+              className="bg-[#5B4EFF] hover:bg-[#4F46E5] text-white font-medium text-xs px-4 py-2 rounded-xl flex items-center gap-2 shadow-2xs transition-all cursor-pointer"
+            >
+              <UserPlus size={14} />
+              <span>Add / Invite Sales Representative</span>
+            </button>
           </div>
 
-          <button
-            onClick={() => {
-              setUserManageError(null)
-              setShowAddUserModal(true)
-            }}
-            className="bg-[#5B4EFF] hover:bg-[#4F46E5] text-white font-medium text-xs px-4 py-2 rounded-xl flex items-center gap-2 shadow-2xs transition-all cursor-pointer"
-          >
-            <UserPlus size={14} />
-            <span>Add / Invite Sales Representative</span>
-          </button>
-        </div>
+          <div className="bg-white rounded-2xl border border-gray-100 shadow-2xs overflow-hidden">
+            <div className="overflow-x-auto">
+              <table className="w-full text-left border-collapse">
+                <thead>
+                  <tr className="border-b border-gray-100 bg-gray-50/50">
+                    <th className="px-6 py-3.5 text-[11px] font-semibold text-gray-400 uppercase tracking-wider">
+                      Sales Representative
+                    </th>
+                    <th className="px-6 py-3.5 text-[11px] font-semibold text-gray-400 uppercase tracking-wider">
+                      Company Email
+                    </th>
+                    <th className="px-6 py-3.5 text-[11px] font-semibold text-gray-400 uppercase tracking-wider">
+                      Role
+                    </th>
+                    <th className="px-6 py-3.5 text-[11px] font-semibold text-gray-400 uppercase tracking-wider">
+                      Cal.com Mapping
+                    </th>
+                    <th className="px-6 py-3.5 text-[11px] font-semibold text-gray-400 uppercase tracking-wider">
+                      Status
+                    </th>
+                    <th className="px-6 py-3.5 text-[11px] font-semibold text-gray-400 uppercase tracking-wider text-right">
+                      Actions
+                    </th>
+                  </tr>
+                </thead>
+                <tbody className="divide-y divide-gray-100 text-xs">
+                  {sortedAdminUsers.map((rep) => {
+                    const repCalSlug = rep.cal_com_event_slug || '15min'
+                    const repCalUsername = rep.cal_com_username || (rep.email === displayEmail ? resolvedCalUsername : '')
+                    const mappingDisplay = repCalUsername ? `${repCalUsername}/${repCalSlug}` : 'Not Mapped'
 
-        <div className="bg-white rounded-2xl border border-gray-100 shadow-2xs overflow-hidden">
-          <div className="overflow-x-auto">
-            <table className="w-full text-left border-collapse">
-              <thead>
-                <tr className="border-b border-gray-100 bg-gray-50/50">
-                  <th className="px-6 py-3.5 text-[11px] font-semibold text-gray-400 uppercase tracking-wider">
-                    Sales Representative
-                  </th>
-                  <th className="px-6 py-3.5 text-[11px] font-semibold text-gray-400 uppercase tracking-wider">
-                    Company Email
-                  </th>
-                  <th className="px-6 py-3.5 text-[11px] font-semibold text-gray-400 uppercase tracking-wider">
-                    Role
-                  </th>
-                  <th className="px-6 py-3.5 text-[11px] font-semibold text-gray-400 uppercase tracking-wider">
-                    Cal.com Mapping
-                  </th>
-                  <th className="px-6 py-3.5 text-[11px] font-semibold text-gray-400 uppercase tracking-wider">
-                    Status
-                  </th>
-                  <th className="px-6 py-3.5 text-[11px] font-semibold text-gray-400 uppercase tracking-wider text-right">
-                    Actions
-                  </th>
-                </tr>
-              </thead>
-              <tbody className="divide-y divide-gray-100 text-xs">
-                {sortedAdminUsers.map((rep) => {
-                  const repCalSlug = rep.cal_com_event_slug || '15min'
-                  const repCalUsername = rep.cal_com_username || (rep.email === displayEmail ? resolvedCalUsername : '')
-                  const mappingDisplay = repCalUsername ? `${repCalUsername}/${repCalSlug}` : 'Not Mapped'
-
-                  return (
-                    <tr key={rep.id} className="hover:bg-gray-50/60 transition-colors">
-                      <td className="px-6 py-4 font-bold text-gray-900">
-                        {rep.name}
-                      </td>
-                      <td className="px-6 py-4 text-gray-500 font-normal">
-                        {rep.email}
-                      </td>
-                      <td className="px-6 py-4">
-                        <span className={`text-[10px] font-bold px-2 py-0.5 rounded-md ${
-                          rep.role === 'ADMIN'
-                            ? 'bg-[#EEF2FF] text-[#4F46E5]'
-                            : 'bg-gray-100 text-gray-600'
-                        }`}>
-                          {rep.role || 'SALES_REP'}
-                        </span>
-                      </td>
-                      <td className="px-6 py-4">
-                        {repCalUsername ? (
-                          <a
-                            href={`https://cal.com/${repCalUsername}/${repCalSlug}`}
-                            target="_blank"
-                            rel="noopener noreferrer"
-                            className="text-[#2563EB] hover:underline font-normal"
+                    return (
+                      <tr key={rep.id} className="hover:bg-gray-50/60 transition-colors">
+                        <td className="px-6 py-4 font-bold text-gray-900">
+                          {rep.name}
+                        </td>
+                        <td className="px-6 py-4 text-gray-500 font-normal">
+                          {rep.email}
+                        </td>
+                        <td className="px-6 py-4">
+                          <span className={`text-[10px] font-bold px-2 py-0.5 rounded-md ${
+                            rep.role === 'ADMIN'
+                              ? 'bg-[#EEF2FF] text-[#4F46E5]'
+                              : 'bg-gray-100 text-gray-600'
+                          }`}>
+                            {rep.role || 'SALES_REP'}
+                          </span>
+                        </td>
+                        <td className="px-6 py-4">
+                          {repCalUsername ? (
+                            <a
+                              href={`https://cal.com/${repCalUsername}/${repCalSlug}`}
+                              target="_blank"
+                              rel="noopener noreferrer"
+                              className="text-[#2563EB] hover:underline font-normal"
+                            >
+                              {mappingDisplay}
+                            </a>
+                          ) : (
+                            <span className="text-gray-400 italic">No mapping</span>
+                          )}
+                        </td>
+                        <td className="px-6 py-4">
+                          <span className={`font-semibold ${rep.is_active ? 'text-[#059669]' : 'text-gray-400'}`}>
+                            {rep.is_active ? 'Active' : 'Inactive'}
+                          </span>
+                        </td>
+                        <td className="px-6 py-4 text-right">
+                          <button
+                            onClick={() => {
+                              setEditingCalUser(rep)
+                              setEditCalUsername(rep.cal_com_username || '')
+                              setEditCalSlug(rep.cal_com_event_slug || '15min')
+                              setEditCalUrl(rep.cal_com_booking_url || '')
+                            }}
+                            className="border border-gray-200 bg-white hover:bg-gray-50 text-gray-700 text-xs font-medium px-3 py-1 rounded-lg shadow-2xs transition-all cursor-pointer"
                           >
-                            {mappingDisplay}
-                          </a>
-                        ) : (
-                          <span className="text-gray-400 italic">No mapping</span>
-                        )}
-                      </td>
-                      <td className="px-6 py-4">
-                        <span className={`font-semibold ${rep.is_active ? 'text-[#059669]' : 'text-gray-400'}`}>
-                          {rep.is_active ? 'Active' : 'Inactive'}
-                        </span>
-                      </td>
-                      <td className="px-6 py-4 text-right">
-                        <button
-                          onClick={() => {
-                            setEditingCalUser(rep)
-                            setEditCalUsername(rep.cal_com_username || '')
-                            setEditCalSlug(rep.cal_com_event_slug || '15min')
-                            setEditCalUrl(rep.cal_com_booking_url || '')
-                          }}
-                          className="border border-gray-200 bg-white hover:bg-gray-50 text-gray-700 text-xs font-medium px-3 py-1 rounded-lg shadow-2xs transition-all cursor-pointer"
-                        >
-                          Cal Mapping
-                        </button>
-                      </td>
-                    </tr>
-                  )
-                })}
-              </tbody>
-            </table>
+                            Cal Mapping
+                          </button>
+                        </td>
+                      </tr>
+                    )
+                  })}
+                </tbody>
+              </table>
+            </div>
           </div>
         </div>
-      </div>
+      )}
 
       {/* ──────────────────────────────────────────────────────────
           SECTION 3: Representative Mailbox Integrations
@@ -804,9 +807,9 @@ export default function Settings() {
       </div>
 
       {/* ──────────────────────────────────────────────────────────
-          MODAL 1: Add / Invite Sales Representative
+          MODAL 1: Add / Invite Sales Representative (Admin Only)
       ────────────────────────────────────────────────────────── */}
-      {showAddUserModal && (
+      {showAddUserModal && isAdmin && (
         <div className="fixed inset-0 z-50 bg-black/50 backdrop-blur-xs flex items-center justify-center p-4">
           <div className="bg-white rounded-2xl max-w-md w-full p-6 shadow-2xl border border-gray-100 animate-in fade-in zoom-in-95 duration-150">
             <div className="flex items-start justify-between mb-4">
@@ -931,9 +934,9 @@ export default function Settings() {
       )}
 
       {/* ──────────────────────────────────────────────────────────
-          MODAL 2: Cal Mapping Modal for Existing User
+          MODAL 2: Cal Mapping Modal for Existing User (Admin Only)
       ────────────────────────────────────────────────────────── */}
-      {editingCalUser && (
+      {editingCalUser && isAdmin && (
         <div className="fixed inset-0 z-50 bg-black/50 backdrop-blur-xs flex items-center justify-center p-4">
           <div className="bg-white rounded-2xl max-w-md w-full p-6 shadow-2xl border border-gray-100 animate-in fade-in zoom-in-95 duration-150">
             <div className="flex items-start justify-between mb-4">

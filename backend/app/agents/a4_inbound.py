@@ -129,7 +129,10 @@ class InboundAgent:
 
         # Handle non-interested / suppression types immediately (no human loop needed)
         if intent == "unsubscribe":
-            contact.do_not_contact = True
+            from app.services.suppression_service import SuppressionService
+            await SuppressionService.suppress_email(
+                self.db, contact.email, source="a4_inbound", reason="unsubscribe_intent"
+            )
             delta = READINESS_DELTAS["reply_unsubscribe"]
             new_score = max(0, (contact.readiness_score or 0) + delta)
             contact.readiness_score = new_score
@@ -294,6 +297,25 @@ class InboundAgent:
         )
         contact = contact_result.scalar_one_or_none()
 
+        # Immediate pre-send DNC suppression check
+        if contact:
+            from app.services.suppression_service import SuppressionService
+            is_suppressed, supp_reason = await SuppressionService.is_email_suppressed(
+                self.db, contact.email, contact_id=contact.id
+            )
+            if is_suppressed:
+                logger.warning(
+                    "A4: Approved reply blocked immediately before send: recipient is suppressed (DNC)",
+                    contact_id=contact.id,
+                    email=contact.email,
+                    reason=supp_reason,
+                )
+                thread_event.rejected_at = datetime.utcnow()
+                thread_event.rejected_by = approved_by
+                thread_event.rejection_reason = f"DNC suppression: {supp_reason}"
+                await self.db.commit()
+                return False
+
         # Get booking link if readiness score is high enough and not already in draft
         booking_link = None
         final_response = thread_event.draft_content or ""
@@ -396,6 +418,25 @@ class InboundAgent:
             select(Contact).where(Contact.id == thread_event.contact_id)
         )
         contact = contact_result.scalar_one_or_none()
+
+        # Immediate pre-send DNC suppression check
+        if contact:
+            from app.services.suppression_service import SuppressionService
+            is_suppressed, supp_reason = await SuppressionService.is_email_suppressed(
+                self.db, contact.email, contact_id=contact.id
+            )
+            if is_suppressed:
+                logger.warning(
+                    "A4: Approved reply blocked immediately before send: recipient is suppressed (DNC)",
+                    contact_id=contact.id,
+                    email=contact.email,
+                    reason=supp_reason,
+                )
+                thread_event.rejected_at = datetime.utcnow()
+                thread_event.rejected_by = approved_by
+                thread_event.rejection_reason = f"DNC suppression: {supp_reason}"
+                await self.db.commit()
+                return False
 
         # If REQUIRE_HUMAN_APPROVAL is enabled, suppress auto-send fallback
         if settings.REQUIRE_HUMAN_APPROVAL:
@@ -739,6 +780,15 @@ Return only the email body text, no subject line."""
         formatted_html = f"<div style='font-family: -apple-system, BlinkMacSystemFont, Segoe UI, Roboto, Helvetica, Arial, sans-serif; font-size: 15px; line-height: 1.6; color: #1e293b;'>{'<br/>'.join(html_body.splitlines())}</div>"
         
         target_to = getattr(settings, "TEST_EMAIL_OVERRIDE", "") or (contact.email if contact else "")
+
+        # Defensive immediate pre-send DNC suppression check
+        from app.services.suppression_service import SuppressionService
+        is_supp, supp_reason = await SuppressionService.is_email_suppressed(
+            self.db, email=contact.email if contact else target_to, contact_id=contact.id if contact else None
+        )
+        if is_supp:
+            logger.warning("A4: _send_reply_via_resend blocked: recipient is suppressed (DNC)", email=target_to, reason=supp_reason)
+            return None
 
         # Priority 1: Rep's authorized Microsoft 365 mailbox via Microsoft Graph
         if contact and contact.user_id:

@@ -106,6 +106,7 @@ export default function History() {
           item.target_location?.toLowerCase().includes(q) ||
           item.target_industries?.toLowerCase().includes(q) ||
           item.target_keywords?.toLowerCase().includes(q) ||
+          item.company_lookalike?.toLowerCase().includes(q) ||
           item.target_job_titles?.toLowerCase().includes(q) ||
           String(item.id).includes(q)
       )
@@ -392,6 +393,19 @@ export default function History() {
                         {item.target_keywords || 'None specified'}
                       </span>
                     </div>
+
+                    {/* Look-alike reference companies (if specified) */}
+                    {item.company_lookalike && (
+                      <div className="flex items-start gap-2">
+                        <div className="flex items-center gap-1 text-[10px] font-bold text-[#4F46E5] tracking-wider uppercase shrink-0 pt-0.5">
+                          <Building2 size={12} className="text-[#4F46E5]" />
+                          <span>LOOK-ALIKES:</span>
+                        </div>
+                        <span className="text-xs text-gray-600 font-normal leading-relaxed">
+                          {item.company_lookalike}
+                        </span>
+                      </div>
+                    )}
                   </div>
 
                   {/* Right Column (~35% width) */}

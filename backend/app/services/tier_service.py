@@ -46,9 +46,7 @@ MEANINGFUL_SIGNAL_TYPES: Set[str] = {
 }
 
 # Sources representing passive infrastructure detection rather than active buying intent
-PASSIVE_SOURCES: Set[str] = {
-    "website_fingerprint",
-}
+PASSIVE_SOURCES: Set[str] = set()
 
 
 class AccountTierInfo:
@@ -153,11 +151,13 @@ class AccountTierService:
 
                     days_ago = (now - sig_at).days if sig_at else 999
                     is_recent = 0 <= days_ago <= RECENCY_WINDOW_DAYS
-                    is_passive = sig_src in PASSIVE_SOURCES
+                    is_passive = (sig_src in PASSIVE_SOURCES) or (sig_src == "website_fingerprint") or (
+                        any(t in ("tech_stack_change", "tech_stack_observed") for t in types) and sig_src not in ("google_news_rss", "newsapi", "currents")
+                    )
 
                     # Treat each unique signal type from this contact as a coupled candidate
                     for t in types:
-                        t_passive = is_passive or (t == "tech_stack_change" and sig_src in PASSIVE_SOURCES)
+                        t_passive = is_passive or (t in ("tech_stack_change", "tech_stack_observed") and sig_src not in ("google_news_rss", "newsapi", "currents"))
                         events.append({
                             "id": None,
                             "type": t,

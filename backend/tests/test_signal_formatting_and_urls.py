@@ -132,7 +132,8 @@ class TestSignalFormattingAndURLs(unittest.TestCase):
         """Test humanizing internal provider keys."""
         self.assertEqual(humanize_signal_source("google_news_rss"), "Google News")
         self.assertEqual(humanize_signal_source("adzuna"), "Adzuna Job Board")
-        self.assertEqual(humanize_signal_source("website_fingerprint"), "Company Website")
+        self.assertEqual(humanize_signal_source("predictleads"), "PredictLeads")
+        self.assertEqual(humanize_signal_source("currents"), "Currents News")
 
 
 if __name__ == "__main__":

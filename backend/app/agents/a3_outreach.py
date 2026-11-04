@@ -70,8 +70,8 @@ TEMPLATES = {
         "body": "Hi {first_name},\n\nWith your role as {title} at {company}, I imagine scaling tech processes is top of mind. Many companies in the {industry} space are trying to integrate AI capabilities into their workflows but struggle with database integration.\n\nWe provide AI consulting and Salesforce integration services to bring automation directly into your CRM.\n\nWould you be open to a low-pressure conversation on how we can streamline this for {company}?\n\nBest,\n[Your Name]"
     },
     "Product Demo": {
-        "subject": "Quick demo request: Salesforce & GTM automation for {company}",
-        "body": "Hi {first_name},\n\nI noticed {company} recently triggered a stack change event. Integrating new tools into your existing Salesforce setup can be highly time-consuming.\n\nWe've built a GTM automation platform that automates CRM data enrichment. I'd love to run a quick 10-minute demo to show you how it works and see if it aligns with {company}'s needs.\n\nDo you have some time for a quick demo this week?\n\nBest,\n[Your Name]"
+        "subject": "Quick demo request: CRM & GTM automation for {company}",
+        "body": "Hi {first_name},\n\nI noticed {company} recently triggered a tech stack update. Integrating new tools into your existing CRM workflows can be time-consuming.\n\nWe've built a GTM automation platform that automates CRM data enrichment. I'd love to run a quick 10-minute demo to show you how it works and see if it aligns with {company}'s needs.\n\nDo you have some time for a quick demo this week?\n\nBest,\n[Your Name]"
     },
     "AI Automation": {
         "subject": "Automating workflows at {company} via AI agents",
@@ -86,12 +86,12 @@ TEMPLATES = {
         "body": "Hi {first_name},\n\nManaging cloud migrations and digital transformations is a major effort for growing teams in the {industry} sector.\n\nWe partner with firms like {company} to migrate legacy systems to modern cloud CRMs and set up robust GTM automations to ensure business continuity.\n\nDo you have 10 minutes next week to discuss how we can help speed up {company}'s digital initiatives?\n\nBest,\n[Your Name]"
     },
     "Managed Services": {
-        "subject": "Reliable CRM & Salesforce Managed Services for {company}",
-        "body": "Hi {first_name},\n\nMany {industry} firms with {company_size} employees struggle with the high cost and overhead of hiring full-time Salesforce administrators.\n\nWe offer CRM Managed Services—giving you access to certified Salesforce architects and admins on demand, for a fraction of the cost of a full-time hire.\n\nWould you be open to a brief chat about how we can support {company}'s CRM admin needs?\n\nBest,\n[Your Name]"
+        "subject": "Reliable CRM & Cloud Systems Managed Services for {company}",
+        "body": "Hi {first_name},\n\nMany {industry} firms with {company_size} employees struggle with the high cost and overhead of hiring full-time CRM administrators.\n\nWe offer CRM Managed Services—giving you access to certified systems architects and automation specialists on demand, for a fraction of the cost of a full-time hire.\n\nWould you be open to a brief chat about how we can support {company}'s CRM admin needs?\n\nBest,\n[Your Name]"
     },
     "General Sales Outreach": {
         "subject": "Streamlining CRM & GTM operations at {company}",
-        "body": "Hi {first_name},\n\nI'm reaching out because we help companies in the {industry} sector automate their GTM operations and integrate cloud CRM systems.\n\nWe noticed {company} has been scaling, and wanted to see how you are currently handling Salesforce data enrichment and lead enrichment.\n\nDo you have 10 minutes for a brief introductory call?\n\nBest,\n[Your Name]"
+        "body": "Hi {first_name},\n\nI'm reaching out because we help companies in the {industry} sector automate their GTM operations and integrate cloud CRM systems.\n\nWe noticed {company} has been scaling, and wanted to see how you are currently handling CRM data enrichment and lead pipelines.\n\nDo you have 10 minutes for a brief introductory call?\n\nBest,\n[Your Name]"
     }
 }
 
@@ -617,6 +617,24 @@ class DraftManager:
             await self.db.flush()
             return False
 
+        # Immediate pre-send DNC suppression check
+        from app.services.suppression_service import SuppressionService
+        is_suppressed, supp_reason = await SuppressionService.is_email_suppressed(
+            self.db, contact.email if contact else None, contact_id=contact.id if contact else None
+        )
+        if is_suppressed:
+            logger.warning(
+                "A3: Draft approval blocked immediately before send: recipient is suppressed (DNC)",
+                draft_id=draft_id,
+                contact_id=contact.id if contact else None,
+                email=contact.email if contact else None,
+                reason=supp_reason,
+            )
+            draft.status = "suppressed"
+            draft.approval_state = "rejected"
+            await self.db.commit()
+            return False
+
         draft.approval_state = "approved"
         
         # Dispatch outreach using owner rep's authorized mailbox
@@ -1012,9 +1030,18 @@ class OutreachAgent:
                 continue
             
             step_def = steps[sequence_step]
-            if contact.do_not_contact:
+            from app.services.suppression_service import SuppressionService
+            is_suppressed, supp_reason = await SuppressionService.is_email_suppressed(
+                self.db, contact.email, contact_id=contact.id
+            )
+            if is_suppressed or contact.do_not_contact:
                 skip_reasons["do_not_contact"] += 1
-                logger.info("Outreach skipped: contact marked do_not_contact", contact_id=contact.id)
+                logger.info(
+                    "Outreach skipped: contact email is suppressed (DNC)",
+                    contact_id=contact.id,
+                    email=contact.email,
+                    reason=supp_reason,
+                )
                 continue
             if not contact.email:
                 skip_reasons["missing_email"] += 1
@@ -1193,6 +1220,7 @@ class OutreachAgent:
                 and_(
                     or_(Contact.user_input_id == active_session_id, Contact.id.in_(assoc_ids_q)),
                     Contact.do_not_contact == False,
+                    Contact.icp_score >= settings.ICP_SCORE_THRESHOLD,
                     SignalEvent.confidence >= settings.SIGNAL_SCORE_THRESHOLD / 100,
                     SignalEvent.processed == False,
                     SignalEvent.detected_at >= datetime.utcnow() - timedelta(days=30),
@@ -1300,6 +1328,7 @@ Rules:
 - Do NOT rewrite the email from scratch. Stick to the tone, structure, and main value proposition of the template.
 - Keep the final message under 150 words.
 - Do not use phrases like "I hope this email finds you well" or "quick question".
+- Salesforce Context Policy: Only make Salesforce references if Salesforce Verification is explicitly 'Verified'. If 'Not verified' or 'Unable to verify', do NOT assume or claim the prospect company uses Salesforce.
 - Return valid JSON with exactly two fields: "subject" and "body".
 
 Email Template:
@@ -1307,6 +1336,13 @@ Subject: {base_template['subject']}
 Body:
 {base_template['body']}
 """
+
+        sf_ver = getattr(contact, "salesforce_verification", None)
+        sf_status = getattr(sf_ver, "verification_status", None) if sf_ver else None
+        if sf_status == "verified":
+            sf_context = f"Verified: {getattr(sf_ver, 'verification_summary', 'Credible evidence of Salesforce adoption')}"
+        else:
+            sf_context = "Not verified (do NOT claim or assume that company uses Salesforce)"
 
         user_prompt = f"""Prospect Context:
 - First Name: {contact.first_name or 'there'}
@@ -1316,6 +1352,7 @@ Body:
 - Company Size: {contact.company_size or 'N/A'}
 - Funding Stage: {contact.funding_stage or 'N/A'}
 - Role Details (Hiring): {role_details}
+- Salesforce Verification Context: {sf_context}
 
 Trigger Signal:
 - Type: {signal_type}
@@ -1337,15 +1374,45 @@ Decision Engine Context:
                 use_sonnet=use_sonnet,
                 response_format={"subject": "string", "body": "string"},
             )
-            return {
-                "subject": response.get("subject", ""),
-                "body": response.get("body", ""),
-                "variant_id": variant.id if variant else "default",
-                "channel": channel,
-            }
+            subj = (response.get("subject") or "").strip()
+            body = (response.get("body") or "").strip()
+            if subj and body:
+                return {
+                    "subject": subj,
+                    "body": body,
+                    "variant_id": variant.id if variant else "default",
+                    "channel": channel,
+                }
         except Exception as e:
-            logger.error("Message generation failed", contact_email=contact.email, error=str(e))
-            return None
+            logger.warning("LLM completion failed, falling back to deterministic template", contact_email=contact.email, error=str(e))
+
+        # Deterministic template fallback when LLM fails, rate limits, or returns empty response
+        fn = contact.first_name or "there"
+        comp = contact.company or "your company"
+        tit = contact.title or "your role"
+        ind = contact.industry or "your industry"
+        cs = contact.company_size or "growing"
+        fs = getattr(contact, "funding_stage", None) or "growth"
+        subj = (base_template.get("subject", "")
+                .replace("{first_name}", fn)
+                .replace("{company}", comp)
+                .replace("{title}", tit)
+                .replace("{role_details}", role_details)
+                .replace("{funding_stage}", fs))
+        body = (base_template.get("body", "")
+                .replace("{first_name}", fn)
+                .replace("{company}", comp)
+                .replace("{title}", tit)
+                .replace("{industry}", ind)
+                .replace("{company_size}", str(cs))
+                .replace("{role_details}", role_details)
+                .replace("{funding_stage}", fs))
+        return {
+            "subject": subj,
+            "body": body,
+            "variant_id": variant.id if variant else "default",
+            "channel": channel,
+        }
 
     # ── NEW: Call script generation ───────────────────────────────────────
 

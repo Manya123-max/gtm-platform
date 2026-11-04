@@ -124,6 +124,10 @@ class NormalizedICPConfig:
     industry_terms: List[str] = field(default_factory=list)
     technology_keywords: List[str] = field(default_factory=list)
     org_keyword_tags: List[str] = field(default_factory=list)
+    company_lookalike: List[str] = field(default_factory=list)
+    lookalike_organization_ids: List[str] = field(default_factory=list)
+    signals: List[str] = field(default_factory=list)
+    funding_stages: List[str] = field(default_factory=list)
     technology_keywords_required: bool = False
     include_similar_titles: bool = False
     threshold: float = 70.0
@@ -167,6 +171,10 @@ class NormalizedICPConfig:
             "target_technology_keywords": self.technology_keywords,
             "target_location": self.organization_locations,
             "org_keyword_tags": self.org_keyword_tags,
+            "company_lookalike": self.company_lookalike,
+            "lookalike_organization_ids": self.lookalike_organization_ids,
+            "signals": self.signals,
+            "funding_stages": self.funding_stages,
             "technology_keywords_required": self.technology_keywords_required,
             "include_similar_titles": self.include_similar_titles,
             "threshold": self.threshold,
@@ -470,6 +478,48 @@ def normalize_icp_input(raw_input: Dict[str, Any]) -> NormalizedICPConfig:
         raw_input.get("include_similar_titles", getattr(settings, "APOLLO_INCLUDE_SIMILAR_TITLES", False))
     )
 
+    raw_lookalike = (
+        raw_input.get("company_lookalike")
+        or raw_input.get("lookalike_companies")
+        or raw_input.get("lookalikes")
+        or []
+    )
+    from app.services.company_lookalike_service import CompanyLookalikeService
+    company_lookalike = CompanyLookalikeService.normalize_reference_companies(raw_lookalike)
+
+    raw_lookalike_ids = raw_input.get("lookalike_organization_ids") or []
+    if isinstance(raw_lookalike_ids, str):
+        lookalike_org_ids = [i.strip() for i in raw_lookalike_ids.split(",") if i.strip()]
+    elif isinstance(raw_lookalike_ids, list):
+        lookalike_org_ids = [str(i).strip() for i in raw_lookalike_ids if str(i).strip()]
+    else:
+        lookalike_org_ids = []
+
+    raw_signals = (
+        raw_input.get("signals")
+        or raw_input.get("target_signals")
+        or raw_input.get("signal_filters")
+        or []
+    )
+    signals: List[str] = []
+    for s in _split_terms(raw_signals):
+        cleaned_s = s.strip()
+        if cleaned_s and cleaned_s not in signals:
+            signals.append(cleaned_s)
+
+    raw_funding = (
+        raw_input.get("funding_stages")
+        or raw_input.get("funding")
+        or raw_input.get("target_funding")
+        or raw_input.get("funding_categories")
+        or []
+    )
+    funding_stages: List[str] = []
+    for f in _split_terms(raw_funding):
+        cleaned_f = f.strip()
+        if cleaned_f and cleaned_f not in funding_stages:
+            funding_stages.append(cleaned_f)
+
     vendor_services = str(raw_input.get("our_services") or raw_input.get("vendor_services") or "").strip()
     our_company_name = str(raw_input.get("our_company_name") or raw_input.get("company_name") or "").strip()
     user_id = raw_input.get("user_id")
@@ -485,6 +535,10 @@ def normalize_icp_input(raw_input: Dict[str, Any]) -> NormalizedICPConfig:
         industry_terms=industry_terms,
         technology_keywords=technology_keywords,
         org_keyword_tags=org_keyword_tags,
+        company_lookalike=company_lookalike,
+        lookalike_organization_ids=lookalike_org_ids,
+        signals=signals,
+        funding_stages=funding_stages,
         technology_keywords_required=tech_req,
         include_similar_titles=include_similar_titles,
         threshold=threshold,

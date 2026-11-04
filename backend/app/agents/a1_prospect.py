@@ -46,15 +46,72 @@ class ProspectAgent:
     async def run(self, icp_config: Dict[str, Any]) -> Dict[str, Any]:
         logger.info("A1 starting", config_keys=list(icp_config.keys()))
 
+        from app.services.company_lookalike_service import CompanyLookalikeService
+
+        raw_lookalikes = icp_config.get("company_lookalike") or []
+        seed_companies = CompanyLookalikeService.normalize_reference_companies(raw_lookalikes)
+
         use_apollo = icp_config.get("use_apollo")
+        # Step 1: Discover prospects matching standard ICP criteria via live Apollo API
         if use_apollo is False or not settings.APOLLO_API_KEY:
-            logger.info("Running A1 in offline mode without Apollo API")
-            raw_contacts, provider_meta = await self._fetch_offline(icp_config)
+            logger.warning("A1: Live Apollo API discovery unavailable - missing or disabled API key")
+            raw_contacts = []
+            provider_meta = {
+                "provider": "apollo",
+                "method": "people_search_bulk_match",
+                "page": None,
+                "reason": "missing_apollo_api_key",
+                "total_entries": 0,
+                "raw_search_count": 0,
+            }
         else:
             raw_contacts, provider_meta = await self._fetch_from_apollo(icp_config)
-            if not raw_contacts:
-                logger.info("Apollo fetch returned 0 contacts, falling back to offline prospect store")
-                raw_contacts, provider_meta = await self._fetch_offline(icp_config)
+            # Live discovery only: never fall back to CSV or seeded offline prospects
+
+        # Step 2: Discover prospects via Company Look-alike if reference companies provided
+        if seed_companies:
+            logger.info("A1: Running Company Look-alike discovery", seeds=seed_companies)
+            lookalike_contacts = []
+            lookalike_meta = {}
+
+            if use_apollo is False or not settings.APOLLO_API_KEY:
+                logger.warning("A1 Lookalike: Live Apollo API unavailable for lookalikes")
+                lookalike_meta = {
+                    "provider": "apollo",
+                    "method": "lookalike_people_search",
+                    "reason": "missing_apollo_api_key",
+                    "seed_company_names": seed_companies,
+                }
+            else:
+                lookalike_contacts, lookalike_meta = await self._fetch_lookalikes_from_apollo(icp_config, seed_companies)
+                # Live discovery only: never fall back to CSV or seeded offline prospects
+
+            # Step 3: Combine and deduplicate candidates from both discovery paths
+            raw_contacts = CompanyLookalikeService.combine_and_deduplicate_prospects(
+                icp_prospects=raw_contacts,
+                lookalike_prospects=lookalike_contacts,
+                seed_company_names=lookalike_meta.get("seed_company_names", seed_companies),
+                seed_org_ids=lookalike_meta.get("resolved_org_ids", []),
+                seed_domains=lookalike_meta.get("seed_domains", []),
+            )
+            provider_meta["lookalike_meta"] = lookalike_meta
+            if lookalike_contacts and provider_meta.get("method"):
+                provider_meta["method"] = f"{provider_meta['method']}_with_lookalikes"
+
+        if icp_config.get("signals"):
+            from app.services.apollo_signals_service import ApolloSignalsService
+            sig_diag = ApolloSignalsService.classify_signals(icp_config["signals"])
+            provider_meta["signals_diagnostics"] = {
+                "supported_applied": sig_diag["supported_company_tags"],
+                "includes_recent_funding": sig_diag["includes_recent_funding"],
+                "unsupported_signals": sig_diag["unsupported_signals"],
+            }
+            if sig_diag["unsupported_signals"]:
+                logger.info(
+                    "A1: User selected signals with API/integration limitations",
+                    unsupported_count=len(sig_diag["unsupported_signals"]),
+                    unsupported_signals=[u["signal"] for u in sig_diag["unsupported_signals"]],
+                )
 
         logger.info(
             "Prospect fetch complete",
@@ -70,6 +127,15 @@ class ProspectAgent:
         save_result = await self._save_contacts(
             contacts_to_save, icp_config.get("user_input_id"), icp_config.get("user_id")
         )
+
+        # ── Pipeline Step: A1.5 Salesforce Account Verification ──
+        # Runs internally after A1 discovers & saves prospects, before A2 signal intelligence
+        try:
+            from app.agents.a1_5_salesforce_verification import SalesforceVerificationAgent
+            sf_agent = SalesforceVerificationAgent(self.db)
+            await sf_agent.verify_prospect_accounts(contacts_to_save)
+        except Exception as sf_err:
+            logger.warning("A1: Post-discovery A1.5 Salesforce verification warning", error=str(sf_err))
 
         reason = self._reason(raw_contacts, scored, qualified, save_result, provider_meta)
         provider = provider_meta.get("provider", "apollo")
@@ -99,6 +165,7 @@ class ProspectAgent:
             "scored_count": len(scored),
             "qualified_count": len(qualified),
             "reason": reason,
+            "signals_diagnostics": provider_meta.get("signals_diagnostics"),
             **save_result,
             "contacts": [c.get("email") for c in qualified[:5]],
         }
@@ -230,13 +297,9 @@ class ProspectAgent:
 
         return True
 
-    async def _fetch_offline(
-        self, icp_config: Dict[str, Any]
-    ) -> Tuple[List[Dict[str, Any]], Dict[str, Any]]:
-        """
-        Offline fallback prospect store.
-        Loads real prospects from prospects_export.csv without calling Apollo API.
-        """
+    @staticmethod
+    def _load_csv_candidates() -> List[Dict[str, Any]]:
+        """Load candidate prospects from prospects_export.csv."""
         import csv
         import json
         from pathlib import Path
@@ -294,6 +357,16 @@ class ProspectAgent:
                         "email_valid": True,
                         "email_verified": True,
                     })
+        return csv_candidates
+
+    async def _fetch_offline(
+        self, icp_config: Dict[str, Any]
+    ) -> Tuple[List[Dict[str, Any]], Dict[str, Any]]:
+        """
+        Offline fallback prospect store.
+        Loads real prospects from prospects_export.csv without calling Apollo API.
+        """
+        csv_candidates = self._load_csv_candidates()
 
         enrich_limit = int(icp_config.get("enrich_limit", getattr(settings, "APOLLO_ENRICH_LIMIT", 10)))
         target_titles = [t.lower() for t in (icp_config.get("titles") or []) if t]
@@ -317,6 +390,186 @@ class ProspectAgent:
             "candidates_after_dedup": len(selected),
             "reason": "offline_prospects_loaded",
         }
+
+    async def _fetch_lookalikes_from_offline(
+        self, icp_config: Dict[str, Any], seed_companies: List[str]
+    ) -> Tuple[List[Dict[str, Any]], Dict[str, Any]]:
+        """Discover lookalike prospects from offline candidates based on firmographics."""
+        from app.services.company_lookalike_service import CompanyLookalikeService
+        csv_candidates = self._load_csv_candidates()
+        enrich_limit = int(icp_config.get("enrich_limit", getattr(settings, "APOLLO_ENRICH_LIMIT", 10)))
+        lookalikes = CompanyLookalikeService.offline_lookalike_discovery(
+            seed_companies=seed_companies,
+            icp_config=icp_config,
+            csv_candidates=csv_candidates,
+            limit=enrich_limit,
+        )
+        return lookalikes, {
+            "provider": "offline",
+            "method": "offline_lookalike_store",
+            "seed_company_names": seed_companies,
+            "resolved_org_ids": [],
+            "count": len(lookalikes),
+            "reason": "offline_lookalikes_found" if lookalikes else "offline_lookalikes_empty",
+        }
+
+    async def _fetch_lookalikes_from_apollo(
+        self, icp_config: Dict[str, Any], seed_companies: List[str]
+    ) -> Tuple[List[Dict[str, Any]], Dict[str, Any]]:
+        """
+        Search Apollo People Search using lookalike_organization_ids.
+        Applies compatible ICP filters and strictly excludes seed reference companies.
+        """
+        if not settings.APOLLO_API_KEY:
+            return [], {
+                "provider": "apollo",
+                "method": "lookalike_people_search",
+                "reason": "missing_apollo_api_key",
+            }
+
+        from app.services.company_lookalike_service import CompanyLookalikeService
+
+        headers = {
+            "accept": "application/json",
+            "Content-Type": "application/json",
+            "Cache-Control": "no-cache",
+            "X-Api-Key": settings.APOLLO_API_KEY,
+        }
+        enrich_limit = int(icp_config.get("enrich_limit", getattr(settings, "APOLLO_ENRICH_LIMIT", 25)))
+        all_existing_apollo_ids = await self._get_all_existing_apollo_ids()
+
+        try:
+            async with httpx.AsyncClient(timeout=30) as client:
+                # 1. Resolve seed reference companies
+                resolution = await CompanyLookalikeService.resolve_reference_companies(
+                    client, headers, seed_companies
+                )
+                resolved_org_ids = resolution.get("resolved_org_ids", [])
+                seed_company_names = resolution.get("seed_company_names", [])
+
+                if not resolved_org_ids:
+                    logger.warning("A1 Lookalike: No seed companies could be resolved", resolution=resolution)
+                    return [], {
+                        "provider": "apollo",
+                        "method": "lookalike_people_search",
+                        "reason": "no_seed_companies_resolved",
+                        **resolution,
+                    }
+
+                # 2. Build Apollo People Search payload with lookalike_organization_ids
+                body = self._build_search_body(icp_config, page=1, per_page=100)
+                body["lookalike_organization_ids"] = resolved_org_ids[:5]
+
+                search_resp = await client.post(
+                    "https://api.apollo.io/api/v1/mixed_people/api_search",
+                    headers=headers,
+                    json=body,
+                )
+                search_resp.raise_for_status()
+                search_data = search_resp.json()
+
+                people = search_data.get("people") or search_data.get("contacts") or []
+                if not people:
+                    return [], {
+                        "provider": "apollo",
+                        "method": "lookalike_people_search",
+                        "reason": "lookalike_search_returned_no_people",
+                        **resolution,
+                    }
+
+                # 3. Pre-score stubs
+                stub_scored: List[Tuple[float, Dict]] = []
+                for person in people:
+                    stub = self._stub_dict(person)
+                    score, _ = self.scorer.score(stub)
+                    stub_scored.append((score, person))
+
+                stub_scored.sort(key=lambda x: x[0], reverse=True)
+                top_candidates = [p for _, p in stub_scored[:enrich_limit]]
+
+                to_enrich = [
+                    p for p in top_candidates
+                    if p.get("id") and p["id"] not in all_existing_apollo_ids
+                ]
+
+                if not to_enrich:
+                    return [], {
+                        "provider": "apollo",
+                        "method": "lookalike_people_search",
+                        "reason": "all_lookalike_candidates_already_in_db",
+                        **resolution,
+                    }
+
+                # 4. Bulk match top candidates
+                enriched_people = await self._bulk_match(client, headers, to_enrich)
+
+                contacts: List[Dict[str, Any]] = []
+                for person in enriched_people:
+                    if not person.get("email"):
+                        continue
+                    contact = self._parse_apollo_contact(person)
+                    if not self._is_apollo_result_relevant(contact, icp_config):
+                        continue
+
+                    contact["source"] = "apollo (lookalike)"
+                    contact["discovery_method"] = "lookalike"
+                    contact["lookalike_seed_companies"] = list(seed_companies)
+
+                    # Org enrich if needed
+                    if (
+                        not contact.get("funding_stage")
+                        and not contact.get("industry")
+                        and not contact.get("tech_stack")
+                        and contact.get("_org_id")
+                    ):
+                        org_data = await self._enrich_org(client, headers, contact["_org_id"])
+                        if org_data:
+                            contact["funding_stage"] = org_data.get("latest_funding_stage") or ""
+                            contact["industry"]      = org_data.get("industry") or ""
+                            contact["tech_stack"]    = org_data.get("technologies") or []
+                            if org_data.get("total_funding_printed"):
+                                contact["funding_amount"] = org_data["total_funding_printed"]
+                            if org_data.get("latest_funding_round_date"):
+                                contact["funding_date"] = org_data["latest_funding_round_date"]
+
+                    if icp_config.get("signals"):
+                        contact["matched_signals"] = [s for s in icp_config["signals"] if s]
+                        if not contact.get("discovery_method"):
+                            contact["discovery_method"] = "signals"
+
+                    contacts.append(contact)
+
+                return contacts, {
+                    "provider": "apollo",
+                    "method": "lookalike_people_search",
+                    "count": len(contacts),
+                    "reason": "lookalike_contacts_found" if contacts else "lookalike_bulk_match_no_emails",
+                    **resolution,
+                }
+
+        except httpx.TimeoutException as exc:
+            logger.error("Apollo lookalike fetch timed out", error=str(exc))
+            return [], {
+                "provider": "apollo",
+                "method": "lookalike_people_search",
+                "reason": "apollo_timeout",
+            }
+        except httpx.HTTPStatusError as exc:
+            status_code = exc.response.status_code
+            logger.error("Apollo lookalike fetch failed", status_code=status_code)
+            reason = "apollo_rate_limited" if status_code == 429 else f"apollo_http_{status_code}"
+            return [], {
+                "provider": "apollo",
+                "method": "lookalike_people_search",
+                "reason": reason,
+            }
+        except Exception as exc:
+            logger.exception("Apollo lookalike fetch error", error=str(exc))
+            return [], {
+                "provider": "apollo",
+                "method": "lookalike_people_search",
+                "reason": "apollo_lookalike_request_failed",
+            }
 
     async def _fetch_from_apollo(
         self, icp_config: Dict[str, Any]
@@ -473,6 +726,15 @@ class ProspectAgent:
                             contact["funding_stage"] = org_data.get("latest_funding_stage") or ""
                             contact["industry"]      = org_data.get("industry") or ""
                             contact["tech_stack"]    = org_data.get("technologies") or []
+                            if org_data.get("total_funding_printed"):
+                                contact["funding_amount"] = org_data["total_funding_printed"]
+                            if org_data.get("latest_funding_round_date"):
+                                contact["funding_date"] = org_data["latest_funding_round_date"]
+
+                    if icp_config.get("signals"):
+                        contact["matched_signals"] = [s for s in icp_config["signals"] if s]
+                        if not contact.get("discovery_method"):
+                            contact["discovery_method"] = "signals"
 
                     contacts.append(contact)
 
@@ -494,13 +756,23 @@ class ProspectAgent:
                     "reason": "apollo_contacts_found" if contacts else "apollo_bulk_match_no_emails",
                 }
 
-        except httpx.HTTPStatusError as exc:
-            logger.error("Apollo fetch failed", status_code=exc.response.status_code)
+        except httpx.TimeoutException as exc:
+            logger.error("Apollo fetch timed out", error=str(exc))
             return [], {
                 "provider": "apollo",
                 "method": "people_search_bulk_match",
-                "page": None,
-                "reason": f"apollo_http_{exc.response.status_code}",
+                "page": actual_page,
+                "reason": "apollo_timeout",
+            }
+        except httpx.HTTPStatusError as exc:
+            status_code = exc.response.status_code
+            logger.error("Apollo fetch failed", status_code=status_code)
+            reason = "apollo_rate_limited" if status_code == 429 else f"apollo_http_{status_code}"
+            return [], {
+                "provider": "apollo",
+                "method": "people_search_bulk_match",
+                "page": actual_page,
+                "reason": reason,
             }
         except Exception as exc:
             logger.exception("Apollo fetch failed", error=str(exc))
@@ -522,49 +794,11 @@ class ProspectAgent:
         per_page: int = 100,
     ) -> Dict[str, Any]:
         """
-        Build the Apollo mixed_people/api_search request body.
-
-        Param mapping (confirmed correct Apollo field names):
-          person_titles                    ← icp_config["titles"]
-          organization_locations           ← icp_config["organization_locations"]  (org HQ, not person location)
-          organization_num_employees_ranges← icp_config["employee_ranges"]
-          person_seniorities               ← icp_config["seniorities"]  (optional plumbing)
-          organization_industry_tag_ids    ← icp_config["industry_tag_ids"]  (static map IDs)
-          q_organization_keyword_tags      ← icp_config["org_keyword_tags"]  (array — keywords + unmatched industry terms)
-
-        Intentionally absent:
-          q_organization_name  ← REMOVED (was the bug: restricted results to vendor's own company)
-          q_keywords           ← REPLACED by q_organization_keyword_tags (more targeted)
+        Build the Apollo mixed_people/api_search request body using ApolloQueryBuilder.
+        Maps ICP filters, Company Look-alikes, Signals (OR logic), and Funding stages (OR logic).
         """
-        body: Dict[str, Any] = {"page": page, "per_page": per_page}
-
-        if icp_config.get("titles"):
-            body["person_titles"] = icp_config["titles"]
-
-        locations = icp_config.get("organization_locations") or icp_config.get("geographies")
-        if locations:
-            if isinstance(locations, str):
-                locations = [loc.strip() for loc in locations.split(",") if loc.strip()]
-            body["organization_locations"] = locations
-
-        if icp_config.get("employee_ranges"):
-            body["organization_num_employees_ranges"] = icp_config["employee_ranges"]
-
-        if icp_config.get("seniorities"):
-            # Plumbing exists for future use; intake form doesn't populate this yet
-            body["person_seniorities"] = icp_config["seniorities"]
-
-        if icp_config.get("industry_tag_ids"):
-            # Resolved static tag IDs from industry_tag_map.py
-            body["organization_industry_tag_ids"] = icp_config["industry_tag_ids"]
-
-        keywords = icp_config.get("org_keyword_tags") or icp_config.get("keywords")
-        if keywords:
-            if isinstance(keywords, str):
-                keywords = [k.strip() for k in keywords.split() if k.strip()]
-            body["q_organization_keyword_tags"] = keywords
-
-        return body
+        from app.services.apollo_query_builder import ApolloQueryBuilder
+        return ApolloQueryBuilder.build_search_payload(icp_config, page=page, per_page=per_page)
 
     # ------------------------------------------------------------------
     # Pre-score stubs (before enrichment)
@@ -761,6 +995,9 @@ class ProspectAgent:
             "location_source":   location_source,
             "tech_stack":        tech_list,
             "funding_stage":     organization.get("latest_funding_stage") or organization.get("funding_stage") or "",
+            "funding_amount":    organization.get("total_funding_printed") or (f"${organization['total_funding']:,}" if organization.get("total_funding") else None),
+            "funding_date":      organization.get("latest_funding_round_date"),
+            "funding_source":    organization.get("latest_funding_round_source") or "Apollo",
             "apollo_id":         person.get("id") or "",
             "_org_id":           organization.get("id") or "",   # used for conditional org enrich
             "source":            "apollo",
@@ -829,6 +1066,9 @@ class ProspectAgent:
 
             summary = generate_selection_summary(data)
 
+            from app.services.suppression_service import SuppressionService
+            is_suppressed, _ = await SuppressionService.is_email_suppressed(self.db, email)
+
             contact = Contact(
                 email=email,
                 first_name=data.get("first_name"),
@@ -851,6 +1091,7 @@ class ProspectAgent:
                 win_pattern_score=data.get("win_pattern_score"),
                 icp_score_breakdown=data.get("icp_score_breakdown"),
                 readiness_score=0.0,
+                do_not_contact=is_suppressed,
                 email_valid=data.get("email_valid"),
                 email_verified=bool(data.get("email_verified")),
                 verified_at=datetime.utcnow() if data.get("source") != "offline_store" else None,

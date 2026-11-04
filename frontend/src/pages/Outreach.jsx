@@ -5,6 +5,7 @@ import {
   Mail, Loader2, Check, ExternalLink, XCircle
 } from 'lucide-react'
 import { fetchOutreachDrafts, approveOutreachDraft, rejectOutreachDraft, editOutreachDraft } from '../api'
+import { useSession } from '../context/SessionContext'
 
 // Helper for campaign topic badge colors matching Figma Image 1
 function getTagBadgeStyle(tag) {
@@ -68,16 +69,47 @@ export default function Outreach() {
     return () => document.removeEventListener('mousedown', handleClickOutside)
   }, [])
 
-  // Fetch all drafts from real backend API
-  const { data: drafts = [], isLoading, refetch, isFetching } = useQuery({
-    queryKey: ['outreach-drafts'],
-    queryFn: fetchOutreachDrafts,
+  const { activeSessionId } = useSession()
+
+  // Fetch drafts strictly scoped to active session
+  const {
+    data: activeSessionDrafts = [],
+    isLoading: isLoadingActive,
+    refetch: refetchActive,
+    isFetching: isFetchingActive
+  } = useQuery({
+    queryKey: ['outreach-drafts', activeSessionId],
+    queryFn: () => (activeSessionId ? fetchOutreachDrafts(activeSessionId) : Promise.resolve([])),
+    enabled: !!activeSessionId,
   })
 
-  // Separate drafts into Active (pending / rejected) vs History (approved / sent)
-  const activeDrafts = drafts.filter(d => d.approval_state !== 'approved')
-  const historyDrafts = drafts.filter(d => d.approval_state === 'approved')
+  // Fetch all historical drafts (all past sessions & approvals)
+  const {
+    data: allHistoryDrafts = [],
+    isLoading: isLoadingHistory,
+    refetch: refetchHistory,
+    isFetching: isFetchingHistory
+  } = useQuery({
+    queryKey: ['outreach-drafts', 'all-history'],
+    queryFn: () => fetchOutreachDrafts(null),
+  })
+
+  // Separate drafts:
+  // Active session tab: pending/rejected drafts strictly belonging to current active session
+  const activeDrafts = activeSessionId ? activeSessionDrafts.filter(d => d.approval_state !== 'approved') : []
+  // History tab: all approved drafts, plus drafts from previous sessions
+  const historyDrafts = allHistoryDrafts.filter(d =>
+    d.approval_state === 'approved' || (activeSessionId && d.contact?.user_input_id !== activeSessionId)
+  )
+
   const displayedDrafts = activeTab === 'active' ? activeDrafts : historyDrafts
+  const isLoading = activeTab === 'active' ? isLoadingActive : isLoadingHistory
+  const isFetching = activeTab === 'active' ? isFetchingActive : isFetchingHistory
+
+  const refetch = () => {
+    refetchActive()
+    refetchHistory()
+  }
 
   // Select first draft by default if none selected or if switching tabs
   useEffect(() => {
@@ -223,8 +255,17 @@ export default function Outreach() {
                 <span>Loading drafts...</span>
               </div>
             ) : displayedDrafts.length === 0 ? (
-              <div className="py-24 text-center text-gray-400 text-xs">
-                No {activeTab === 'active' ? 'active session' : 'historical'} drafts found.
+              <div className="py-24 text-center text-gray-400 text-xs px-6 leading-relaxed">
+                {activeTab === 'active' ? (
+                  <div className="space-y-1.5">
+                    <p className="font-semibold text-gray-700 text-sm">No active session drafts</p>
+                    <p className="text-gray-400 max-w-sm mx-auto">
+                      Drafts for your recent search {activeSessionId ? `(Session #${activeSessionId})` : ''} will appear here after A3 Outreach generates email campaigns for qualified prospects matching your ICP & buying signals.
+                    </p>
+                  </div>
+                ) : (
+                  <p>No historical drafts found.</p>
+                )}
               </div>
             ) : (
               displayedDrafts.map((draft) => {

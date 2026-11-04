@@ -118,7 +118,7 @@ export default function Revenue() {
         <div className="bg-white rounded-2xl border border-gray-100 shadow-xs p-5.5 space-y-1">
           <div className="text-xs text-gray-400 font-normal">30-Day Forecast</div>
           <div className="text-2xl font-bold text-[#5B4EFF] tracking-tight">
-            {formatCurrency(forecast?.forecast_30d ?? 21522)}
+            {formatCurrency(deals.length > 0 ? (forecast?.forecast_30d ?? 0) : 0)}
           </div>
           <div className="text-[11px] text-gray-400 font-normal truncate pt-0.5">
             Near-term closing expected value
@@ -129,10 +129,10 @@ export default function Revenue() {
         <div className="bg-white rounded-2xl border border-gray-100 shadow-xs p-5.5 space-y-1">
           <div className="text-xs text-gray-400 font-normal">60-Day Forecast</div>
           <div className="text-2xl font-bold text-[#5B4EFF] tracking-tight">
-            {formatCurrency(forecast?.forecast_60d ?? 98132)}
+            {formatCurrency(deals.length > 0 ? (forecast?.forecast_60d ?? 0) : 0)}
           </div>
           <div className="text-[11px] text-gray-400 font-normal truncate pt-0.5">
-            Mid-term velocity-weighted forec..
+            Mid-term velocity-weighted forecast
           </div>
         </div>
 
@@ -140,21 +140,21 @@ export default function Revenue() {
         <div className="bg-white rounded-2xl border border-gray-100 shadow-xs p-5.5 space-y-1">
           <div className="text-xs text-gray-400 font-normal">90-Day Forecast</div>
           <div className="text-2xl font-bold text-[#5B4EFF] tracking-tight">
-            {formatCurrency(forecast?.forecast_90d ?? 176298)}
+            {formatCurrency(deals.length > 0 ? (forecast?.forecast_90d ?? 0) : 0)}
           </div>
           <div className="text-[11px] text-gray-400 font-normal truncate pt-0.5">
             Full quarterly pipeline conversion
           </div>
         </div>
 
-        {/* Card 4: Total Active Pipeline (Highlighted Purple Card) */}
-        <div className="bg-white rounded-2xl border-2 border-[#5B4EFF] shadow-xs p-5.5 space-y-1">
-          <div className="text-xs font-semibold text-[#5B4EFF]">Total Active Pipeline</div>
+        {/* Card 4: Total Active Pipeline */}
+        <div className="bg-white rounded-2xl border border-gray-100 shadow-xs p-5.5 space-y-1">
+          <div className="text-xs text-gray-400 font-normal">Total Active Pipeline</div>
           <div className="text-2xl font-bold text-gray-900 tracking-tight">
-            {formatCurrency(forecast?.current_pipeline_value ?? 1112800)}
+            {formatCurrency(deals.length > 0 ? (forecast?.current_pipeline_value ?? 0) : 0)}
           </div>
-          <div className="text-[11px] font-medium text-[#5B4EFF] pt-0.5">
-            active opportunities
+          <div className="text-[11px] text-gray-400 font-normal truncate pt-0.5">
+            {deals.length} active opportunities
           </div>
         </div>
       </div>
@@ -168,7 +168,9 @@ export default function Revenue() {
               Stage Conversion Rates & Velocity
             </h2>
             <p className="text-[11px] text-gray-400 font-normal mt-0.5">
-              Current transition probabilities (A7 calibrated model)
+              {deals.length > 0
+                ? 'Current transition probabilities (A7 calibrated model)'
+                : 'Default benchmark estimates (Insufficient historical deal transitions to calibrate)'}
             </p>
           </div>
 
@@ -190,37 +192,55 @@ export default function Revenue() {
           </div>
         </div>
 
-        {/* Right Column: Pipeline Constraint Identified (Purple Outline Card) */}
-        <div className="bg-white rounded-2xl border-2 border-[#818CF8]/60 shadow-xs p-6 flex flex-col justify-between space-y-4">
+        {/* Right Column: Pipeline Constraints */}
+        <div className={`bg-white rounded-2xl ${deals.length > 0 && forecast?.bottleneck_stage ? 'border-2 border-[#818CF8]/60' : 'border border-gray-100'} shadow-xs p-6 flex flex-col justify-between space-y-4`}>
           <div>
-            {/* Header with warning icon */}
-            <div className="flex items-center gap-2 text-xs font-bold text-[#5B4EFF]">
-              <AlertTriangle size={15} className="text-[#5B4EFF] shrink-0" />
-              <span>Pipeline Constraint Identified</span>
-            </div>
+            {/* Header */}
+            {deals.length > 0 && forecast?.bottleneck_stage ? (
+              <div className="flex items-center gap-2 text-xs font-bold text-[#5B4EFF]">
+                <AlertTriangle size={15} className="text-[#5B4EFF] shrink-0" />
+                <span>Pipeline Constraint Identified</span>
+              </div>
+            ) : (
+              <div className="flex items-center gap-2 text-xs font-semibold text-gray-600">
+                <Clock size={15} className="text-gray-400 shrink-0" />
+                <span>Pipeline Constraints</span>
+              </div>
+            )}
 
             {/* Title */}
             <h3 className="text-sm font-bold text-gray-900 mt-3">
-              {forecast?.bottleneck_stage || 'Proposal Stage Bottleneck'}
+              {deals.length > 0 && forecast?.bottleneck_stage ? forecast.bottleneck_stage : 'No Bottlenecks Identified'}
             </h3>
 
             {/* Description */}
             <p className="text-xs text-gray-500 font-normal mt-1 leading-relaxed">
-              {forecast?.bottleneck_description ||
-                'Proposal stage conversion is 0.0% vs 50.0% benchmark (100% deficit) (2 deals currently stalled >20 days).'}
+              {deals.length > 0 && forecast?.bottleneck_description
+                ? forecast.bottleneck_description
+                : 'Insufficient historical pipeline data to determine stage bottlenecks. Once deals progress through the pipeline, stage velocity and conversion drop-offs will be diagnosed here.'}
             </p>
           </div>
 
-          {/* Recommended Growth Lever (Red Callout Box) */}
-          <div className="border border-red-300 bg-red-50/20 rounded-xl p-4 space-y-1">
-            <div className="text-xs font-bold text-[#DC2626]">
-              Recommended Growth Lever:
+          {/* Recommended Growth Lever / Next Action */}
+          {deals.length > 0 && forecast?.recommended_lever ? (
+            <div className="border border-red-300 bg-red-50/20 rounded-xl p-4 space-y-1">
+              <div className="text-xs font-bold text-[#DC2626]">
+                Recommended Growth Lever:
+              </div>
+              <div className="text-xs text-[#DC2626] font-normal leading-relaxed">
+                {forecast.recommended_lever}
+              </div>
             </div>
-            <div className="text-xs text-[#DC2626] font-normal leading-relaxed">
-              {forecast?.recommended_lever ||
-                'Shorten proposal evaluation cycles. Set clear decision deadlines and engage IT security/procurement stakeholders earlier.'}
+          ) : (
+            <div className="border border-gray-200 bg-gray-50/60 rounded-xl p-4 space-y-1">
+              <div className="text-xs font-semibold text-gray-700">
+                Recommended Next Step:
+              </div>
+              <div className="text-xs text-gray-500 font-normal leading-relaxed">
+                Discover prospects with Agent 1 and launch outreach campaigns with Agent 3 to generate pipeline opportunities.
+              </div>
             </div>
-          </div>
+          )}
         </div>
       </div>
 

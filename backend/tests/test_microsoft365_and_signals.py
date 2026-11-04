@@ -10,7 +10,10 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.main import app
 from app.core.database import AsyncSessionLocal
 from app.core.security import create_access_token, hash_password
-from app.models.models import User, UserIntegration, Contact, SignalEvent, OutreachDraft, ConversationThread
+from app.models.models import (
+    User, UserIntegration, Contact, SignalEvent, OutreachDraft,
+    ConversationThread, PendingAction, Notification, FunnelEvent, OutreachLog
+)
 from app.services.microsoft_graph_service import MicrosoftGraphService
 from app.services import CalService
 from app.services.token_encryption import encrypt_token, decrypt_token
@@ -132,24 +135,16 @@ async def test_a3_outbound_uses_microsoft_graph():
         res = await db_session.execute(select(User).where(User.email == "shree.lakshmi@forcecloudlabs.com"))
         user = res.scalar_one()
 
-        # Find or create contact
-        res_c = await db_session.execute(
-            select(Contact).where(
-                Contact.email == "shreelakshmipp2003@gmail.com",
-                Contact.user_id == user.id,
-            )
+        unique_test_email = f"test_ms_{uuid.uuid4().hex[:6]}@internal.test"
+        contact = Contact(
+            first_name="Test",
+            last_name="Prospect",
+            email=unique_test_email,
+            company="TestCorp",
+            user_id=user.id,
         )
-        contact = res_c.scalar_one_or_none()
-        if not contact:
-            contact = Contact(
-                first_name="Test",
-                last_name="Prospect",
-                email="shreelakshmipp2003@gmail.com",
-                company="TestCorp",
-                user_id=user.id,
-            )
-            db_session.add(contact)
-            await db_session.flush()
+        db_session.add(contact)
+        await db_session.flush()
 
         # Ensure user has connected microsoft integration
         int_res = await db_session.execute(
@@ -183,6 +178,7 @@ async def test_a3_outbound_uses_microsoft_graph():
         )
         await db_session.commit()
         draft_id = draft.id
+        contact_id = contact.id
 
     try:
         async with AsyncSessionLocal() as db_session:
@@ -196,13 +192,15 @@ async def test_a3_outbound_uses_microsoft_graph():
                 assert success is True
                 mock_send.assert_awaited_once()
                 call_kwargs = mock_send.await_args.kwargs
-                assert call_kwargs["to_email"] == "shreelakshmipp2003@gmail.com"
+                assert call_kwargs["to_email"] == unique_test_email
                 assert call_kwargs["from_email"] == "shree.lakshmi@forcecloudlabs.com"
                 assert "Discussion on CRM automation" in call_kwargs["subject"]
     finally:
         async with AsyncSessionLocal() as db_session:
+            await db_session.execute(delete(PendingAction).where(PendingAction.entity_id == str(contact_id)))
             await db_session.execute(delete(OutreachDraft).where(OutreachDraft.id == draft_id))
-            await db_session.execute(delete(OutreachLog).where(OutreachLog.subject == "Discussion on CRM automation"))
+            await db_session.execute(delete(OutreachLog).where(OutreachLog.contact_id == contact_id))
+            await db_session.execute(delete(Contact).where(Contact.id == contact_id))
             await db_session.commit()
 
 
@@ -270,6 +268,7 @@ async def test_a3_blocks_fallback_for_production_rep():
                 await db_session.commit()
     finally:
         async with AsyncSessionLocal() as db_session:
+            await db_session.execute(delete(PendingAction).where(PendingAction.entity_id == str(contact.id)))
             await db_session.execute(delete(OutreachDraft).where(OutreachDraft.id == draft_id))
             await db_session.execute(delete(Contact).where(Contact.id == contact.id))
             await db_session.commit()
@@ -519,14 +518,19 @@ async def test_admin_user_management_authorization():
         await db_session.commit()
         rep_token = create_access_token(rep.id)
 
-    async with httpx.AsyncClient(base_url="http://localhost:8000") as client:
-        # 1. Admin can list users
-        admin_resp = await client.get("/api/v1/admin/users", headers={"Authorization": f"Bearer {admin_token}"})
-        assert admin_resp.status_code == 200
-        users_list = admin_resp.json()
-        assert len(users_list) >= 2
+    try:
+        async with httpx.AsyncClient(base_url="http://localhost:8000") as client:
+            # 1. Admin can list users
+            admin_resp = await client.get("/api/v1/admin/users", headers={"Authorization": f"Bearer {admin_token}"})
+            assert admin_resp.status_code == 200
+            users_list = admin_resp.json()
+            assert len(users_list) >= 2
 
-        # 2. Regular sales rep gets 403 Forbidden
-        rep_resp = await client.get("/api/v1/admin/users", headers={"Authorization": f"Bearer {rep_token}"})
-        assert rep_resp.status_code == 403
-        assert "Admin privileges required" in rep_resp.json()["detail"]
+            # 2. Regular sales rep gets 403 Forbidden
+            rep_resp = await client.get("/api/v1/admin/users", headers={"Authorization": f"Bearer {rep_token}"})
+            assert rep_resp.status_code == 403
+            assert "Admin privileges required" in rep_resp.json()["detail"]
+    finally:
+        async with AsyncSessionLocal() as db_session:
+            await db_session.execute(delete(User).where(User.id == rep.id))
+            await db_session.commit()

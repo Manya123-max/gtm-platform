@@ -33,6 +33,9 @@ function getSignalBadgeInfo(type) {
   if (t.includes('funding')) {
     return { label: 'Funding', bg: 'bg-[#F3E8FF]', text: 'text-[#9333EA]', border: 'border-[#E9D5FF]' }
   }
+  if (t.includes('observed')) {
+    return { label: 'Tech Observed', bg: 'bg-[#E0F2FE]', text: 'text-[#0284C7]', border: 'border-[#BAE6FD]' }
+  }
   if (t.includes('tech') || t.includes('stack')) {
     return { label: 'Tech Change', bg: 'bg-[#D1FAE5]', text: 'text-[#059669]', border: 'border-[#A7F3D0]' }
   }
@@ -60,6 +63,7 @@ export default function Contacts() {
   const [currentPage, setCurrentPage] = useState(1)
   const [showFilterBar, setShowFilterBar] = useState(false)
   const [industryFilter, setIndustryFilter] = useState('all')
+  const [salesforceFilter, setSalesforceFilter] = useState('all') // 'all' | 'verified' | 'not_verified' | 'unable_to_verify'
   const [isRunningGtm, setIsRunningGtm] = useState(false)
 
   // Fetch live contacts from backend
@@ -117,7 +121,14 @@ export default function Contacts() {
         matchesIndustry = c.industry?.toLowerCase().includes(industryFilter.toLowerCase())
       }
 
-      return matchesSearch && matchesScore && matchesIndustry
+      // Salesforce Verification filter (Phase 4)
+      let matchesSalesforce = true
+      const sfStatus = c.salesforce_verification?.verification_status || 'pending'
+      if (salesforceFilter === 'verified') matchesSalesforce = sfStatus === 'verified'
+      else if (salesforceFilter === 'not_verified') matchesSalesforce = sfStatus === 'not_verified'
+      else if (salesforceFilter === 'unable_to_verify') matchesSalesforce = sfStatus === 'unable_to_verify'
+
+      return matchesSearch && matchesScore && matchesIndustry && matchesSalesforce
     }).sort((a, b) => {
       if (selectedSort === 'name') {
         const nameA = `${a.first_name || ''} ${a.last_name || ''}`.trim().toLowerCase()
@@ -126,7 +137,7 @@ export default function Contacts() {
       }
       return 0
     })
-  }, [contacts, search, selectedScoreFilter, selectedSort, industryFilter])
+  }, [contacts, search, selectedScoreFilter, selectedSort, industryFilter, salesforceFilter])
 
   // Extract unique industries for optional filter
   const industries = useMemo(() => {
@@ -250,9 +261,24 @@ export default function Contacts() {
               ))}
             </select>
           </div>
-          {industryFilter !== 'all' && (
+
+          <div className="flex items-center gap-2">
+            <span className="text-xs font-bold text-gray-700">Salesforce Status:</span>
+            <select
+              value={salesforceFilter}
+              onChange={(e) => { setSalesforceFilter(e.target.value); setCurrentPage(1); }}
+              className="bg-[#FBFBFE] border border-gray-200 rounded-lg py-1 px-2.5 text-xs text-gray-700"
+            >
+              <option value="all">All Companies (Default)</option>
+              <option value="verified">Salesforce Verified</option>
+              <option value="not_verified">Not Verified</option>
+              <option value="unable_to_verify">Unable to Verify</option>
+            </select>
+          </div>
+
+          {(industryFilter !== 'all' || salesforceFilter !== 'all') && (
             <button
-              onClick={() => { setIndustryFilter('all'); setCurrentPage(1); }}
+              onClick={() => { setIndustryFilter('all'); setSalesforceFilter('all'); setCurrentPage(1); }}
               className="text-xs text-[#5B4EFF] hover:underline font-semibold"
             >
               Reset Filters
@@ -333,7 +359,7 @@ export default function Contacts() {
 
                       {/* COMPANY */}
                       <td className="py-4 px-4 align-top">
-                        <div className="space-y-0.5">
+                        <div className="space-y-1">
                           <div className="text-xs sm:text-[13px] font-bold text-gray-900 leading-tight">
                             {c.company || 'Company'}
                           </div>
@@ -343,6 +369,90 @@ export default function Contacts() {
                               {c.geography || c.industry || 'United States'}
                             </span>
                           </div>
+                          {/* Salesforce Verification Status & Evidence (Phase 4) */}
+                          {(() => {
+                            const sf = c.salesforce_verification
+                            if (!sf) {
+                              return (
+                                <div className="pt-0.5">
+                                  <span className="inline-flex items-center text-[10px] text-gray-400 italic">
+                                    Salesforce: Pending
+                                  </span>
+                                </div>
+                              )
+                            }
+                            const status = sf.verification_status
+                            const items = sf.evidence_items || []
+                            const primaryEv = items[0]
+                            const sourceLabel = primaryEv?.source_name || (primaryEv?.evidence_type ? primaryEv.evidence_type.replace(/_/g, ' ') : null)
+                            const desc = primaryEv?.evidence_description || primaryEv?.evidence_excerpt || sf.verification_summary
+                            const sourceUrl = primaryEv?.source_url
+
+                            return (
+                              <div className="pt-1 space-y-1">
+                                <div className="flex items-center gap-1.5 flex-wrap">
+                                  {status === 'verified' && (
+                                    <span className="inline-flex items-center text-[10px] font-bold text-[#16A34A] bg-[#DCFCE7] border border-[#BBF7D0] rounded-md px-1.5 py-0.5">
+                                      Salesforce Verified
+                                    </span>
+                                  )}
+                                  {status === 'not_verified' && (
+                                    <span className="inline-flex items-center text-[10px] font-semibold text-amber-700 bg-amber-50 border border-amber-200 rounded-md px-1.5 py-0.5">
+                                      Not Verified
+                                    </span>
+                                  )}
+                                  {status === 'unable_to_verify' && (
+                                    <span className="inline-flex items-center text-[10px] font-semibold text-gray-600 bg-gray-100 border border-gray-200 rounded-md px-1.5 py-0.5">
+                                      Unable to Verify
+                                    </span>
+                                  )}
+                                  {status === 'verified' && sourceLabel && (
+                                    <span className="text-[10px] font-medium text-gray-600 bg-gray-50 border border-gray-200 rounded px-1.5 py-0.5">
+                                      {sourceLabel}
+                                    </span>
+                                  )}
+                                </div>
+
+                                {status === 'verified' && desc && (
+                                  <p className="text-[11px] text-gray-600 leading-snug line-clamp-2 max-w-[220px]">
+                                    {desc}
+                                  </p>
+                                )}
+                                {status === 'not_verified' && (
+                                  <p className="text-[11px] text-gray-500 leading-snug line-clamp-2 max-w-[220px]">
+                                    No reliable Salesforce adoption evidence found.
+                                  </p>
+                                )}
+                                {status === 'unable_to_verify' && (
+                                  <p className="text-[11px] text-gray-500 leading-snug line-clamp-2 max-w-[220px]">
+                                    Verification incomplete or domain unreachable.
+                                  </p>
+                                )}
+
+                                {status === 'verified' && (
+                                  <div className="pt-0.5">
+                                    {sourceUrl ? (
+                                      <a
+                                        href={sourceUrl}
+                                        target="_blank"
+                                        rel="noopener noreferrer"
+                                        onClick={(e) => e.stopPropagation()}
+                                        className="inline-flex items-center gap-1 text-[#5B4EFF] hover:underline font-semibold text-[10px]"
+                                        title="View original evidence"
+                                      >
+                                        <span>View original evidence</span>
+                                        <ExternalLink size={10} />
+                                      </a>
+                                    ) : (
+                                      <span className="text-[10px] text-gray-400 italic">
+                                        Source: {sourceLabel || 'Apollo Technographics'}
+                                      </span>
+                                    )}
+                                  </div>
+                                )}
+                              </div>
+                            )
+                          })()}
                         </div>
                       </td>
 
@@ -437,9 +547,15 @@ export default function Contacts() {
 
                       {/* STATUS */}
                       <td className="py-4 pl-4 pr-2 align-top text-right">
-                        <span className="inline-block bg-[#DCFCE7] text-[#16A34A] border border-[#BBF7D0] rounded-full px-2.5 py-0.5 text-[11px] font-medium">
-                          Active
-                        </span>
+                        {c.do_not_contact ? (
+                          <span className="inline-block bg-red-100 text-red-700 border border-red-200 rounded-full px-2.5 py-0.5 text-[11px] font-semibold">
+                            DNC
+                          </span>
+                        ) : (
+                          <span className="inline-block bg-[#DCFCE7] text-[#16A34A] border border-[#BBF7D0] rounded-full px-2.5 py-0.5 text-[11px] font-medium">
+                            Active
+                          </span>
+                        )}
                       </td>
                     </tr>
                   )

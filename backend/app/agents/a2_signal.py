@@ -14,6 +14,7 @@ Sources for this deployment:
 """
 import asyncio
 import email.utils
+from html.parser import HTMLParser
 import re
 import xml.etree.ElementTree as ET
 from datetime import datetime, timedelta, timezone
@@ -40,6 +41,7 @@ DEFAULT_WEIGHTS = {
     SignalType.JOB_POSTING: 0.60,
     SignalType.NEWS_EXPANSION: 0.25,
     SignalType.TECH_STACK_CHANGE: 0.50,
+    SignalType.TECH_STACK_OBSERVED: 0.40,
     SignalType.EARNINGS_CALL: 0.45,
     SignalType.COMPETITOR_REVIEW: 0.55,
     SignalType.SOCIAL_ENGAGEMENT: 0.40,
@@ -53,6 +55,47 @@ def _has_keyword(text: str, keywords: List[str]) -> bool:
         if re.search(pattern, text_lower):
             return True
     return False
+
+
+class TechStackHTMLParser(HTMLParser):
+    """HTML parser to inspect specific script, form, link, and iframe elements for enterprise CRM/RevOps tools."""
+    def __init__(self, base_url: str):
+        super().__init__()
+        self.base_url = base_url
+        self.detected_items: List[Dict[str, Any]] = []
+
+    def _check_val(self, val: str, tag: str, attr: str):
+        if not val:
+            return
+        val_lower = val.lower()
+        for tech, sigs in SignalAgent.ENTERPRISE_SALES_CRM_TOOLS.items():
+            for sig in sigs:
+                if sig in val_lower:
+                    full_url = val.strip()
+                    if full_url.startswith("//"):
+                        full_url = "https:" + full_url
+                    elif full_url.startswith("/"):
+                        full_url = self.base_url.rstrip("/") + full_url
+                    self.detected_items.append({
+                        "tech": tech,
+                        "signature": sig,
+                        "resource_url": full_url if (full_url.startswith("http://") or full_url.startswith("https://")) else None,
+                        "tag": tag,
+                        "attr": attr,
+                        "raw_val": val[:180]
+                    })
+                    break
+
+    def handle_starttag(self, tag, attrs):
+        attr_dict = dict(attrs)
+        if tag == "script" and "src" in attr_dict:
+            self._check_val(attr_dict["src"], "script", "src")
+        elif tag == "form" and "action" in attr_dict:
+            self._check_val(attr_dict["action"], "form", "action")
+        elif tag == "link" and "href" in attr_dict:
+            self._check_val(attr_dict["href"], "link", "href")
+        elif tag == "iframe" and "src" in attr_dict:
+            self._check_val(attr_dict["src"], "iframe", "src")
 
 
 class SignalAgent:
@@ -172,7 +215,6 @@ class SignalAgent:
             self._check_news(contact, weights),
             self._check_apify(contact, weights),
             self._check_google_news_rss(contact, weights),
-            self._check_website_tech_stack(contact, weights),
         ]
 
         signals: List[Dict[str, Any]] = []
@@ -367,19 +409,22 @@ class SignalAgent:
                 lead_occurred = lead_created if lead_created != datetime.min else occurred_at
                 if lead_occurred == datetime.min:
                     lead_occurred = None
+                lead_url = resolve_signal_article_url(lead_job.get("redirect_url") or lead_job.get("url"))
+                clean_lead_desc = clean_html_text(lead_job.get("description"))
+                # Note: An open job requisition is hiring demand (JOB_POSTING), not an executive new hire appointment!
                 signals.append({
                     "contact_id": contact.id,
-                    "signal_type": SignalType.NEW_HIRE,
+                    "signal_type": SignalType.JOB_POSTING,
                     "signal_source": "adzuna",
-                    "confidence": weights.get(SignalType.NEW_HIRE, DEFAULT_WEIGHTS[SignalType.NEW_HIRE]),
+                    "confidence": weights.get(SignalType.JOB_POSTING, DEFAULT_WEIGHTS[SignalType.JOB_POSTING]),
                     "occurred_at": lead_occurred,
                     "raw_data": {
-                        "trigger": "leadership_hire",
-                        "roles": [title for title in titles if "director" in title or "vp" in title][:20],
-                        "url": lead_job.get("redirect_url"),
-                        "headline": lead_job.get("title"),
-                        "description": lead_job.get("description"),
-                        "published_at": lead_occurred.isoformat(),
+                        "trigger": "leadership_job_opening",
+                        "roles": [title for title in titles if "director" in title or "vp" in title or "chief" in title or "head" in title][:20],
+                        "url": lead_url,
+                        "headline": f"Leadership Hiring Requisition: {clean_html_text(lead_job.get('title'))}",
+                        "description": clean_lead_desc,
+                        "published_at": lead_occurred.isoformat() if lead_occurred else None,
                     },
                 })
 
@@ -529,15 +574,19 @@ class SignalAgent:
                         first_lead = leadership[0].get("attributes", {})
                         lead_dt = self._parse_iso(first_lead.get("first_seen_at") or first_lead.get("first_detected_on"))
                         lead_occurred = lead_dt if lead_dt != datetime.min else datetime.utcnow()
+                        lead_roles = [j.get("attributes", {}).get("title") for j in leadership if j.get("attributes", {}).get("title")][:20]
+                        first_title = lead_roles[0] if lead_roles else "Leadership Role"
                         signals.append({
                             "contact_id": contact.id,
-                            "signal_type": SignalType.NEW_HIRE,
+                            "signal_type": SignalType.JOB_POSTING,
                             "signal_source": "predictleads",
-                            "confidence": weights.get(SignalType.NEW_HIRE, DEFAULT_WEIGHTS[SignalType.NEW_HIRE]),
+                            "confidence": weights.get(SignalType.JOB_POSTING, DEFAULT_WEIGHTS[SignalType.JOB_POSTING]),
                             "occurred_at": lead_occurred,
                             "raw_data": {
-                                "trigger": "leadership_hire",
-                                "roles": [j.get("attributes", {}).get("title") for j in leadership][:20],
+                                "trigger": "leadership_job_opening",
+                                "headline": f"Leadership Opening: {first_title}",
+                                "roles": lead_roles,
+                                "url": first_lead.get("url") or first_lead.get("source_url"),
                                 "published_at": lead_occurred.isoformat(),
                             },
                         })
@@ -562,16 +611,20 @@ class SignalAgent:
                         first_tech = recent_techs[0].get("attributes", {})
                         tech_dt = self._parse_iso(first_tech.get("first_seen_at") or first_tech.get("announced_on") or first_tech.get("first_detected_on") or first_tech.get("added_on"))
                         tech_occurred = tech_dt if tech_dt != datetime.min else datetime.utcnow()
+                        tech_names = [t.get("attributes", {}).get("name") for t in recent_techs if t.get("attributes", {}).get("name")][:20]
+                        primary_techs = ", ".join(tech_names[:4])
                         signals.append({
                             "contact_id": contact.id,
-                            "signal_type": SignalType.TECH_STACK_CHANGE,
+                            "signal_type": SignalType.TECH_STACK_OBSERVED,
                             "signal_source": "predictleads",
-                            "confidence": weights.get(SignalType.TECH_STACK_CHANGE, DEFAULT_WEIGHTS[SignalType.TECH_STACK_CHANGE]),
+                            "confidence": weights.get(SignalType.TECH_STACK_OBSERVED, DEFAULT_WEIGHTS[SignalType.TECH_STACK_OBSERVED]),
                             "occurred_at": tech_occurred,
                             "raw_data": {
                                 "tech_count": len(recent_techs),
-                                "technologies": [t.get("attributes", {}).get("name") for t in recent_techs][:20],
+                                "technologies": tech_names,
                                 "categories": [t.get("attributes", {}).get("category") for t in recent_techs][:20],
+                                "headline": f"Enterprise tech stack observed on {domain}: {primary_techs}",
+                                "description": f"PredictLeads observed verified usage of: {primary_techs}. This reflects active enterprise technology usage, not a newly confirmed adoption event.",
                                 "published_at": tech_occurred.isoformat(),
                             },
                         })
@@ -606,6 +659,11 @@ class SignalAgent:
                 pass
             return datetime.min
 
+    RECRUITMENT_AGENCIES = {
+        "robert half", "randstad", "page personnel", "michael page",
+        "teksystems", "hays", "adecco", "manpower", "aerotek",
+        "insight global", "kelly services", "korn ferry", "allegis"
+    }
     GENERIC_NOUN_COLLISIONS = {
         "summit", "affinity", "bridge", "target", "scale", "seed", "blend",
         "box", "nest", "wave", "focus", "pilot", "spark", "drift", "bloom",
@@ -707,6 +765,10 @@ class SignalAgent:
         norm_job = clean_comp(job_comp)
         norm_target_clean = clean_comp(cleaned_company)
         norm_target_orig = clean_comp(original_company)
+
+        # Exclude recruitment agency postings from matching target company
+        if norm_job in cls.RECRUITMENT_AGENCIES and norm_target_clean not in cls.RECRUITMENT_AGENCIES:
+            return False
 
         # Exact match after suffix stripping
         for cand in [norm_target_clean, norm_target_orig]:
@@ -996,7 +1058,10 @@ class SignalAgent:
                     timeout=10,
                 )
                 if resp.status_code in (401, 402, 403, 429):
-                    logger.warning("Apify auth or billing error. Disabling Apify for this run.", status=resp.status_code)
+                    logger.warning(
+                        "Apify Reddit Scraper monthly usage hard limit reached or service unavailable (status=%d). Safely disabled.",
+                        resp.status_code
+                    )
                     self._apify_disabled = True
                     return []
                 resp.raise_for_status()
@@ -1013,18 +1078,32 @@ class SignalAgent:
                 
                 if result_resp.status_code == 200:
                     items = result_resp.json()
-                    if items:
-                        headline = items[0].get("title", f"Social discussions about {company}")
+                    # Filter items strictly referring to company and possessing valid Reddit post URLs
+                    valid_items = [
+                        it for it in items
+                        if (it.get("url") and ("reddit.com" in it["url"] or "redd.it" in it["url"]))
+                        and self._is_headline_relevant(it.get("title", ""), company, contact.company)
+                    ]
+                    if valid_items:
+                        first_post = valid_items[0]
+                        headline = clean_html_text(first_post.get("title", f"Community discussion about {company}"))
+                        post_dt = self._parse_iso(first_post.get("createdAt") or first_post.get("created_utc"))
+                        post_occurred = post_dt if post_dt != datetime.min else None
                         return [{
                             "contact_id": contact.id,
                             "signal_type": SignalType.SOCIAL_ENGAGEMENT,
                             "signal_source": "apify_reddit",
                             "confidence": weights.get(SignalType.SOCIAL_ENGAGEMENT, DEFAULT_WEIGHTS[SignalType.SOCIAL_ENGAGEMENT]),
+                            "occurred_at": post_occurred,
                             "raw_data": {
-                                "mention_count": len(items),
+                                "mention_count": len(valid_items),
                                 "headline": headline,
-                                "urls": [item.get("url") for item in items if item.get("url")][:5]
-                             }
+                                "url": first_post.get("url"),
+                                "description": clean_html_text(first_post.get("body") or first_post.get("selftext"))[:350],
+                                "subreddit": first_post.get("communityName") or first_post.get("subreddit"),
+                                "urls": [it.get("url") for it in valid_items if it.get("url")][:5],
+                                "published_at": post_occurred.isoformat() if post_occurred else None,
+                            }
                         }]
             return []
         except Exception as exc:
@@ -1159,65 +1238,8 @@ class SignalAgent:
     }
 
     async def _check_website_tech_stack(self, contact: Contact, weights: Dict[SignalType, float]) -> List[Dict[str, Any]]:
-        """Direct website HTML fingerprinting for enterprise CRM and sales engagement stack detection."""
-        domain = self._get_company_domain(contact)
-        if not domain:
-            return []
-
-        try:
-            target_url = f"https://{domain}"
-            headers = {
-                "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
-                "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
-            }
-            async with httpx.AsyncClient(timeout=10, follow_redirects=True, verify=False) as client:
-                try:
-                    response = await client.get(target_url, headers=headers)
-                except httpx.RequestError:
-                    response = await client.get(f"http://{domain}", headers=headers)
-
-            if response.status_code != 200:
-                return []
-
-            html_lower = response.text.lower()
-            detected_enterprise = []
-
-            for tech_name, signatures in self.ENTERPRISE_SALES_CRM_TOOLS.items():
-                for sig in signatures:
-                    if sig.lower() in html_lower:
-                        detected_enterprise.append(tech_name)
-                        break
-
-            # Strictly require at least one verified enterprise RevOps/CRM tool.
-            # Generic utilities (Google Tag Manager, Stripe, Zendesk) alone do not constitute a buying signal.
-            if not detected_enterprise:
-                return []
-
-            # Calibrate confidence based on depth of enterprise sales stack:
-            # 2+ enterprise tools = 0.55; 1 enterprise tool = 0.40
-            confidence = 0.55 if len(detected_enterprise) >= 2 else 0.40
-
-            occurred_at = datetime.utcnow()
-            primary_techs = ", ".join(detected_enterprise[:4])
-            return [{
-                "contact_id": contact.id,
-                "signal_type": SignalType.TECH_STACK_CHANGE,
-                "signal_source": "website_fingerprint",
-                "confidence": confidence,
-                "occurred_at": occurred_at,
-                "raw_data": {
-                    "tech_count": len(detected_enterprise),
-                    "technologies": detected_enterprise,
-                    "headline": f"Enterprise sales tech detected on {domain}: {primary_techs}",
-                    "description": f"Website fingerprinting verified {len(detected_enterprise)} enterprise sales/CRM tool(s): {', '.join(detected_enterprise)}.",
-                    "url": target_url,
-                    "is_company_website": True,
-                    "published_at": occurred_at.isoformat(),
-                },
-            }]
-        except Exception as exc:
-            logger.debug("Website tech stack fingerprinting skipped or failed", domain=domain, error=str(exc))
-            return []
+        """DEPRECATED: Website HTML scraping for tech stack removed per user requirements. Signals must come from verifiable external sources/articles."""
+        return []
 
     async def _generate_2_line_signal_summary(self, company_name: str, signals: List[Dict[str, Any]]) -> str:
         """Use LLM to generate a concise 2-sentence summary of detected buying signals."""
@@ -1299,12 +1321,17 @@ class SignalAgent:
 
         # Specific semantic duplicate checks when signal types match
         if sig1_type == sig2_type:
-            # Tech stack change: same technology detected for same contact within 30 days
-            if sig1_type == "tech_stack_change" and time_delta.total_seconds() < (30 * 86400):
-                tech1 = (sig1_raw.get("tech") or sig1_raw.get("technology") or n1).strip().lower()
-                tech2 = (sig2_raw.get("tech") or sig2_raw.get("technology") or n2).strip().lower()
-                if tech1 and tech2 and (tech1 == tech2 or tech1 in tech2 or tech2 in tech1):
-                    return True
+            # Tech stack observed / change: same technology detected for same contact within 30 days
+            if sig1_type in ("tech_stack_change", "tech_stack_observed") and sig2_type in ("tech_stack_change", "tech_stack_observed"):
+                if time_delta.total_seconds() < (30 * 86400):
+                    techs1 = set(t.lower() for t in sig1_raw.get("technologies", []))
+                    techs2 = set(t.lower() for t in sig2_raw.get("technologies", []))
+                    if techs1 and techs2 and (techs1 == techs2 or techs1.issubset(techs2) or techs2.issubset(techs1)):
+                        return True
+                    tech1 = (sig1_raw.get("tech") or sig1_raw.get("technology") or n1).strip().lower()
+                    tech2 = (sig2_raw.get("tech") or sig2_raw.get("technology") or n2).strip().lower()
+                    if tech1 and tech2 and (tech1 == tech2 or tech1 in tech2 or tech2 in tech1):
+                        return True
 
             # If both headlines are identical or substantially similar, it's a duplicate
             if n1 and n2 and (n1 == n2 or n1 in n2 or n2 in n1):

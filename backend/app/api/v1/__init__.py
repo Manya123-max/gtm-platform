@@ -20,6 +20,7 @@ from app.models.models import (
     PendingAction, ActionStatus, SignalConversionRegistry,
     PromptVariant, WorkflowRun, AgentSchedule, OutreachDraft,
     ContactUserInputAssociation, Notification, User, UserInput,
+    CompanySalesforceVerification, SalesforceVerificationEvidence,
 )
 from app.services.prospect_summary import generate_selection_summary
 from app.services.signal_formatter import (
@@ -27,6 +28,7 @@ from app.services.signal_formatter import (
     format_clean_signal_summary,
     resolve_signal_article_url,
     humanize_signal_source,
+    enrich_signal_metadata,
 )
 
 # Every endpoint on this router requires a valid Bearer token (server-side
@@ -49,7 +51,7 @@ async def _get_default_user_input_id(db: AsyncSession, current_user=None) -> Opt
     from sqlalchemy import or_
     stmt = select(UserInput.id).order_by(UserInput.id.desc())
     if current_user is not None:
-        stmt = stmt.where(or_(UserInput.user_id == current_user.id, UserInput.user_id.is_(None)))
+        stmt = stmt.where(UserInput.user_id == current_user.id)
     res = await db.execute(stmt.limit(1))
     return res.scalar_one_or_none()
 
@@ -58,7 +60,7 @@ async def _ensure_owned_input(db: AsyncSession, user, user_input_id: int) -> Non
     if user is None or user_input_id is None:
         return
     row = await db.get(UserInput, user_input_id)
-    if not row or (row.user_id is not None and row.user_id != user.id):
+    if not row or row.user_id != user.id:
         raise HTTPException(status_code=404, detail="Session not found")
 
 
@@ -82,10 +84,11 @@ def _is_real_prospect_contact():
 
 
 def _own_contact_ids_q(user, as_str: bool = False):
-    """Subquery: contact ids owned by the user or legacy pre-auth contacts, excluding mock data."""
+    """Subquery: contact ids owned by the user, excluding mock data."""
     col = func.cast(Contact.id, SAString) if as_str else Contact.id
+    clause = (Contact.user_id == user.id) if user is not None else True
     return select(col).where(
-        or_(Contact.user_id == user.id, Contact.user_id.is_(None)),
+        clause,
         _is_real_prospect_contact(),
     )
 
@@ -100,6 +103,33 @@ def _own_deal_ids_q(user, as_str: bool = False):
 
 
 # ── Pydantic response models ───────────────────────────────────────────────
+
+class SalesforceVerificationEvidenceOut(BaseModel):
+    id: str
+    evidence_type: str
+    evidence_description: str
+    source_name: str
+    source_url: Optional[str] = None
+    evidence_excerpt: Optional[str] = None
+    evidence_date: Optional[datetime] = None
+    checked_at: datetime
+    is_valid: bool = True
+    class Config:
+        from_attributes = True
+
+
+class SalesforceVerificationOut(BaseModel):
+    id: Optional[str] = None
+    company_name: str
+    company_domain: Optional[str] = None
+    apollo_organization_id: Optional[str] = None
+    verification_status: str  # 'verified', 'not_verified', 'unable_to_verify'
+    verification_summary: Optional[str] = None
+    last_checked_at: Optional[datetime] = None
+    evidence_items: List[SalesforceVerificationEvidenceOut] = []
+    class Config:
+        from_attributes = True
+
 
 class ContactOut(BaseModel):
     id: str
@@ -116,6 +146,7 @@ class ContactOut(BaseModel):
     work_mode: Optional[str] = "Not specified"
     location_source: Optional[str] = None
     selection_summary: Optional[str] = None
+    source: Optional[str] = None
     icp_score: Optional[float] = None
     signal_score: Optional[float] = None
     readiness_score: float = 0.0
@@ -133,6 +164,7 @@ class ContactOut(BaseModel):
     tier_reason: Optional[str] = None
     signal_count: Optional[int] = None
     account_icp_score: Optional[float] = None
+    salesforce_verification: Optional[SalesforceVerificationOut] = None
     created_at: datetime
     class Config:
         from_attributes = True
@@ -270,7 +302,7 @@ async def get_active_session(current_user=Depends(get_current_user), db: AsyncSe
     from sqlalchemy import or_
     stmt = select(UserInput.id).order_by(UserInput.id.desc())
     if current_user is not None:
-        stmt = stmt.where(or_(UserInput.user_id == current_user.id, UserInput.user_id.is_(None)))
+        stmt = stmt.where(UserInput.user_id == current_user.id)
     result = await db.execute(stmt.limit(1))
     row = result.scalar_one_or_none()
     return {"user_input_id": row}
@@ -282,7 +314,7 @@ async def get_session_details(session_id: int, current_user=Depends(get_current_
     from app.models.models import UserInput
     result = await db.execute(select(UserInput).where(UserInput.id == session_id))
     row = result.scalar_one_or_none()
-    if not row or (current_user is not None and row.user_id is not None and row.user_id != current_user.id):
+    if not row or (current_user is not None and row.user_id != current_user.id):
         from fastapi.responses import JSONResponse
         return JSONResponse(status_code=404, content={"error": "Session not found"})
     return {
@@ -311,7 +343,7 @@ async def get_dashboard_overview(
     # Base contact filter (strictly exclude seeded and mock data)
     contact_filter = [Contact.do_not_contact == False, _is_real_prospect_contact()]
     if current_user is not None:
-        contact_filter.append((Contact.user_id == current_user.id) | (Contact.user_id.is_(None)))
+        contact_filter.append(Contact.user_id == current_user.id)
     if user_input_id is not None:
         assoc_ids_q = select(ContactUserInputAssociation.contact_id).where(ContactUserInputAssociation.user_input_id == user_input_id)
         user_filter = or_(Contact.user_input_id == user_input_id, Contact.id.in_(assoc_ids_q))
@@ -424,7 +456,7 @@ async def get_tier_summary(
         or_(Contact.user_input_id == user_input_id, Contact.id.in_(assoc_ids_q)),
     )
     if current_user is not None:
-        q = q.where((Contact.user_id == current_user.id) | (Contact.user_id.is_(None)))
+        q = q.where(Contact.user_id == current_user.id)
 
     result = await db.execute(q)
     contacts = result.scalars().all()
@@ -468,7 +500,7 @@ async def list_contacts(
     assoc_ids_q = select(ContactUserInputAssociation.contact_id).where(ContactUserInputAssociation.user_input_id == user_input_id)
     q = q.where(or_(Contact.user_input_id == user_input_id, Contact.id.in_(assoc_ids_q)))
     if current_user is not None:
-        q = q.where((Contact.user_id == current_user.id) | (Contact.user_id.is_(None)))
+        q = q.where(Contact.user_id == current_user.id)
     if min_score is not None:
         q = q.where(Contact.icp_score >= min_score)
     if has_signal:
@@ -497,6 +529,39 @@ async def list_contacts(
     # Apply pagination
     contacts = contacts[skip: skip + limit]
 
+    # Batch-load Salesforce Account Verification (Phase 2 & Phase 4)
+    try:
+        from app.agents.a1_5_salesforce_verification import clean_company_domain
+        comp_names = list(set(c.company.lower() for c in contacts if c.company))
+        comp_doms = list(set(clean_company_domain(c.company_domain) for c in contacts if c.company_domain))
+        comp_doms = [d for d in comp_doms if d]
+
+        if comp_names or comp_doms:
+            ver_conditions = []
+            if comp_doms:
+                ver_conditions.append(CompanySalesforceVerification.company_domain.in_(comp_doms))
+            if comp_names:
+                ver_conditions.append(func.lower(CompanySalesforceVerification.company_name).in_(comp_names))
+
+            ver_q = select(CompanySalesforceVerification).options(
+                selectinload(CompanySalesforceVerification.evidence_items)
+            ).where(or_(*ver_conditions)).order_by(CompanySalesforceVerification.last_checked_at.desc())
+
+            ver_res = await db.execute(ver_q)
+            all_vers = ver_res.scalars().all()
+            ver_by_dom = {v.company_domain: v for v in all_vers if v.company_domain}
+            ver_by_name = {v.company_name.lower(): v for v in all_vers if v.company_name}
+
+            for c in contacts:
+                c_dom = clean_company_domain(c.company_domain)
+                v_match = ver_by_dom.get(c_dom) if c_dom else None
+                if not v_match and c.company:
+                    v_match = ver_by_name.get(c.company.lower())
+                if v_match:
+                    c.salesforce_verification = v_match
+    except Exception as ver_err:
+        logger.warning("Failed to batch load salesforce verifications in list_contacts", error=str(ver_err))
+
     for c in contacts:
         if not c.selection_summary:
             c.selection_summary = generate_selection_summary(c)
@@ -510,7 +575,7 @@ async def list_contacts(
 async def get_contact(contact_id: UUID, current_user=Depends(get_current_user), db: AsyncSession = Depends(get_db)):
     stmt = select(Contact).where(Contact.id == contact_id)
     if current_user is not None:
-        stmt = stmt.where((Contact.user_id == current_user.id) | (Contact.user_id.is_(None)))
+        stmt = stmt.where(Contact.user_id == current_user.id)
     result = await db.execute(stmt)
     contact = result.scalar_one_or_none()
     if not contact:
@@ -534,11 +599,136 @@ async def get_contact(contact_id: UUID, current_user=Depends(get_current_user), 
         contact.account_icp_score = tier_info.account_icp_score
         contact.account_signal_score = tier_info.account_signal_score
 
+    # Annotate Salesforce Account Verification (Phase 2)
+    if contact.company or contact.company_domain:
+        from app.agents.a1_5_salesforce_verification import clean_company_domain
+        ver_stmt = select(CompanySalesforceVerification).options(
+            selectinload(CompanySalesforceVerification.evidence_items)
+        )
+        clean_dom = clean_company_domain(contact.company_domain)
+        if clean_dom:
+            ver_stmt = ver_stmt.where(CompanySalesforceVerification.company_domain == clean_dom)
+        else:
+            ver_stmt = ver_stmt.where(func.lower(CompanySalesforceVerification.company_name) == contact.company.lower())
+
+        ver_stmt = ver_stmt.order_by(CompanySalesforceVerification.last_checked_at.desc()).limit(1)
+        ver_res = await db.execute(ver_stmt)
+        ver_record = ver_res.scalar_one_or_none()
+        if ver_record:
+            contact.salesforce_verification = ver_record
+
     if not contact.selection_summary:
         contact.selection_summary = generate_selection_summary(contact)
     if contact.signal_summary:
         contact.signal_summary = format_clean_signal_summary(contact.signal_summary)
     return contact
+
+
+@router.get("/contacts/{contact_id}/salesforce-verification", response_model=SalesforceVerificationOut)
+async def get_contact_salesforce_verification(
+    contact_id: UUID, current_user=Depends(get_current_user), db: AsyncSession = Depends(get_db)
+):
+    """Retrieve the account-level Salesforce verification record and evidence for a contact."""
+    stmt = select(Contact).where(Contact.id == contact_id)
+    if current_user is not None:
+        stmt = stmt.where(Contact.user_id == current_user.id)
+    result = await db.execute(stmt)
+    contact = result.scalar_one_or_none()
+    if not contact:
+        raise HTTPException(status_code=404, detail="Contact not found")
+
+    from app.agents.a1_5_salesforce_verification import clean_company_domain
+    clean_dom = clean_company_domain(contact.company_domain)
+
+    ver_stmt = select(CompanySalesforceVerification).options(
+        selectinload(CompanySalesforceVerification.evidence_items)
+    )
+    if clean_dom:
+        ver_stmt = ver_stmt.where(CompanySalesforceVerification.company_domain == clean_dom)
+    elif contact.company:
+        ver_stmt = ver_stmt.where(func.lower(CompanySalesforceVerification.company_name) == contact.company.lower())
+    else:
+        return {
+            "id": None,
+            "company_name": "",
+            "company_domain": None,
+            "verification_status": "unable_to_verify",
+            "verification_summary": "Official company domain is missing.",
+            "evidence_items": [],
+        }
+
+    ver_stmt = ver_stmt.order_by(CompanySalesforceVerification.last_checked_at.desc()).limit(1)
+    ver_res = await db.execute(ver_stmt)
+    ver_record = ver_res.scalar_one_or_none()
+    if not ver_record:
+        # If no verification record exists yet, auto-verify on-demand so live data is immediately available
+        if contact.company or clean_dom:
+            try:
+                from app.agents.a1_5_salesforce_verification import SalesforceVerificationAgent
+                agent = SalesforceVerificationAgent(db)
+                await agent.verify_company(
+                    company_name=contact.company or "",
+                    domain=contact.company_domain,
+                    apollo_org_id=contact.apollo_id,
+                    cached_tech_stack=contact.tech_stack,
+                    force_refresh=False,
+                )
+                ver_res_fresh = await db.execute(ver_stmt)
+                ver_record = ver_res_fresh.scalar_one_or_none()
+                if ver_record:
+                    return ver_record
+            except Exception as auto_ver_err:
+                pass
+
+        return {
+            "id": None,
+            "company_name": contact.company or "Target Account",
+            "company_domain": clean_dom or None,
+            "verification_status": "pending",
+            "verification_summary": "Salesforce verification is pending.",
+            "last_checked_at": None,
+            "evidence_items": [],
+        }
+
+    return ver_record
+
+
+@router.post("/contacts/{contact_id}/verify-salesforce", response_model=SalesforceVerificationOut)
+async def trigger_contact_salesforce_verification(
+    contact_id: UUID, current_user=Depends(get_current_user), db: AsyncSession = Depends(get_db)
+):
+    """Manually trigger or refresh Salesforce account verification for a contact."""
+    stmt = select(Contact).where(Contact.id == contact_id)
+    if current_user is not None:
+        stmt = stmt.where(Contact.user_id == current_user.id)
+    result = await db.execute(stmt)
+    contact = result.scalar_one_or_none()
+    if not contact:
+        raise HTTPException(status_code=404, detail="Contact not found")
+
+    from app.agents.a1_5_salesforce_verification import SalesforceVerificationAgent
+    agent = SalesforceVerificationAgent(db)
+    res = await agent.verify_company(
+        company_name=contact.company or "",
+        domain=contact.company_domain,
+        apollo_org_id=contact.apollo_id,
+        cached_tech_stack=contact.tech_stack,
+        force_refresh=True,
+    )
+    # Reload with relationships
+    from app.agents.a1_5_salesforce_verification import clean_company_domain
+    clean_dom = clean_company_domain(contact.company_domain)
+    ver_stmt = select(CompanySalesforceVerification).options(
+        selectinload(CompanySalesforceVerification.evidence_items)
+    )
+    if clean_dom:
+        ver_stmt = ver_stmt.where(CompanySalesforceVerification.company_domain == clean_dom)
+    else:
+        ver_stmt = ver_stmt.where(func.lower(CompanySalesforceVerification.company_name) == contact.company.lower())
+    ver_stmt = ver_stmt.order_by(CompanySalesforceVerification.last_checked_at.desc()).limit(1)
+    fresh_ver = (await db.execute(ver_stmt)).scalar_one_or_none()
+    return fresh_ver or res
+
 
 
 @router.get("/contacts/{contact_id}/thread")
@@ -559,7 +749,7 @@ async def get_contact_thread(contact_id: UUID, current_user=Depends(get_current_
 @router.get("/contacts/{contact_id}/signals")
 async def get_contact_signals(contact_id: UUID, current_user=Depends(get_current_user), db: AsyncSession = Depends(get_db)):
     stmt = (
-        select(SignalEvent)
+        select(SignalEvent, Contact.company)
         .join(Contact, Contact.id == SignalEvent.contact_id)
         .where(SignalEvent.contact_id == contact_id)
     )
@@ -567,17 +757,25 @@ async def get_contact_signals(contact_id: UUID, current_user=Depends(get_current
         stmt = stmt.where(Contact.user_id == current_user.id)
     stmt = stmt.order_by(desc(SignalEvent.detected_at))
     result = await db.execute(stmt)
-    signals = list(result.scalars().all())
-    for s in signals:
+    rows = list(result.all())
+    signals = []
+    for s, comp_name in rows:
         if s.summary:
             s.summary = clean_html_text(s.summary)
-        if s.raw_data and isinstance(s.raw_data, dict):
-            raw = dict(s.raw_data)
-            if "description" in raw and raw["description"]:
-                raw["description"] = clean_html_text(raw["description"])
-            if "url" in raw and raw["url"] and ("news.google.com/rss/articles/" in raw["url"] or "news.google.com/articles/" in raw["url"]):
-                raw["url"] = resolve_signal_article_url(raw["url"]) or raw["url"]
-            s.raw_data = raw
+        raw = dict(s.raw_data) if (s.raw_data and isinstance(s.raw_data, dict)) else {}
+        if "description" in raw and raw["description"]:
+            raw["description"] = clean_html_text(raw["description"])
+        if "url" in raw and raw["url"] and ("news.google.com/rss/articles/" in raw["url"] or "news.google.com/articles/" in raw["url"]):
+            raw["url"] = resolve_signal_article_url(raw["url"]) or raw["url"]
+        
+        # Enrich metadata with signal-specific fields and strictly signal-grounded company context
+        s.raw_data = enrich_signal_metadata(
+            sig_type=s.signal_type,
+            raw_data=raw,
+            company=comp_name or raw.get("company_name") or "",
+            summary=s.summary
+        )
+        signals.append(s)
     return signals
 
 
@@ -751,7 +949,7 @@ async def _ensure_action_owned(db: AsyncSession, user, action) -> None:
         return
     if action.entity_type == "contact":
         contact = await db.get(Contact, action.entity_id)
-        if not contact or (contact.user_id is not None and contact.user_id != user.id):
+        if not contact or contact.user_id != user.id:
             raise HTTPException(status_code=404)
     elif action.entity_type == "deal":
         deal = await db.get(Deal, action.entity_id)
@@ -759,7 +957,7 @@ async def _ensure_action_owned(db: AsyncSession, user, action) -> None:
             raise HTTPException(status_code=404)
         if deal.contact_id:
             contact = await db.get(Contact, deal.contact_id)
-            if not contact or (contact.user_id is not None and contact.user_id != user.id):
+            if not contact or contact.user_id != user.id:
                 raise HTTPException(status_code=404)
 
 
@@ -863,15 +1061,19 @@ async def approve_action(
     if not action:
         raise HTTPException(status_code=404)
     await _ensure_action_owned(db, current_user, action)
-    action.status = ActionStatus.APPROVED
-    action.approved_by = body.approved_by
-    action.approved_at = datetime.utcnow()
-    
     if action.action_type == "approve_outreach":
         from app.agents.a3_outreach import DraftManager
         draft_manager = DraftManager(db)
-        await draft_manager.approve_pending_draft(action.entity_id)
+        approved = await draft_manager.approve_pending_draft(action.entity_id)
+        if not approved:
+            raise HTTPException(
+                status_code=400,
+                detail="Outreach send blocked: recipient is suppressed (DNC) or draft is no longer pending."
+            )
 
+    action.status = ActionStatus.APPROVED
+    action.approved_by = body.approved_by
+    action.approved_at = datetime.utcnow()
     await db.commit()
     return {"status": "approved"}
 
@@ -892,13 +1094,58 @@ async def dismiss_action(action_id: str, current_user=Depends(get_current_user),
 # ── Revenue ────────────────────────────────────────────────────────────────
 
 @router.get("/revenue/forecast", response_model=Optional[ForecastOut])
-async def get_latest_forecast(current_user=Depends(get_current_user), db: AsyncSession = Depends(get_db)):
+async def get_latest_forecast(
+    user_input_id: Optional[int] = None,
+    current_user=Depends(get_current_user),
+    db: AsyncSession = Depends(get_db)
+):
+    # Count active deals for the current user
+    deal_q = select(func.count(Deal.id)).where(
+        Deal.stage.notin_(["closed_won", "closed_lost", "closedwon", "closedlost"])
+    )
+    if current_user is not None:
+        own_contacts = _own_contact_ids_q(current_user)
+        deal_clauses = [Deal.contact_id.in_(own_contacts)]
+        if current_user.email:
+            deal_clauses.append(Deal.owner_email == current_user.email)
+        if hasattr(Deal, "user_id"):
+            deal_clauses.append(Deal.user_id == current_user.id)
+        deal_q = deal_q.where(or_(*deal_clauses))
+
+    active_deals_count = (await db.scalar(deal_q)) or 0
+    if active_deals_count == 0:
+        return ForecastOut(
+            forecast_30d=0.0,
+            forecast_60d=0.0,
+            forecast_90d=0.0,
+            current_pipeline_value=0.0,
+            bottleneck_stage=None,
+            bottleneck_description="No active deals recorded. Run A5 Deal Intelligence to sync pipeline.",
+            recommended_lever=None,
+            stage_conversion_rates={},
+            stage_velocity_days={},
+            calculated_at=datetime.utcnow(),
+        )
+
     stmt = select(RevenueForecast)
     if current_user is not None:
-        stmt = stmt.where(or_(RevenueForecast.user_id == current_user.id, RevenueForecast.user_id.is_(None)))
+        stmt = stmt.where(RevenueForecast.user_id == current_user.id)
     result = await db.execute(
         stmt.order_by(desc(RevenueForecast.calculated_at)).limit(1))
     forecast = result.scalar_one_or_none()
+    if forecast is None:
+        return ForecastOut(
+            forecast_30d=0.0,
+            forecast_60d=0.0,
+            forecast_90d=0.0,
+            current_pipeline_value=0.0,
+            bottleneck_stage=None,
+            bottleneck_description="No active deals recorded. Run A5 Deal Intelligence to sync pipeline.",
+            recommended_lever=None,
+            stage_conversion_rates={},
+            stage_velocity_days={},
+            calculated_at=datetime.utcnow(),
+        )
     return forecast
 
 
@@ -1262,7 +1509,7 @@ async def get_outreach_drafts(
     )
     if current_user is not None:
         q = q.join(Contact, Contact.id == OutreachLog.contact_id).where(
-            (Contact.user_id == current_user.id) | (Contact.user_id.is_(None)),
+            Contact.user_id == current_user.id,
             _is_real_prospect_contact(),
         )
         if user_input_id is not None:
@@ -1389,6 +1636,9 @@ class InputData(BaseModel):
     target_industries:   str = ""    # optional: "SaaS, Fintech"
     target_company_size: str          # range: "50-5000"
     target_keywords:     str = ""    # optional: "cloud, kubernetes"
+    company_lookalike:   str = ""    # optional: "Google, RadNet, Salesforce"
+    signals:             str = ""    # optional: "Office expansion, New partnership"
+    funding_stages:      str = ""    # optional: "Seed, Series A"
     target_job_titles:   str          # "CTO, VP Engineering"
 
 
@@ -1399,7 +1649,7 @@ async def get_input_history(current_user=Depends(get_current_user), db: AsyncSes
     from sqlalchemy import select, or_
     stmt = select(UserInput)
     if current_user is not None:
-        stmt = stmt.where(or_(UserInput.user_id == current_user.id, UserInput.user_id.is_(None)))
+        stmt = stmt.where(UserInput.user_id == current_user.id)
     stmt = stmt.order_by(UserInput.id.desc()).limit(50)
     result = await db.execute(stmt)
     rows = result.scalars().all()
@@ -1412,6 +1662,9 @@ async def get_input_history(current_user=Depends(get_current_user), db: AsyncSes
             "target_industries":   r.target_industries or "",
             "target_company_size": r.target_company_size,
             "target_keywords":     r.target_keywords or "",
+            "company_lookalike":   getattr(r, "company_lookalike", None) or "",
+            "signals":             getattr(r, "signals", None) or "",
+            "funding_stages":      getattr(r, "funding_stages", None) or "",
             "target_job_titles":   r.target_job_titles,
             "created_at":          r.created_at.isoformat() if getattr(r, "created_at", None) else None,
         }
@@ -1528,6 +1781,9 @@ async def submit_input(data: InputData, current_user=Depends(get_current_user), 
         target_industries=   data.target_industries or None,
         target_company_size= data.target_company_size,
         target_keywords=     data.target_keywords or None,
+        company_lookalike=   data.company_lookalike or None,
+        signals=             data.signals or None,
+        funding_stages=      data.funding_stages or None,
         target_job_titles=   data.target_job_titles,
         user_id=             current_user.id if current_user is not None else None,
     )
@@ -1547,6 +1803,9 @@ async def submit_input(data: InputData, current_user=Depends(get_current_user), 
             "target_industries":   data.target_industries,
             "target_company_size": data.target_company_size,
             "target_keywords":     data.target_keywords,
+            "company_lookalike":   data.company_lookalike or "",
+            "signals":             data.signals or "",
+            "funding_stages":      data.funding_stages or "",
             "target_job_titles":   data.target_job_titles,
             "user_id":             current_user.id if current_user is not None else None,
             "user_input_id":       record.id,
@@ -1607,7 +1866,7 @@ async def _get_owned_draft(db: AsyncSession, user, draft_id: str) -> OutreachDra
         raise HTTPException(status_code=404, detail="Draft not found")
     if user is not None:
         contact = await db.get(Contact, draft.contact_id)
-        if not contact or (contact.user_id is not None and contact.user_id != user.id):
+        if not contact or contact.user_id != user.id:
             raise HTTPException(status_code=404, detail="Draft not found")
     return draft
 
@@ -1620,14 +1879,14 @@ async def get_drafts(
     q = select(OutreachDraft)
     if current_user is not None:
         await _ensure_owned_input(db, current_user, user_input_id)
-        own = select(Contact.id).where((Contact.user_id == current_user.id) | (Contact.user_id.is_(None)))
+        own = select(Contact.id).where(Contact.user_id == current_user.id)
         if user_input_id is not None:
             assoc_ids_q = select(ContactUserInputAssociation.contact_id).where(ContactUserInputAssociation.user_input_id == user_input_id)
-            own = own.where(or_(Contact.user_input_id == user_input_id, Contact.id.in_(assoc_ids_q), Contact.user_input_id.is_(None)))
+            own = own.where(or_(Contact.user_input_id == user_input_id, Contact.id.in_(assoc_ids_q)))
         q = q.where(OutreachDraft.contact_id.in_(own))
     elif user_input_id is not None:
         assoc_ids_q = select(ContactUserInputAssociation.contact_id).where(ContactUserInputAssociation.user_input_id == user_input_id)
-        matching_contacts = select(Contact.id).where(or_(Contact.user_input_id == user_input_id, Contact.id.in_(assoc_ids_q), Contact.user_input_id.is_(None)))
+        matching_contacts = select(Contact.id).where(or_(Contact.user_input_id == user_input_id, Contact.id.in_(assoc_ids_q)))
         q = q.where(OutreachDraft.contact_id.in_(matching_contacts))
     result = await db.execute(
         q.order_by(OutreachDraft.created_at.desc())
@@ -1722,6 +1981,9 @@ async def approve_draft_route(draft_id: str, current_user=Depends(get_current_us
     error_msg = res.get("error") if isinstance(res, dict) else None
 
     if not success:
+        await db.refresh(draft)
+        if draft.status == "suppressed":
+            raise HTTPException(status_code=400, detail="Outreach send blocked: recipient is suppressed (DNC).")
         raise HTTPException(status_code=400, detail=error_msg or "Approval failed or draft not pending")
     
     # Find and resolve associated pending actions
@@ -1945,19 +2207,19 @@ async def list_notifications(
     elif current_user is not None:
         # Get all session IDs owned by current user
         user_sess_res = await db.execute(
-            select(UserInput.id).where(or_(UserInput.user_id == current_user.id, UserInput.user_id.is_(None)))
+            select(UserInput.id).where(UserInput.user_id == current_user.id)
         )
         user_sess_ids = user_sess_res.scalars().all()
         if user_sess_ids:
             scope_filter = or_(
                 Notification.user_input_id.in_(user_sess_ids),
                 Notification.user_id == current_user.id,
-                and_(Notification.user_id.is_(None), Notification.contact.has(or_(Contact.user_id == current_user.id, Contact.user_id.is_(None))))
+                Notification.contact.has(Contact.user_id == current_user.id),
             )
         else:
             scope_filter = or_(
                 Notification.user_id == current_user.id,
-                and_(Notification.user_id.is_(None), Notification.contact.has(or_(Contact.user_id == current_user.id, Contact.user_id.is_(None))))
+                Notification.contact.has(Contact.user_id == current_user.id),
             )
     else:
         scope_filter = True
@@ -1967,10 +2229,8 @@ async def list_notifications(
     if current_user is not None:
         filters.append(
             or_(
-                Notification.contact_id.is_(None),
-                Notification.contact.has(or_(Contact.user_id == current_user.id, Contact.user_id.is_(None))),
                 Notification.user_id == current_user.id,
-                Notification.user_id.is_(None),
+                Notification.contact.has(Contact.user_id == current_user.id),
             )
         )
 
@@ -2074,8 +2334,7 @@ async def mark_all_notifications_read(
         stmt = stmt.where(
             or_(
                 Notification.user_id == current_user.id,
-                Notification.user_id.is_(None),
-                Notification.contact.has(or_(Contact.user_id == current_user.id, Contact.user_id.is_(None)))
+                Notification.contact.has(Contact.user_id == current_user.id)
             )
         )
     await db.execute(stmt)

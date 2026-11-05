@@ -4,7 +4,7 @@ import {
   Mail, Calendar, CheckCircle, XCircle, AlertCircle,
   ExternalLink, Shield, Key, RefreshCw, Save, User, Building,
   Check, Lock, Info, Sparkles, Edit3, UserPlus, Users,
-  ToggleLeft, ToggleRight, Trash2, ArrowRight
+  ToggleLeft, ToggleRight, Trash2, ArrowRight, Server
 } from 'lucide-react'
 import { useAuth } from '../context/AuthContext'
 import {

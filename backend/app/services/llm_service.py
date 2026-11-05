@@ -25,8 +25,8 @@ from app.core.config import settings
 logger = structlog.get_logger()
 
 # ── Model IDs ────────────────────────────────────────────────────────────────
-HAIKU_MODEL  = "claude-3-haiku-20240307"
-SONNET_MODEL = "claude-3-5-sonnet-latest"
+HAIKU_MODEL  = "claude-haiku-5-5"
+SONNET_MODEL = "claude-sonnet-5-5"
 
 GROQ_URL     = "https://api.groq.com/openai/v1/chat/completions"
 GEMINI_URL   = "https://generativelanguage.googleapis.com/v1beta/models/gemini-flash-lite-latest:generateContent"

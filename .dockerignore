@@ -1,0 +1,14 @@
+.git
+.github
+node_modules
+frontend/dist
+frontend/.vite
+frontend/node_modules
+backend/.env
+backend/venv
+backend/.venv
+*.pyc
+__pycache__
+*.log
+celerybeat-schedule*
+*.sql

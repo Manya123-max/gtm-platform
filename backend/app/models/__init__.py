@@ -16,4 +16,7 @@ from .models import (
     AgentExecution,
     OutreachDraft,
     UserInput,
+    User,
+    UserIntegration,
+    Notification,
 )

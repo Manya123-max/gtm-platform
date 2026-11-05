@@ -9,12 +9,13 @@ from contextlib import asynccontextmanager
 from typing import Dict, Any, Optional
 from fastapi import FastAPI, Request, HTTPException, Depends, BackgroundTasks
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import JSONResponse
+from fastapi.responses import JSONResponse, RedirectResponse
 from pydantic import BaseModel
 import structlog
  
 from app.core.config import settings
 from app.core.database import init_db, close_db, get_db
+from app.core.security import get_current_user
 from app.api.v1 import router as api_router
  
 logger = structlog.get_logger()
@@ -23,6 +24,11 @@ logger = structlog.get_logger()
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """Startup and shutdown."""
+    prod_errors = settings.validate_production_readiness()
+    if prod_errors and (settings.APP_ENV.lower() in {"prod", "production"} or not settings.DEBUG):
+        for err in prod_errors:
+            logger.error("Production configuration error", error=err)
+        raise RuntimeError(f"Production configuration validation failed: {'; '.join(prod_errors)}")
     await init_db()
     logger.info("GTM Platform started", env=settings.APP_ENV)
     yield
@@ -42,6 +48,14 @@ app = FastAPI(
 @app.get("/")
 async def root():
     return {"message": "GTM Platform API Running"}
+
+@app.get("/docs", include_in_schema=False)
+async def docs_redirect():
+    return RedirectResponse(url="/api/docs")
+
+@app.get("/redoc", include_in_schema=False)
+async def redoc_redirect():
+    return RedirectResponse(url="/api/redoc")
  
 # ── CORS ──────────────────────────────────────────────────────────────────
 app.add_middleware(
@@ -53,44 +67,17 @@ app.add_middleware(
 )
  
 # ── API Routes ────────────────────────────────────────────────────────────
+from app.api.v1.auth import auth_router
 app.include_router(api_router, prefix="/api/v1")
+# Public authentication routes (register/login/refresh/me/logout)
+app.include_router(auth_router, prefix="/api/v1")
+from app.api.v1.integrations import integrations_router, user_settings_router
+app.include_router(integrations_router, prefix="/api/v1")
+app.include_router(user_settings_router, prefix="/api/v1")
+from app.api.v1.admin_users import admin_users_router
+app.include_router(admin_users_router, prefix="/api/v1")
  
  
-# ── Input Schema (new) ───────────────────────────────────────────────────
- 
-class InputData(BaseModel):
-    our_company_name:    str
-    our_services:        str
-    target_location:     str
-    target_industries:   str = ""
-    target_company_size: str
-    target_keywords:     str = ""
-    target_job_titles:   str
-
-
-@app.post("/submit-input")
-async def submit_input(data: InputData):
-    """
-    Accepts structured company/lead input from the frontend and persists it.
-    """
-    from app.core.database import AsyncSessionLocal
-    from app.models.models import UserInput
- 
-    async with AsyncSessionLocal() as db:
-        record = UserInput(
-            our_company_name=    data.our_company_name,
-            our_services=        data.our_services,
-            target_location=     data.target_location,
-            target_industries=   data.target_industries or None,
-            target_company_size= data.target_company_size,
-            target_keywords=     data.target_keywords or None,
-            target_job_titles=   data.target_job_titles,
-        )
-        db.add(record)
-        await db.commit()
-        await db.refresh(record)
- 
-    return {"message": "Input received", "id": record.id}
 
 # ── Webhook Routes ────────────────────────────────────────────────────────
  
@@ -116,26 +103,26 @@ async def inbound_reply_webhook(request: Request, background_tasks: BackgroundTa
  
     payload = json.loads(body)
     event_type = payload.get("event_type", "")
- 
+
     if event_type == "reply_received":
         from app.workers.agent_tasks import handle_inbound_reply
         background_tasks.add_task(
             lambda: handle_inbound_reply.apply_async(args=[payload], queue="webhooks")
         )
- 
+
     elif event_type == "unsubscribed":
         background_tasks.add_task(_handle_unsubscribe, payload.get("email", ""))
- 
+
     return {"status": "received", "event_type": event_type}
- 
- 
+
+
 @app.post("/webhook/fireflies")
 async def fireflies_webhook(request: Request, background_tasks: BackgroundTasks):
     """
     Fireflies transcript webhook. Fires when meeting transcript is ready.
     """
     body = await request.body()
- 
+
     if settings.FIREFLIES_WEBHOOK_SECRET:
         sig = request.headers.get("X-Fireflies-Signature", "")
         expected = hmac.new(
@@ -145,45 +132,83 @@ async def fireflies_webhook(request: Request, background_tasks: BackgroundTasks)
         ).hexdigest()
         if not hmac.compare_digest(sig, expected):
             raise HTTPException(status_code=401, detail="Invalid signature")
- 
+
     payload = json.loads(body)
- 
+
     from app.workers.agent_tasks import handle_fireflies_transcript
     background_tasks.add_task(
         lambda: handle_fireflies_transcript.apply_async(args=[payload], queue="webhooks")
     )
- 
+
     return {"status": "received"}
- 
- 
+
+
+@app.post("/slack/actions")
+@app.post("/slack/events")
+@app.post("/webhook/slack")
 @app.post("/webhook/slack/actions")
+@app.post("/webhook/slack/events")
+@app.post("/api/slack/actions")
+@app.post("/api/v1/slack/actions")
+@app.post("/api/v1/slack/events")
 async def slack_actions(request: Request, background_tasks: BackgroundTasks):
     """
-    Slack interactive actions (button clicks).
-    Handles approve/reject for reply drafts and CRM actions.
+    Slack interactive actions (button clicks) and webhook event subscription endpoint.
+    Handles approve/reject for reply drafts, outreach drafts, and CRM actions.
     """
     body = await request.body()
- 
+    body_str = body.decode()
+
+    # Parse payload (JSON or Form-encoded)
+    payload = {}
+    try:
+        payload = json.loads(body_str)
+    except Exception:
+        from urllib.parse import parse_qs
+        parsed = parse_qs(body_str)
+        if "payload" in parsed:
+            try:
+                payload = json.loads(parsed["payload"][0])
+            except Exception:
+                pass
+
+    if payload.get("type") == "url_verification":
+        return JSONResponse({"challenge": payload.get("challenge")})
+
     # Slack signature verification
     if settings.SLACK_SIGNING_SECRET:
         timestamp = request.headers.get("X-Slack-Request-Timestamp", "")
         slack_sig = request.headers.get("X-Slack-Signature", "")
-        sig_base = f"v0:{timestamp}:{body.decode()}"
-        expected = "v0=" + hmac.new(
-            settings.SLACK_SIGNING_SECRET.encode(),
-            sig_base.encode(),
-            hashlib.sha256,
-        ).hexdigest()
-        if not hmac.compare_digest(slack_sig, expected):
-            raise HTTPException(status_code=401, detail="Invalid Slack signature")
- 
-    # Parse URL-encoded payload
-    from urllib.parse import parse_qs
-    parsed = parse_qs(body.decode())
-    payload = json.loads(parsed.get("payload", ["{}"])[0])
+        if timestamp and slack_sig:
+            import time
+            try:
+                if abs(time.time() - float(timestamp)) > 300:
+                    logger.warning("Slack signature timestamp expired")
+                    return JSONResponse({"error": "Request timestamp expired"}, status_code=400)
+            except ValueError:
+                return JSONResponse({"error": "Invalid timestamp format"}, status_code=400)
+
+            sig_base = f"v0:{timestamp}:{body_str}"
+            expected = "v0=" + hmac.new(
+                settings.SLACK_SIGNING_SECRET.encode(),
+                sig_base.encode(),
+                hashlib.sha256,
+            ).hexdigest()
+            if not hmac.compare_digest(slack_sig, expected):
+                logger.warning("Invalid Slack signature received")
+                return JSONResponse({"error": "Invalid Slack signature"}, status_code=401)
+        else:
+            logger.warning("Missing Slack signature headers when SLACK_SIGNING_SECRET is configured")
+            return JSONResponse({"error": "Missing Slack signature headers"}, status_code=401)
 
     payload_type = payload.get("type")
-    user = payload.get("user", {}).get("email") or payload.get("user", {}).get("username") or payload.get("user", {}).get("id", "unknown")
+    user = (
+        payload.get("user", {}).get("email")
+        or payload.get("user", {}).get("username")
+        or payload.get("user", {}).get("id", "unknown")
+    )
+    response_url = payload.get("response_url")
+
     # Modal submission (rep clicked "Save & Send" in the edit modal)
     if payload_type == "view_submission":
         view = payload.get("view", {})
@@ -196,8 +221,8 @@ async def slack_actions(request: Request, background_tasks: BackgroundTasks):
                     .get("draft_text_input", {})
                     .get("value", "")
             )
-            background_tasks.add_task(_approve_reply, thread_event_id, user, edited_text)
-        return JSONResponse({})  # ack — closes the modal, no further Slack action needed
+            background_tasks.add_task(_approve_reply, thread_event_id, user, edited_text, response_url)
+        return JSONResponse({"response_action": "clear"})  # ack — closes the modal, no further Slack action needed
 
     actions = payload.get("actions", [])
 
@@ -206,9 +231,13 @@ async def slack_actions(request: Request, background_tasks: BackgroundTasks):
         value = action.get("value")
 
         if action_id == "approve_reply":
-            background_tasks.add_task(_approve_reply, value, user)
+            background_tasks.add_task(_approve_reply, value, user, None, response_url)
         elif action_id == "reject_reply":
-            background_tasks.add_task(_reject_reply, value, user)
+            background_tasks.add_task(_reject_reply, value, user, response_url)
+        elif action_id == "approve_draft":
+            background_tasks.add_task(_approve_draft, value, user, response_url)
+        elif action_id == "reject_draft":
+            background_tasks.add_task(_reject_draft, value, user, response_url)
         elif action_id == "edit_reply":
             trigger_id = payload.get("trigger_id", "")
             background_tasks.add_task(_open_edit_modal, trigger_id, value)
@@ -242,13 +271,35 @@ async def _handle_unsubscribe(email: str):
             logger.info("Contact marked DNC", email=email)
  
  
-async def _approve_reply(thread_event_id: str, approved_by: str, custom_content: Optional[str] = None):
+async def _approve_reply(thread_event_id: str, approved_by: str, custom_content: Optional[str] = None, response_url: Optional[str] = None):
     from app.core.database import AsyncSessionLocal
     from app.agents.a4_inbound import InboundAgent
 
+    success = False
     async with AsyncSessionLocal() as db:
         agent = InboundAgent(db)
-        await agent.approve_reply(thread_event_id, approved_by, custom_content)
+        success = await agent.approve_reply(thread_event_id, approved_by, custom_content)
+
+    if response_url:
+        try:
+            import httpx
+            status_text = "✓ *Inbound Reply Approved & Sent via Email!*" if success else "⚠️ *Reply already approved or processed.*"
+            async with httpx.AsyncClient(timeout=5) as client:
+                await client.post(response_url, json={"text": status_text, "response_type": "in_channel"})
+        except Exception as e:
+            logger.error("Failed to notify Slack response_url for approve_reply", error=str(e))
+
+async def _reject_reply(thread_event_id: str, rejected_by: str, response_url: Optional[str] = None):
+    from app.core.database import AsyncSessionLocal
+    from app.models.models import ConversationThread
+    from sqlalchemy import select
+
+    async with AsyncSessionLocal() as db:
+        result = await db.execute(select(ConversationThread).where(ConversationThread.id == thread_event_id))
+        thread = result.scalar_one_or_none()
+        if thread:
+            thread.status = "rejected"
+            await db.commit()
 
 async def _open_edit_modal(trigger_id: str, thread_event_id: str):
     from app.core.database import AsyncSessionLocal
@@ -288,3 +339,47 @@ async def _approve_crm_action(action_id: str, approved_by: str):
             action.approved_by = approved_by
             action.approved_at = datetime.utcnow()
             await db.commit()
+
+
+async def _approve_draft(draft_id: str, approved_by: str, response_url: Optional[str] = None):
+    from app.core.database import AsyncSessionLocal
+    from app.agents.a3_outreach import DraftManager
+
+    success = False
+    async with AsyncSessionLocal() as db:
+        manager = DraftManager(db)
+        success = await manager.approve_draft(draft_id)
+        await db.commit()
+        logger.info("Draft approved via Slack action", draft_id=draft_id, approved_by=approved_by, success=success)
+
+    if response_url:
+        try:
+            import httpx
+            status_text = "✓ *Outreach Draft Approved & Email Sent!*" if success else "⚠️ *Draft already approved or processed.*"
+            async with httpx.AsyncClient(timeout=5) as client:
+                await client.post(response_url, json={"text": status_text, "response_type": "in_channel"})
+        except Exception as e:
+            logger.error("Failed to notify Slack response_url", error=str(e))
+
+
+async def _reject_draft(draft_id: str, approved_by: str, response_url: Optional[str] = None):
+    from app.core.database import AsyncSessionLocal
+    from app.models.models import OutreachDraft
+    from sqlalchemy import select
+
+    async with AsyncSessionLocal() as db:
+        result = await db.execute(select(OutreachDraft).where(OutreachDraft.id == draft_id))
+        draft = result.scalar_one_or_none()
+        if draft:
+            draft.approval_state = "rejected"
+            draft.status = "rejected"
+            await db.commit()
+            logger.info("Draft rejected via Slack action", draft_id=draft_id, approved_by=approved_by)
+
+    if response_url:
+        try:
+            import httpx
+            async with httpx.AsyncClient(timeout=5) as client:
+                await client.post(response_url, json={"text": "✗ *Outreach Draft Rejected*", "response_type": "in_channel"})
+        except Exception as e:
+            logger.error("Failed to notify Slack response_url", error=str(e))

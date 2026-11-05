@@ -67,6 +67,17 @@ class ContentFormat(str, enum.Enum):
 
 
 
+class ContactUserInputAssociation(Base):
+    """
+    Join table for many-to-many relationship between Contact and UserInput (Search History).
+    Allows a contact to belong to multiple search runs/sessions.
+    """
+    __tablename__ = "contact_user_input_association"
+
+    contact_id: Mapped[str] = mapped_column(UUID(as_uuid=False), ForeignKey("contacts.id", ondelete="CASCADE"), primary_key=True)
+    user_input_id: Mapped[int] = mapped_column(Integer, ForeignKey("user_inputs.id", ondelete="CASCADE"), primary_key=True)
+
+
 class Contact(Base):
     """
     Central contact table. All agents read from and write to this.
@@ -74,7 +85,7 @@ class Contact(Base):
     __tablename__ = "contacts"
 
     id: Mapped[str] = mapped_column(UUID(as_uuid=False), primary_key=True, default=generate_uuid)
-    email: Mapped[str] = mapped_column(String(255), unique=True, nullable=False, index=True)
+    email: Mapped[str] = mapped_column(String(255), nullable=False, index=True)
     first_name: Mapped[Optional[str]] = mapped_column(String(100))
     last_name: Mapped[Optional[str]] = mapped_column(String(100))
     title: Mapped[Optional[str]] = mapped_column(String(200))
@@ -91,6 +102,14 @@ class Contact(Base):
     annual_revenue: Mapped[Optional[str]] = mapped_column(String(50))
     employee_count: Mapped[Optional[int]] = mapped_column(Integer)
 
+    # Prospect location intelligence
+    prospect_location: Mapped[Optional[str]] = mapped_column(String(200), nullable=True)
+    work_mode: Mapped[Optional[str]] = mapped_column(String(50), nullable=True, default="Not specified")
+    location_source: Mapped[Optional[str]] = mapped_column(String(100), nullable=True)
+
+    # Prospect selection / qualification summary
+    selection_summary: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+
     # Scoring  A1
     icp_score: Mapped[Optional[float]] = mapped_column(Float, index=True)
     icp_score_breakdown: Mapped[Optional[dict]] = mapped_column(JSONB)
@@ -100,6 +119,7 @@ class Contact(Base):
     signal_type: Mapped[Optional[str]] = mapped_column(String(255))
     signal_score: Mapped[Optional[float]] = mapped_column(Float)
     latest_signal_at: Mapped[Optional[datetime]] = mapped_column(DateTime)
+    signal_summary: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
 
     # Readiness  A4
     readiness_score: Mapped[float] = mapped_column(Float, default=0.0)
@@ -117,9 +137,14 @@ class Contact(Base):
 
     # Source tracking
     source: Mapped[Optional[str]] = mapped_column(String(50))
-    hubspot_id: Mapped[Optional[str]] = mapped_column(String(100))
+    salesforce_contact_id: Mapped[Optional[str]] = mapped_column(String(100), nullable=True)
+    hubspot_id: Mapped[Optional[str]] = mapped_column(String(100), nullable=True)  # Deprecated: Retained for historical record compatibility
     apollo_id: Mapped[Optional[str]] = mapped_column(String(100))
     user_input_id: Mapped[Optional[int]] = mapped_column(Integer, ForeignKey("user_inputs.id"), nullable=True, index=True)
+
+    # Ownership — which platform user this contact belongs to.
+    # Nullable for legacy/pre-migration rows; enforced at the API layer.
+    user_id: Mapped[Optional[str]] = mapped_column(UUID(as_uuid=False), ForeignKey("users.id"), nullable=True, index=True)
 
     # Relationships
     signals: Mapped[List["SignalEvent"]] = relationship("SignalEvent", back_populates="contact")
@@ -130,7 +155,7 @@ class Contact(Base):
 
     __table_args__ = (
         Index("ix_contacts_icp_score_dnc", "icp_score", "do_not_contact"),
-        Index("ix_contacts_user_input_id", "user_input_id"),
+        UniqueConstraint("user_id", "email", name="uq_contacts_user_email"),
     )
 
 
@@ -143,11 +168,13 @@ class SignalEvent(Base):
 
     id: Mapped[str] = mapped_column(UUID(as_uuid=False), primary_key=True, default=generate_uuid)
     contact_id: Mapped[str] = mapped_column(UUID(as_uuid=False), ForeignKey("contacts.id"), nullable=False, index=True)
+    user_id: Mapped[Optional[str]] = mapped_column(UUID(as_uuid=False), ForeignKey("users.id"), nullable=True, index=True)
     signal_type: Mapped[str] = mapped_column(String(50), nullable=False, index=True)
     signal_source: Mapped[str] = mapped_column(String(100))
     confidence: Mapped[float] = mapped_column(Float, default=0.5)
     conversion_weight: Mapped[Optional[float]] = mapped_column(Float)
     raw_data: Mapped[Optional[dict]] = mapped_column(JSONB)
+    summary: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
     processed: Mapped[bool] = mapped_column(Boolean, default=False)
     triggered_outreach: Mapped[bool] = mapped_column(Boolean, default=False)
     sequence_step: Mapped[int] = mapped_column(Integer, default=0)
@@ -192,14 +219,13 @@ class OutreachLog(Base):
     body_preview: Mapped[Optional[str]] = mapped_column(Text)
     prompt_variant_id: Mapped[Optional[str]] = mapped_column(String(50))
     signal_id: Mapped[Optional[str]] = mapped_column(UUID(as_uuid=False), ForeignKey("signal_events.id"))
+    user_id: Mapped[Optional[str]] = mapped_column(UUID(as_uuid=False), ForeignKey("users.id"), nullable=True, index=True)
     sequence_step: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
     call_script: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
     linkedin_note: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
     # Opaque message/lead id returned by the email provider (Resend message id)
     outreach_provider_message_id: Mapped[Optional[str]] = mapped_column(String(100))
-    sequence_step: Mapped[int] = mapped_column(Integer, default=0)
-    call_script: Mapped[Optional[str]] = mapped_column(Text)
-    linkedin_note: Mapped[Optional[str]] = mapped_column(Text)
+
 
     # Engagement tracking
     opened: Mapped[bool] = mapped_column(Boolean, default=False)
@@ -290,11 +316,13 @@ class Deal(Base):
     __tablename__ = "deals"
 
     id: Mapped[str] = mapped_column(UUID(as_uuid=False), primary_key=True, default=generate_uuid)
-    hubspot_deal_id: Mapped[Optional[str]] = mapped_column(String(100), unique=True, index=True)
+    salesforce_opportunity_id: Mapped[Optional[str]] = mapped_column(String(100), unique=True, index=True, nullable=True)
+    hubspot_deal_id: Mapped[Optional[str]] = mapped_column(String(100), unique=True, index=True, nullable=True)  # Deprecated: Retained for historical record compatibility
     contact_id: Mapped[Optional[str]] = mapped_column(UUID(as_uuid=False), ForeignKey("contacts.id"), index=True)
     name: Mapped[str] = mapped_column(String(300))
     stage: Mapped[str] = mapped_column(String(50), default=DealStage.PROSPECTING, index=True)
     amount: Mapped[Optional[float]] = mapped_column(Float)
+    amount_source: Mapped[Optional[str]] = mapped_column(String(100), nullable=True)
     close_date: Mapped[Optional[datetime]] = mapped_column(DateTime)
     owner_email: Mapped[Optional[str]] = mapped_column(String(200))
 
@@ -444,6 +472,10 @@ class RevenueForecast(Base):
     recommended_lever: Mapped[Optional[str]] = mapped_column(Text)
     stage_conversion_rates: Mapped[Optional[dict]] = mapped_column(JSONB)
     stage_velocity_days: Mapped[Optional[dict]] = mapped_column(JSONB)
+
+    # Ownership — user whose pipeline this forecast describes (nullable for legacy rows)
+    user_id: Mapped[Optional[str]] = mapped_column(UUID(as_uuid=False), ForeignKey("users.id"), nullable=True, index=True)
+
     calculated_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow, index=True)
 
 class WorkflowRun(Base):
@@ -461,6 +493,9 @@ class WorkflowRun(Base):
 
     error_message: Mapped[Optional[str]] = mapped_column(Text)
     current_agent: Mapped[Optional[str]] = mapped_column(String(10))
+
+    # Ownership — user who triggered this workflow run (nullable for legacy rows)
+    user_id: Mapped[Optional[str]] = mapped_column(UUID(as_uuid=False), ForeignKey("users.id"), nullable=True, index=True)
 
     created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
 
@@ -510,6 +545,9 @@ class AgentSchedule(Base):
         DateTime,
         default=datetime.utcnow,
         onupdate=datetime.utcnow,
+    )
+
+
 class OutreachDraft(Base):
     """
     Outreach drafts generated by Agent 3 waiting for approval.
@@ -518,6 +556,7 @@ class OutreachDraft(Base):
 
     id: Mapped[str] = mapped_column(UUID(as_uuid=False), primary_key=True, default=generate_uuid)
     contact_id: Mapped[str] = mapped_column(UUID(as_uuid=False), ForeignKey("contacts.id"), nullable=False, index=True)
+    user_id: Mapped[Optional[str]] = mapped_column(UUID(as_uuid=False), ForeignKey("users.id"), nullable=True, index=True)
     signal_id: Mapped[Optional[str]] = mapped_column(UUID(as_uuid=False), ForeignKey("signal_events.id"))
     
     subject: Mapped[str] = mapped_column(String(500), nullable=False)
@@ -559,3 +598,93 @@ class UserInput(Base):
     target_keywords: Mapped[Optional[str]]   = mapped_column(Text, nullable=True)
     target_job_titles: Mapped[str]     = mapped_column(Text, nullable=False)
     created_at: Mapped[datetime]       = mapped_column(DateTime, default=datetime.utcnow)
+
+    # Ownership — the user who submitted this intake form.
+    # Nullable for legacy/pre-migration rows; backfilled via migration owner.
+    user_id: Mapped[Optional[str]] = mapped_column(UUID(as_uuid=False), ForeignKey("users.id"), nullable=True, index=True)
+
+    user: Mapped[Optional["User"]] = relationship("User", back_populates="user_inputs")
+
+
+class User(Base):
+    """
+    Platform user account. Every account is a normal user — there is no
+    admin role or admin panel. All user-owned GTM data links to users.id.
+    """
+    __tablename__ = "users"
+
+    id: Mapped[str] = mapped_column(UUID(as_uuid=False), primary_key=True, default=generate_uuid)
+    name: Mapped[str] = mapped_column(String(200), nullable=False)
+    email: Mapped[str] = mapped_column(String(255), unique=True, nullable=False, index=True)
+    password_hash: Mapped[str] = mapped_column(String(255), nullable=False)
+    is_active: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)
+    role: Mapped[str] = mapped_column(String(50), default="SALES_REPRESENTATIVE", server_default="SALES_REPRESENTATIVE", nullable=False)
+    cal_com_username: Mapped[Optional[str]] = mapped_column(String(100), nullable=True)
+    cal_com_event_slug: Mapped[Optional[str]] = mapped_column(String(100), nullable=True)
+    cal_com_booking_url: Mapped[Optional[str]] = mapped_column(String(255), nullable=True)
+    slack_user_id: Mapped[Optional[str]] = mapped_column(String(50), nullable=True)
+
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime, default=datetime.utcnow, onupdate=datetime.utcnow
+    )
+
+    user_inputs: Mapped[List["UserInput"]] = relationship("UserInput", back_populates="user")
+    integrations: Mapped[List["UserIntegration"]] = relationship("UserIntegration", back_populates="user", cascade="all, delete-orphan")
+
+
+class UserIntegration(Base):
+    """
+    Stores user-specific third-party integrations (e.g. Google Workspace/Gmail OAuth).
+    Tokens are stored in encrypted format.
+    """
+    __tablename__ = "user_integrations"
+
+    id: Mapped[str] = mapped_column(UUID(as_uuid=False), primary_key=True, default=generate_uuid)
+    user_id: Mapped[str] = mapped_column(UUID(as_uuid=False), ForeignKey("users.id", ondelete="CASCADE"), nullable=False, index=True)
+    provider: Mapped[str] = mapped_column(String(50), nullable=False, default="google")  # "google"
+    provider_account_email: Mapped[Optional[str]] = mapped_column(String(255), nullable=True, index=True)
+
+    # Encrypted token storage
+    encrypted_access_token: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    encrypted_refresh_token: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    token_expires_at: Mapped[Optional[datetime]] = mapped_column(DateTime, nullable=True)
+    scopes: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+
+    status: Mapped[str] = mapped_column(String(50), default="connected", nullable=False)  # "connected", "disconnected", "error", "expired"
+    error_message: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime, default=datetime.utcnow, onupdate=datetime.utcnow
+    )
+
+    user: Mapped["User"] = relationship("User", back_populates="integrations")
+
+    __table_args__ = (
+        UniqueConstraint("user_id", "provider", name="uq_user_provider"),
+    )
+
+
+class Notification(Base):
+    """
+    In-app notifications for genuine events: inbound replies and new buying signals.
+    Scoped to user_input_id (search context).
+    """
+    __tablename__ = "notifications"
+
+    id: Mapped[str] = mapped_column(UUID(as_uuid=False), primary_key=True, default=generate_uuid)
+    type: Mapped[str] = mapped_column(String(50), nullable=False, index=True)  # "reply_received" | "new_signal"
+    contact_id: Mapped[str] = mapped_column(UUID(as_uuid=False), ForeignKey("contacts.id", ondelete="CASCADE"), nullable=False, index=True)
+    user_input_id: Mapped[int] = mapped_column(Integer, ForeignKey("user_inputs.id", ondelete="CASCADE"), nullable=False, index=True)
+    user_id: Mapped[Optional[str]] = mapped_column(UUID(as_uuid=False), ForeignKey("users.id", ondelete="CASCADE"), nullable=True, index=True)
+    message: Mapped[str] = mapped_column(Text, nullable=False)
+    action_url: Mapped[Optional[str]] = mapped_column(String(255), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow, index=True)
+    read_at: Mapped[Optional[datetime]] = mapped_column(DateTime, nullable=True, index=True)
+    expires_at: Mapped[Optional[datetime]] = mapped_column(DateTime, nullable=True, index=True)
+    reference_id: Mapped[Optional[str]] = mapped_column(String(150), nullable=True, unique=True, index=True)
+
+    contact: Mapped["Contact"] = relationship("Contact")
+    user_input: Mapped["UserInput"] = relationship("UserInput")
+

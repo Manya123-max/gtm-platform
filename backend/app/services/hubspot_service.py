@@ -1,7 +1,7 @@
 """
-Hubspot Service — re-exported from services package.
-All service implementations live in app/services/__init__.py
+HubSpot Service (Deprecated in favor of Salesforce CRM).
+Maintained for backwards compatibility.
 """
-from app.services import HubSpotService
+from app.services import HubSpotService, SalesforceService
 
-__all__ = ["HubSpotService"]
+__all__ = ["HubSpotService", "SalesforceService"]

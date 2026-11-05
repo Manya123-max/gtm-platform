@@ -13,8 +13,8 @@ from sqlalchemy import select, and_, asc
 
 from app.core.config import settings
 from app.models.models import (
-    Contact, ConversationThread, OutreachLog,
-    FunnelEvent, PendingAction
+    Contact, ConversationThread, User, OutreachLog,
+    FunnelEvent, PendingAction, Notification, ContactUserInputAssociation, UserInput
 )
 from app.services.llm_service import LLMService
 from app.services.slack_service import SlackService
@@ -82,21 +82,41 @@ class InboundAgent:
         self.cal = CalService()
         self.resend = ResendService()
 
-    async def handle_reply(self, webhook_payload: Dict[str, Any]) -> Dict[str, Any]:
+    async def handle_reply(self, webhook_payload: Dict[str, Any], user_id: Optional[str] = None) -> Dict[str, Any]:
         """
-        Entry point. Called by webhook handler when an inbound reply is received.
+        Entry point. Called by webhook handler or IMAP poller when an inbound reply is received.
+        If user_id is provided, strictly associates reply with contacts owned by that sales rep.
         """
         email = webhook_payload.get("from_address", "")
         reply_text = webhook_payload.get("reply_text", "")
         campaign_id = webhook_payload.get("campaign_id", "")
+        subject = webhook_payload.get("subject", "")
+        message_id = webhook_payload.get("message_id") or webhook_payload.get("email_id") or webhook_payload.get("id")
 
-        logger.info("A4: Received inbound reply", email=email, reply_text=reply_text[:100])
+        # Guard: Ignore bot, newsletter, and automated transactional senders
+        BOT_PREFIXES = ("developer@", "updates@", "info@", "support@", "billing@", "notifications@", "mailer-daemon@", "jira@", "no-reply@", "noreply@", "news@", "marketing@", "forward@")
+        clean_email = (email or "").strip().lower()
+        if any(clean_email.startswith(p) for p in BOT_PREFIXES) or clean_email.endswith("@example.com"):
+            logger.info("A4: Ignoring automated/service email sender", email=email)
+            return {"status": "ignored_service_sender", "email": email}
 
-        # Find contact
-        contact = await self._find_contact(email)
+        logger.info("A4: Received inbound reply", email=email, subject=subject, reply_text=reply_text[:100], user_id=user_id)
+
+        # Find contact scoped to user if user_id is specified
+        contact = await self._find_contact(email, subject=subject, user_id=user_id)
         if not contact:
-            logger.warning("A4: Contact not found for reply email", email=email)
+            logger.warning("A4: Contact not found for reply email, safely ignoring", email=email)
             return {"status": "contact_not_found", "email": email}
+
+        # Idempotency check: prevent duplicate processing of the same inbound email
+        if message_id:
+            ref_id = f"reply_{contact.id}_{message_id}"
+            existing_notif = await self.db.scalar(
+                select(Notification.id).where(Notification.reference_id == ref_id)
+            )
+            if existing_notif:
+                logger.info("A4: Duplicate reply detected, skipping processing", ref_id=ref_id, contact_id=contact.id)
+                return {"status": "already_processed", "reference_id": ref_id}
 
         # Load conversation thread
         logger.info("A4: Loading conversation history", contact_id=contact.id)
@@ -113,11 +133,12 @@ class InboundAgent:
             delta = READINESS_DELTAS["reply_unsubscribe"]
             new_score = max(0, (contact.readiness_score or 0) + delta)
             contact.readiness_score = new_score
-            await self.db.commit()
-            await self._record_thread_event(
+            thread_event = await self._record_thread_event(
                 contact.id, reply_text, intent, confidence,
-                delta=delta, score_after=new_score
+                delta=delta, score_after=new_score, subject=subject
             )
+            await self._create_reply_notification(contact, thread_event, webhook_payload)
+            await self.db.commit()
             logger.info("A4: Unsubscribe reply auto-suppressed", contact_id=contact.id, email=email, readiness_score=new_score)
             return {"status": "unsubscribed", "email": email, "readiness_score": new_score}
 
@@ -125,15 +146,24 @@ class InboundAgent:
             delta = READINESS_DELTAS["reply_not_interested"]
             new_score = max(0, (contact.readiness_score or 0) + delta)
             contact.readiness_score = new_score
+            thread_event = await self._record_thread_event(
+                contact.id, reply_text, intent, confidence,
+                delta=delta, score_after=new_score, subject=subject
+            )
+            await self._create_reply_notification(contact, thread_event, webhook_payload)
             await self.db.commit()
-            await self._record_thread_event(contact.id, reply_text, intent, confidence, delta=delta, score_after=new_score)
             logger.info("A4: Not interested reply auto-suppressed", contact_id=contact.id, email=email, readiness_score=new_score)
             return {"status": "not_interested", "readiness_score": new_score}
 
         if intent == "unknown":
             delta = READINESS_DELTAS["reply_unknown"]
             new_score = contact.readiness_score or 0
-            await self._record_thread_event(contact.id, reply_text, intent, confidence, delta=delta, score_after=new_score)
+            thread_event = await self._record_thread_event(
+                contact.id, reply_text, intent, confidence,
+                delta=delta, score_after=new_score, subject=subject
+            )
+            await self._create_reply_notification(contact, thread_event, webhook_payload)
+            await self.db.commit()
             logger.info("A4: Unknown reply intent, logged for manual review", contact_id=contact.id, email=email)
             return {"status": "unknown_intent", "queued_for_review": True}
 
@@ -155,21 +185,39 @@ class InboundAgent:
         logger.info("A4: Generating draft reply via Claude Haiku", contact_id=contact.id, intent=intent)
         draft = await self._generate_draft(contact, reply_text, thread, intent)
 
+        # Check if meeting threshold crossed or positive interest
+        should_request_meeting = (
+            intent in ["meeting_request", "interested", "pricing", "technical_question"]
+            or new_score >= settings.READINESS_SCORE_MEETING_THRESHOLD
+        )
+
+        # Embed Cal.com link directly in the draft body so it is visible in Slack and in the email
+        if should_request_meeting:
+            try:
+                rep_user = await self.db.get(User, contact.user_id) if (contact and contact.user_id) else None
+                booking_link = await self.cal.get_booking_link(
+                    contact_email=contact.email,
+                    contact_name=f"{contact.first_name or ''} {contact.last_name or ''}".strip(),
+                    user=rep_user,
+                )
+                if booking_link and "cal.com" not in draft.lower():
+                    draft = draft.rstrip() + f"\n\nHere's my calendar if you'd like to select a date and time that works best: {booking_link}"
+            except Exception as cal_err:
+                logger.warning("A4: Failed to append Cal.com booking link", error=str(cal_err))
+
         # Record thread event (ConversationThread is the single source of truth)
         logger.info("A4: Storing event in ConversationThread", contact_id=contact.id)
         thread_event = await self._record_thread_event(
             contact.id, reply_text, intent, confidence,
-            delta=delta, score_after=new_score, draft=draft
+            delta=delta, score_after=new_score, draft=draft, subject=subject
         )
+        await self._create_reply_notification(contact, thread_event, webhook_payload)
 
         # Log funnel event
         await self._log_funnel_event("reply_received", contact.id, {
             "intent": intent,
             "readiness_score": new_score,
         })
-
-        # Check if meeting threshold crossed
-        should_request_meeting = new_score >= settings.READINESS_SCORE_MEETING_THRESHOLD
 
         # Notify a human — Slack (interactive) or ntfy (heads-up only)
         logger.info("A4: Sending draft response for manual approval", contact_id=contact.id, thread_event_id=thread_event.id)
@@ -246,24 +294,47 @@ class InboundAgent:
         )
         contact = contact_result.scalar_one_or_none()
 
-        # Get booking link if readiness score is high enough
+        # Get booking link if readiness score is high enough and not already in draft
         booking_link = None
-        if (contact and contact.readiness_score >= settings.READINESS_SCORE_MEETING_THRESHOLD):
+        final_response = thread_event.draft_content or ""
+        if "cal.com" not in final_response.lower() and (contact and contact.readiness_score >= settings.READINESS_SCORE_MEETING_THRESHOLD):
+            rep_user = await self.db.get(User, contact.user_id) if (contact and contact.user_id) else None
             booking_link = await self.cal.get_booking_link(
                 contact_email=contact.email,
                 contact_name=f"{contact.first_name or ''} {contact.last_name or ''}".strip(),
+                user=rep_user,
             )
-
-        # Send the approved reply via Resend
-        if settings.ENABLE_EMAIL_SENDING and contact:
-            final_response = thread_event.draft_content or ""
             if booking_link:
-                final_response += f"\n\nHere's my calendar if you'd like to find a time: {booking_link}"
-            await self._send_reply_via_resend(contact, final_response)
+                final_response += f"\n\nHere's my calendar if you'd like to select a date and time that works best: {booking_link}"
+
+        # Determine subject
+        reply_subject = "Re: Your inquiry"
+        if thread_event.subject:
+            sub = thread_event.subject.strip()
+            reply_subject = sub if sub.lower().startswith("re:") else f"Re: {sub}"
+
+        # Send the approved reply via SMTP/Resend
+        if settings.ENABLE_EMAIL_SENDING and contact:
+            await self._send_reply_via_resend(contact, final_response, subject=reply_subject)
 
         thread_event.approved_by = approved_by
         thread_event.approved_at = datetime.utcnow()
         thread_event.sent_at = datetime.utcnow()
+
+        # Insert outbound reply event into ConversationThread history
+        outbound_reply_event = ConversationThread(
+            contact_id=contact.id if contact else thread_event.contact_id,
+            event_type="reply_sent",
+            direction="outbound",
+            channel="email",
+            content=final_response,
+            readiness_score_after=contact.readiness_score if contact else 100,
+            approved_by=approved_by,
+            approved_at=datetime.utcnow(),
+            sent_at=datetime.utcnow(),
+            occurred_at=datetime.utcnow(),
+        )
+        self.db.add(outbound_reply_event)
         await self.db.commit()
 
         # Update Slack message UI in-place if tracking ID exists
@@ -396,10 +467,29 @@ Intent classes:
             cleaned_result = _clean_json_str(result)
             import json
             parsed = json.loads(cleaned_result)
-            return parsed.get("intent", "unknown"), parsed.get("confidence", 0.5)
+            intent = parsed.get("intent", "unknown")
+            confidence = parsed.get("confidence", 0.5)
+            if intent and intent in REPLY_INTENT_CLASSES and intent != "unknown":
+                return intent, confidence
         except Exception as e:
-            logger.error("Intent classification failed", error=str(e))
-            return "unknown", 0.0
+            logger.error("Intent classification LLM call failed", error=str(e))
+
+        # Robust rule-based fallback heuristic if LLM returns unknown or fails
+        text_lower = reply_text.lower()
+        if any(w in text_lower for w in ["demo", "schedule", "meeting", "call", "book a time", "calendar", "time to talk"]):
+            logger.info("A4: Rule-based fallback classified meeting_request", text_snippet=reply_text[:60])
+            return "meeting_request", 0.9
+        elif any(w in text_lower for w in ["interested", "pricing", "cost", "quote", "rates", "tell me more"]):
+            logger.info("A4: Rule-based fallback classified interested", text_snippet=reply_text[:60])
+            return "interested", 0.85
+        elif any(w in text_lower for w in ["unsubscribe", "opt out", "remove me", "stop email"]):
+            logger.info("A4: Rule-based fallback classified unsubscribe", text_snippet=reply_text[:60])
+            return "unsubscribe", 0.95
+        elif any(w in text_lower for w in ["not interested", "no thanks", "pass"]):
+            logger.info("A4: Rule-based fallback classified not_interested", text_snippet=reply_text[:60])
+            return "not_interested", 0.9
+        
+        return "unknown", 0.0
 
     async def _generate_draft(
         self, contact: Contact, reply_text: str,
@@ -444,16 +534,177 @@ Return only the email body text, no subject line."""
         )
         return list(result.scalars().all())
 
-    async def _find_contact(self, email: str) -> Optional[Contact]:
+    async def _find_contact(self, email: str, subject: Optional[str] = None, user_id: Optional[str] = None) -> Optional[Contact]:
+        import os
+        test_override = (getattr(settings, "TEST_EMAIL_OVERRIDE", "") or os.getenv("TEST_EMAIL_OVERRIDE", "")).strip().lower()
+
+        # When rep user_id is provided, strictly isolate lookup to contacts belonging to this rep
+        if user_id:
+            # 1. Exact match for this rep
+            res = await self.db.execute(
+                select(Contact).where(Contact.email == email, Contact.user_id == user_id)
+            )
+            contact = res.scalar_one_or_none()
+            if contact:
+                return contact
+
+            # 2. Case-insensitive match for this rep
+            res = await self.db.execute(
+                select(Contact).where(Contact.email.ilike(email), Contact.user_id == user_id)
+            )
+            contact = res.scalar_one_or_none()
+            if contact:
+                return contact
+
+            # 3. Test override scoped to this rep
+            if test_override and (email.lower() == test_override or "forcecloudlabs" in email.lower()):
+                res = await self.db.execute(
+                    select(Contact).where(Contact.user_id == user_id).order_by(Contact.updated_at.desc()).limit(1)
+                )
+                contact = res.scalar_one_or_none()
+                if contact:
+                    return contact
+
+            # Unknown sender for this rep's mailbox -> safely reject
+            return None
+
+        # Fallback for global single-mailbox mode (user_id is None):
+        # 1. In TEST MODE, if sender is the configured test override, resolve to the intended prospect
+        if test_override and (email.lower() == test_override or "forcecloudlabs" in email.lower()):
+            # If subject is provided, match by subject against OutreachLog or ConversationThread
+            if subject:
+                clean_sub = subject.strip()
+                for prefix in ["re:", "fwd:", "fw:"]:
+                    if clean_sub.lower().startswith(prefix):
+                        clean_sub = clean_sub[len(prefix):].strip()
+
+                if clean_sub:
+                    # Match by OutreachLog subject
+                    sub_res = await self.db.execute(
+                        select(Contact).join(OutreachLog, Contact.id == OutreachLog.contact_id)
+                        .where(OutreachLog.subject.ilike(f"%{clean_sub}%"))
+                        .order_by(OutreachLog.sent_at.desc())
+                        .limit(1)
+                    )
+                    sub_contact = sub_res.scalar_one_or_none()
+                    if sub_contact:
+                        logger.info("A4: Matched test prospect via email subject in OutreachLog", subject=subject, contact_id=sub_contact.id)
+                        return sub_contact
+
+                    # Match by ConversationThread content or subject
+                    ct_res = await self.db.execute(
+                        select(Contact).join(ConversationThread, Contact.id == ConversationThread.contact_id)
+                        .where(
+                            (ConversationThread.subject.ilike(f"%{clean_sub}%")) |
+                            (ConversationThread.content.ilike(f"%{clean_sub}%"))
+                        )
+                        .order_by(ConversationThread.occurred_at.desc())
+                        .limit(1)
+                    )
+                    ct_contact = ct_res.scalar_one_or_none()
+                    if ct_contact:
+                        logger.info("A4: Matched test prospect via subject in ConversationThread", subject=subject, contact_id=ct_contact.id)
+                        return ct_contact
+
+            # Fallback to latest contacted prospect
+            sub_res = await self.db.execute(
+                select(Contact).join(OutreachLog, Contact.id == OutreachLog.contact_id)
+                .order_by(OutreachLog.sent_at.desc())
+                .limit(1)
+            )
+            latest_contact = sub_res.scalar_one_or_none()
+            if latest_contact:
+                logger.info("A4: Fallback test contact matched latest emailed contact", email=email, contact_id=latest_contact.id)
+                return latest_contact
+
+        # 2. Exact match
         result = await self.db.execute(
             select(Contact).where(Contact.email == email)
         )
-        return result.scalar_one_or_none()
+        contact = result.scalar_one_or_none()
+        if contact:
+            return contact
+
+        # 3. Case insensitive match
+        result = await self.db.execute(
+            select(Contact).where(Contact.email.ilike(email))
+        )
+        contact = result.scalar_one_or_none()
+        if contact:
+            return contact
+
+        # 4. Unknown sender who is not a prospect and not the test override -> ignore
+        logger.info("A4: Inbound email sender is neither a known contact nor TEST_EMAIL_OVERRIDE, ignoring", email=email)
+        return None
+
+    async def _create_reply_notification(
+        self, contact: Contact, thread_event: ConversationThread, webhook_payload: Dict[str, Any]
+    ) -> Optional[Notification]:
+        """
+        Creates exactly ONE reply_received notification when a genuine inbound reply is processed.
+        Scopes user_input_id to the existing ContactUserInputAssociation, with duplicate protection.
+        """
+        try:
+            # 1. Resolve user_input_id from ContactUserInputAssociation
+            assoc_res = await self.db.execute(
+                select(ContactUserInputAssociation.user_input_id)
+                .where(ContactUserInputAssociation.contact_id == contact.id)
+                .order_by(ContactUserInputAssociation.user_input_id.desc())
+                .limit(1)
+            )
+            user_input_id = assoc_res.scalar_one_or_none()
+            if not user_input_id:
+                user_input_id = contact.user_input_id
+            if not user_input_id and contact.user_id:
+                user_input_id = await self.db.scalar(
+                    select(UserInput.id)
+                    .where(UserInput.user_id == contact.user_id)
+                    .order_by(UserInput.id.desc())
+                    .limit(1)
+                )
+
+            if not user_input_id:
+                logger.warning("A4: No user_input_id found to scope reply notification for contact user", contact_id=contact.id)
+                return None
+
+            # 2. Duplicate protection: reference_id
+            message_id = webhook_payload.get("message_id") or webhook_payload.get("email_id") or webhook_payload.get("id")
+            ref_id = f"reply_{contact.id}_{message_id}" if message_id else f"reply_{contact.id}_{thread_event.id}"
+
+            existing = await self.db.execute(
+                select(Notification.id).where(Notification.reference_id == ref_id)
+            )
+            if existing.scalar_one_or_none():
+                logger.info("A4: Reply notification already exists for reference_id", ref_id=ref_id)
+                return None
+
+            first_name = contact.first_name or "Prospect"
+            if contact.company:
+                msg = f"{first_name} at {contact.company} replied"
+            else:
+                msg = f"{first_name} replied"
+
+            notif = Notification(
+                type="reply_received",
+                contact_id=contact.id,
+                user_input_id=user_input_id,
+                message=msg,
+                action_url=f"/contacts/{contact.id}",
+                reference_id=ref_id,
+                expires_at=None,
+            )
+            self.db.add(notif)
+            await self.db.flush()
+            logger.info("A4: Created reply_received notification", notification_id=notif.id, contact_id=contact.id, user_input_id=user_input_id)
+            return notif
+        except Exception as exc:
+            logger.error("A4: Failed to create reply notification", contact_id=contact.id, error=str(exc))
+            return None
 
     async def _record_thread_event(
         self, contact_id: str, content: str, intent: str,
         confidence: float, delta: float, score_after: float = 0,
-        draft: Optional[str] = None
+        draft: Optional[str] = None, subject: Optional[str] = None
     ) -> ConversationThread:
         event = ConversationThread(
             contact_id=contact_id,
@@ -461,6 +712,7 @@ Return only the email body text, no subject line."""
             direction="inbound",
             channel="email",
             content=content,
+            subject=subject,
             intent=intent,
             intent_confidence=confidence,
             readiness_score_delta=delta,
@@ -474,18 +726,78 @@ Return only the email body text, no subject line."""
         await self.db.refresh(event)
         return event
 
-    async def _send_reply_via_resend(self, contact: Contact, body: str):
-        """Send the reply email via Resend (free tier)."""
-        html = "<br>".join(body.splitlines()) or body
-        message_id = await self.resend.send_email(
-            to=contact.email,
-            subject="Re: your message",
-            html=html,
+    async def _send_reply_via_resend(self, contact: Optional[Contact], body: str, subject: str = "Re: Your inquiry"):
+        """Send the reply email via SMTP (primary) or Resend (fallback)."""
+        import re
+        html_body = body
+        # Convert any http/https URL into a clean, clickable anchor tag
+        html_body = re.sub(
+            r'(https?://[^\s<>"]+)',
+            r'<a href="\1" style="color: #2563eb; font-weight: 500; text-decoration: underline;">\1</a>',
+            html_body
         )
-        if message_id:
-            logger.info("Resend reply sent", email=contact.email, message_id=message_id)
-        else:
-            logger.error("Resend reply send failed", email=contact.email)
+        formatted_html = f"<div style='font-family: -apple-system, BlinkMacSystemFont, Segoe UI, Roboto, Helvetica, Arial, sans-serif; font-size: 15px; line-height: 1.6; color: #1e293b;'>{'<br/>'.join(html_body.splitlines())}</div>"
+        
+        target_to = getattr(settings, "TEST_EMAIL_OVERRIDE", "") or (contact.email if contact else "")
+
+        # Priority 1: Rep's authorized Microsoft 365 mailbox via Microsoft Graph
+        if contact and contact.user_id:
+            rep_user = await self.db.get(User, contact.user_id)
+            if rep_user:
+                ms_int_res = await self.db.execute(
+                    select(UserIntegration).where(
+                        UserIntegration.user_id == rep_user.id,
+                        UserIntegration.provider == "microsoft",
+                        UserIntegration.status == "connected",
+                    )
+                )
+                ms_int = ms_int_res.scalar_one_or_none()
+                if ms_int:
+                    from app.services.microsoft_graph_service import MicrosoftGraphService
+                    ms_svc = MicrosoftGraphService()
+                    token = await ms_svc.get_valid_access_token(ms_int, self.db)
+                    if token:
+                        sender_email = ms_int.provider_account_email or rep_user.email
+                        try:
+                            msg_id = await ms_svc.send_mail(
+                                access_token=token,
+                                to_email=target_to,
+                                subject=subject,
+                                html_body=formatted_html,
+                                from_email=sender_email,
+                            )
+                            if msg_id:
+                                logger.info("A4: Reply email dispatched via Microsoft Graph", rep_email=sender_email, to=target_to)
+                                return msg_id
+                        except Exception as ms_err:
+                            logger.error("A4: Failed to send reply via Microsoft Graph", error=str(ms_err))
+
+        # 1. Try SMTP if configured
+        if getattr(settings, "SMTP_USER", "") and getattr(settings, "SMTP_PASSWORD", ""):
+            from app.services import SMTPService
+            smtp_svc = SMTPService()
+            provider_id = await smtp_svc.send_email(
+                to=target_to,
+                subject=subject,
+                html=formatted_html,
+            )
+            if provider_id:
+                logger.info("A4: Reply email successfully dispatched via SMTP", target=target_to, original_contact=contact.email if contact else "", subject=subject, provider_id=provider_id)
+                return provider_id
+
+        # 2. Try Resend if configured
+        if settings.RESEND_API_KEY:
+            message_id = await self.resend.send_email(
+                to=target_to,
+                subject=subject,
+                html=formatted_html,
+            )
+            if message_id:
+                logger.info("A4: Reply email successfully dispatched via Resend", target=target_to, original_contact=contact.email if contact else "", subject=subject, message_id=message_id)
+                return message_id
+
+        logger.error("A4: Email dispatch failed — neither SMTP nor Resend succeeded", target=target_to)
+        return None
 
     async def _log_funnel_event(self, event_type: str, contact_id: str, metadata: Dict):
         event = FunnelEvent(

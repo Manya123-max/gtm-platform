@@ -9,7 +9,6 @@ from __future__ import annotations
 
 from typing import Dict, Any, List, Optional
 import httpx
-import requests
 import structlog
 from app.core.config import settings
 
@@ -339,7 +338,7 @@ class SalesforceSyncService:
                 "client_secret": self.client_secret,
             }
             try:
-                resp = requests.post(token_url, data=data, timeout=15)
+                resp = httpx.post(token_url, data=data, timeout=15)
                 if resp.status_code == 200:
                     res_data = resp.json()
                     access_token = res_data.get("access_token")
@@ -379,7 +378,7 @@ class SalesforceSyncService:
                 "client_secret": self.client_secret,
                 "refresh_token": self.refresh_token,
             }
-            resp = requests.post(token_url, data=data, timeout=15)
+            resp = httpx.post(token_url, data=data, timeout=15)
             if resp.status_code == 200:
                 res_data = resp.json()
                 access_token = res_data.get("access_token")

@@ -187,3 +187,10 @@ export const createAdminUser = (data) => unwrap(api.post('/admin/users', data))
 export const toggleAdminUserStatus = (userId, isActive) => unwrap(api.put(`/admin/users/${userId}/status`, { is_active: isActive }))
 export const updateAdminUserRole = (userId, role) => unwrap(api.put(`/admin/users/${userId}/role`, { role }))
 export const updateAdminUserCalMapping = (userId, data) => unwrap(api.put(`/admin/users/${userId}/cal-mapping`, data))
+
+// Calendar Booking API
+export const fetchBookingInfo = (identifier) => unwrap(api.get(`/booking/${identifier}/info`))
+export const fetchBookingSlots = (identifier, date, duration = 30, timezone = 'UTC') =>
+  unwrap(api.get(`/booking/${identifier}/slots`, { params: { date, duration, timezone } }))
+export const scheduleBooking = (identifier, data) => unwrap(api.post(`/booking/${identifier}/schedule`, data))
+export const fetchMyMeetings = () => unwrap(api.get('/booking/user/my-meetings'))

@@ -76,6 +76,8 @@ app.include_router(integrations_router, prefix="/api/v1")
 app.include_router(user_settings_router, prefix="/api/v1")
 from app.api.v1.admin_users import admin_users_router
 app.include_router(admin_users_router, prefix="/api/v1")
+from app.api.v1.booking import booking_router
+app.include_router(booking_router, prefix="/api/v1")
  
  
 

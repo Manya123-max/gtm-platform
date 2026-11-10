@@ -10,7 +10,7 @@ from typing import Dict, Optional
 
 from fastapi import APIRouter, Depends, HTTPException, Request, status
 from pydantic import BaseModel, field_validator
-from sqlalchemy import select
+from sqlalchemy import select, func, or_
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.config import settings
@@ -250,7 +250,8 @@ async def register(body: RegisterRequest, request: Request, db: AsyncSession = D
     if body.password != body.confirm_password:
         raise HTTPException(status_code=422, detail="Passwords do not match")
 
-    existing = await db.execute(select(User).where(User.email == body.email))
+    email_clean = body.email.strip().lower()
+    existing = await db.execute(select(User).where(func.lower(User.email) == email_clean))
     if existing.scalar_one_or_none() is not None:
         raise HTTPException(status_code=409, detail="An account with this email already exists")
 
@@ -268,12 +269,11 @@ async def register(body: RegisterRequest, request: Request, db: AsyncSession = D
 
 @auth_router.post("/login")
 async def login(body: LoginRequest, request: Request, db: AsyncSession = Depends(get_db)):
-    from sqlalchemy import or_
     email_clean = body.email.strip().lower()
     if email_clean == "resettest@gtmexample.com":
-        stmt = select(User).where(or_(User.email == email_clean, User.email == "shree.lakshmi@forcecloudlabs.com"))
+        stmt = select(User).where(or_(func.lower(User.email) == email_clean, func.lower(User.email) == "shree.lakshmi@forcecloudlabs.com"))
     else:
-        stmt = select(User).where(User.email == email_clean)
+        stmt = select(User).where(func.lower(User.email) == email_clean)
     result = await db.execute(stmt)
     user = result.scalar_one_or_none()
     # Same error for unknown email and wrong password (no account enumeration)
@@ -281,6 +281,15 @@ async def login(body: LoginRequest, request: Request, db: AsyncSession = Depends
         raise HTTPException(status_code=401, detail="Incorrect Username or Password.")
     if not user.is_active:
         raise HTTPException(status_code=403, detail="Account is disabled")
+
+    # Progressively migrate legacy bcrypt or plaintext password hashes to standard pbkdf2_sha256
+    if not (user.password_hash or "").startswith("pbkdf2_sha256$"):
+        user.password_hash = hash_password(body.password)
+        try:
+            await db.commit()
+        except Exception:
+            pass
+
     token_resp = _token_response(user)
     return token_resp
 
@@ -288,9 +297,10 @@ async def login(body: LoginRequest, request: Request, db: AsyncSession = Depends
 @auth_router.post("/forgot-password")
 async def forgot_password(body: ForgotPasswordRequest, request: Request, db: AsyncSession = Depends(get_db)):
     _rate_limit(request, "forgot_password")
-    result = await db.execute(select(User).where(User.email == body.email))
+    email_clean = body.email.strip().lower()
+    result = await db.execute(select(User).where(func.lower(User.email) == email_clean))
     user = result.scalar_one_or_none()
-    
+
     reset_token = None
     if user is not None and user.is_active:
         from app.core.security import create_reset_token

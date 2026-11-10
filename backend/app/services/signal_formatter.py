@@ -12,6 +12,7 @@ Provides robust utilities to:
 """
 from typing import Any, Dict, List, Optional
 import html
+from datetime import datetime, timezone
 import json
 import ast
 import re
@@ -354,5 +355,42 @@ def enrich_signal_metadata(
                 raw["company_context"] = f"Technology stack update: {tech_str} was newly detected on {comp}'s website compared to previous baseline scan."
             else:
                 raw["company_context"] = f"Direct website inspection observed active {tech_str} usage on {comp}'s domain. This reflects verified active usage, not a newly confirmed adoption event."
+
+    # Date fields and freshness classification
+    event_date_str = raw.get("event_date") or raw.get("funding_date") or raw.get("announced_on") or raw.get("appointment_date")
+    published_at_str = raw.get("published_at") or raw.get("created")
+    if event_date_str and not raw.get("event_date"):
+        raw["event_date"] = event_date_str
+    if published_at_str and not raw.get("published_at"):
+        raw["published_at"] = published_at_str
+
+    target_date_str = raw.get("event_date") or raw.get("published_at")
+    if target_date_str:
+        try:
+            cleaned_d = str(target_date_str).strip().replace("Z", "+00:00")
+            dt = datetime.fromisoformat(cleaned_d)
+            if dt.tzinfo is not None:
+                dt = dt.astimezone(timezone.utc).replace(tzinfo=None)
+            diff_days = (datetime.utcnow() - dt).days
+            if diff_days <= 30:
+                raw["freshness_label"] = "Recent (<30d)"
+                raw["is_stale"] = False
+                raw["is_recent"] = True
+            elif diff_days <= 90:
+                raw["freshness_label"] = f"{diff_days}d ago"
+                raw["is_stale"] = False
+                raw["is_recent"] = False
+            else:
+                raw["freshness_label"] = f"Historical ({diff_days}d ago)"
+                raw["is_stale"] = True
+                raw["is_recent"] = False
+        except Exception:
+            raw["freshness_label"] = "Date unknown"
+            raw["is_stale"] = False
+            raw["is_recent"] = False
+    else:
+        raw["freshness_label"] = "Date unknown"
+        raw["is_stale"] = False
+        raw["is_recent"] = False
 
     return raw

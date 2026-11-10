@@ -355,6 +355,9 @@ class SignalAgent:
             if not jobs:
                 return []
 
+            # Prioritize newest job requisitions first
+            jobs.sort(key=lambda j: self._parse_iso(j.get("created")), reverse=True)
+
             titles = [job.get("title", "").lower() for job in jobs]
             descriptions = [(job.get("description") or "")[:200].lower() for job in jobs]
             job_text = " ".join(titles + descriptions)
@@ -380,6 +383,8 @@ class SignalAgent:
             if any(term in job_text for term in ["sdr", "bdr", "sales development", "business development rep", "hiring", "recruiting", "sales", "careers", "we are hiring", "open position"]):
                 job_url = resolve_signal_article_url(first_job.get("redirect_url") or first_job.get("url"))
                 clean_job_desc = clean_html_text(first_job.get("description"))
+                now_utc = datetime.utcnow()
+                is_stale = (now_utc - occurred_at).days > 90 if occurred_at else False
                 job_data = {
                     "job_count": len(jobs),
                     "roles": titles,
@@ -387,7 +392,10 @@ class SignalAgent:
                     "url": job_url,
                     "headline": clean_html_text(first_job.get("title")),
                     "description": clean_job_desc,
+                    "event_date": occurred_at.isoformat() if occurred_at else None,
                     "published_at": occurred_at.isoformat() if occurred_at else None,
+                    "discovered_at": now_utc.isoformat(),
+                    "is_stale": is_stale,
                 }
                 if max_salary is not None:
                     job_data["max_salary"] = max_salary
@@ -500,9 +508,11 @@ class SignalAgent:
                                             or e.get("attributes", {}).get("first_seen_at")) >= cutoff
                     ]
                     if recent:
+                        recent.sort(key=lambda e: self._parse_iso(e.get("attributes", {}).get("announced_on") or e.get("attributes", {}).get("first_seen_at")), reverse=True)
                         latest = recent[0].get("attributes", {})
                         fin_dt = self._parse_iso(latest.get("announced_on") or latest.get("first_seen_at"))
                         fin_occurred = fin_dt if fin_dt != datetime.min else datetime.utcnow()
+                        now_utc = datetime.utcnow()
                         signals.append({
                             "contact_id": contact.id,
                             "signal_type": SignalType.FUNDING_ROUND,
@@ -516,7 +526,10 @@ class SignalAgent:
                                 "headline": latest.get("title") or latest.get("headline") or f"Funding round announced: {latest.get('round_type') or 'investment'}",
                                 "description": latest.get("description") or latest.get("summary"),
                                 "url": latest.get("source_url") or latest.get("url"),
+                                "event_date": fin_occurred.isoformat(),
                                 "published_at": fin_occurred.isoformat(),
+                                "discovered_at": now_utc.isoformat(),
+                                "is_stale": (now_utc - fin_occurred).days > 90,
                             },
                         })
                 elif fin_resp.status_code not in (404,):
@@ -536,9 +549,11 @@ class SignalAgent:
                         and (e.get("attributes", {}).get("category") in self._PREDICTLEADS_EXPANSION_CATEGORIES)
                     ]
                     if recent:
+                        recent.sort(key=lambda e: self._parse_iso(e.get("attributes", {}).get("published_at") or e.get("attributes", {}).get("first_seen_at")), reverse=True)
                         latest = recent[0].get("attributes", {})
                         news_dt = self._parse_iso(latest.get("published_at") or latest.get("first_seen_at"))
                         news_occurred = news_dt if news_dt != datetime.min else datetime.utcnow()
+                        now_utc = datetime.utcnow()
                         signals.append({
                             "contact_id": contact.id,
                             "signal_type": SignalType.NEWS_EXPANSION,
@@ -551,7 +566,10 @@ class SignalAgent:
                                 "headline": latest.get("title") or latest.get("headline"),
                                 "description": latest.get("description") or latest.get("summary"),
                                 "url": latest.get("source_url") or latest.get("url"),
+                                "event_date": news_occurred.isoformat(),
                                 "published_at": news_occurred.isoformat(),
+                                "discovered_at": now_utc.isoformat(),
+                                "is_stale": (now_utc - news_occurred).days > 90,
                             },
                         })
                 elif news_resp.status_code not in (404,):
@@ -1140,10 +1158,9 @@ class SignalAgent:
             if not items:
                 return []
 
-            signals: List[Dict[str, Any]] = []
-            detected_types = set()
-
-            for item in items[:15]:
+            # Parse and sort all matching items with newest publication date first
+            parsed_items = []
+            for item in items:
                 title_elem = item.find("title")
                 title = title_elem.text if title_elem is not None and title_elem.text else ""
 
@@ -1168,6 +1185,25 @@ class SignalAgent:
                     except Exception:
                         occurred_at = None
 
+                parsed_items.append({
+                    "title": title,
+                    "raw_description": raw_description,
+                    "article_url": article_url,
+                    "occurred_at": occurred_at,
+                })
+
+            # Sort items with newest event/publication date first
+            parsed_items.sort(key=lambda x: x["occurred_at"] or datetime.min, reverse=True)
+
+            signals: List[Dict[str, Any]] = []
+            detected_types = set()
+
+            for p_item in parsed_items[:20]:
+                title = p_item["title"]
+                raw_description = p_item["raw_description"]
+                article_url = p_item["article_url"]
+                occurred_at = p_item["occurred_at"]
+
                 clean_head = clean_html_text(title)
                 clean_desc = clean_html_text(raw_description)
                 article_text = f"{clean_head} {clean_desc}".lower()
@@ -1182,6 +1218,8 @@ class SignalAgent:
                         company=company,
                         raw_description=clean_desc,
                     )
+                    now_utc = datetime.utcnow()
+                    is_stale = (now_utc - item_occurred_at).days > 90 if item_occurred_at else False
                     return {
                         "contact_id": contact.id,
                         "signal_type": sig_type,
@@ -1195,7 +1233,10 @@ class SignalAgent:
                             "url": resolved_url,
                             "google_news_url": article_url,
                             "source": "Google News",
+                            "event_date": item_occurred_at.isoformat() if item_occurred_at else None,
                             "published_at": item_occurred_at.isoformat() if item_occurred_at else None,
+                            "discovered_at": now_utc.isoformat(),
+                            "is_stale": is_stale,
                         },
                     }
 

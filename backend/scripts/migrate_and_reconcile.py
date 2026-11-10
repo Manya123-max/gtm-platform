@@ -60,6 +60,10 @@ REQUIRED_BASELINE_COLUMNS: Dict[str, Set[str]] = {
     },
     "users": {
         "cal_com_event_slug",
+        "cal_com_username",
+        "cal_com_booking_url",
+        "slack_user_id",
+        "role",
     },
     "signal_events": {
         "signal_type",
@@ -75,6 +79,40 @@ REQUIRED_HEAD_COLUMNS: Set[str] = {
     "signals",
     "funding_stages",
 }
+
+
+def ensure_schema_columns(conn) -> None:
+    """
+    Safely and idempotently reconciles missing columns across tables
+    to guarantee schema parity before baseline inspection.
+    """
+    statements = [
+        "ALTER TABLE users ADD COLUMN IF NOT EXISTS role VARCHAR(50) DEFAULT 'SALES_REPRESENTATIVE'",
+        "ALTER TABLE users ALTER COLUMN role SET DEFAULT 'SALES_REPRESENTATIVE'",
+        "ALTER TABLE users ADD COLUMN IF NOT EXISTS cal_com_username VARCHAR(100)",
+        "ALTER TABLE users ADD COLUMN IF NOT EXISTS cal_com_event_slug VARCHAR(100)",
+        "ALTER TABLE users ADD COLUMN IF NOT EXISTS cal_com_booking_url VARCHAR(255)",
+        "ALTER TABLE users ADD COLUMN IF NOT EXISTS slack_user_id VARCHAR(50)",
+        "ALTER TABLE user_inputs ADD COLUMN IF NOT EXISTS user_id UUID REFERENCES users(id)",
+        "ALTER TABLE user_inputs ADD COLUMN IF NOT EXISTS company_lookalike TEXT",
+        "ALTER TABLE user_inputs ADD COLUMN IF NOT EXISTS signals TEXT",
+        "ALTER TABLE user_inputs ADD COLUMN IF NOT EXISTS funding_stages TEXT",
+        "ALTER TABLE contacts ADD COLUMN IF NOT EXISTS user_id UUID REFERENCES users(id)",
+        "ALTER TABLE contacts ADD COLUMN IF NOT EXISTS prospect_location VARCHAR(200)",
+        "ALTER TABLE contacts ADD COLUMN IF NOT EXISTS work_mode VARCHAR(50) DEFAULT 'Not specified'",
+        "ALTER TABLE contacts ADD COLUMN IF NOT EXISTS location_source VARCHAR(100)",
+        "ALTER TABLE contacts ADD COLUMN IF NOT EXISTS selection_summary TEXT",
+        "ALTER TABLE contacts ADD COLUMN IF NOT EXISTS tier VARCHAR(20)",
+        "ALTER TABLE contacts ADD COLUMN IF NOT EXISTS priority_rank INTEGER",
+        "ALTER TABLE contacts ADD COLUMN IF NOT EXISTS salesforce_contact_id VARCHAR(100)",
+    ]
+    for stmt in statements:
+        try:
+            conn.execute(text(stmt))
+            conn.commit()
+        except Exception:
+            # Table might not exist yet if fresh DB
+            pass
 
 
 def get_sync_db_url() -> str:
@@ -122,6 +160,7 @@ def reconcile_and_migrate():
     alembic_cfg.set_main_option("sqlalchemy.url", db_url)
 
     with engine.connect() as conn:
+        ensure_schema_columns(conn)
         insp = inspect(conn)
         tables = set(insp.get_table_names())
         print(f"[MIGRATION] Detected {len(tables)} tables in database.")

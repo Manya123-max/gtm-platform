@@ -33,18 +33,36 @@ def hash_password(password: str) -> str:
 
 
 def verify_password(password: str, stored: str) -> bool:
+    if not stored:
+        return False
+    # 1. PBKDF2-SHA256 (standard)
     try:
-        scheme, iterations, salt_hex, digest_hex = stored.split("$")
-        if scheme != "pbkdf2_sha256":
-            return False
-        digest = hashlib.pbkdf2_hmac(
-            "sha256",
-            password.encode("utf-8"),
-            bytes.fromhex(salt_hex),
-            int(iterations),
-        )
-        return hmac.compare_digest(digest.hex(), digest_hex)
-    except (ValueError, TypeError):
+        if stored.startswith("pbkdf2_sha256$"):
+            parts = stored.split("$")
+            if len(parts) == 4:
+                scheme, iterations, salt_hex, digest_hex = parts
+                digest = hashlib.pbkdf2_hmac(
+                    "sha256",
+                    password.encode("utf-8"),
+                    bytes.fromhex(salt_hex),
+                    int(iterations),
+                )
+                return hmac.compare_digest(digest.hex(), digest_hex)
+    except Exception:
+        pass
+
+    # 2. Bcrypt fallback ($2a$, $2b$, $2y$)
+    if stored.startswith(("$2a$", "$2b$", "$2y$")):
+        try:
+            import bcrypt
+            return bcrypt.checkpw(password.encode("utf-8"), stored.encode("utf-8"))
+        except Exception:
+            pass
+
+    # 3. Plaintext fallback (legacy development seed accounts)
+    try:
+        return hmac.compare_digest(password, stored)
+    except Exception:
         return False
 
 

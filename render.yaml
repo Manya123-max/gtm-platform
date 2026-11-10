@@ -19,9 +19,9 @@ services:
       - key: AUTH_ENABLED
         value: "true"
       - key: FRONTEND_URL
-        value: https://dashing-sorbet-fd7cd5.netlify.app
+        value: https://gtqm.netlify.app
       - key: CORS_ORIGINS
-        value: "http://localhost:3000,http://localhost:5173,https://dashing-sorbet-fd7cd5.netlify.app"
+        value: "http://localhost:3000,http://localhost:5173,https://gtqm.netlify.app,https://dashing-sorbet-fd7cd5.netlify.app"
       - key: CELERY_CONCURRENCY
         value: "1"
       - key: DATABASE_URL

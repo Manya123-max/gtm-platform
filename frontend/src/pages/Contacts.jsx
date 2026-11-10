@@ -4,6 +4,7 @@ import { useNavigate } from 'react-router-dom'
 import { Search, ChevronDown, ChevronLeft, ChevronRight, Play, Filter, ExternalLink } from 'lucide-react'
 import { fetchContacts, fetchTierSummary, runOrchestratorWorkflow, DEFAULT_PIPELINE_AGENTS } from '../api'
 import { useSession } from '../context/SessionContext'
+import { formatISTDate } from '../utils/timezone'
 
 function formatSignalRecency(dateStr) {
   if (!dateStr) return null
@@ -21,7 +22,7 @@ function formatSignalRecency(dateStr) {
     const diffDays = Math.floor(diffHours / 24)
     if (diffDays === 1) return '1d ago'
     if (diffDays < 30) return `${diffDays}d ago`
-    return d.toLocaleDateString('en-GB', { day: 'numeric', month: 'short' })
+    return formatISTDate(d)
   } catch {
     return null
   }

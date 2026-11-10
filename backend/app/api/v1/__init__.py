@@ -327,6 +327,7 @@ async def get_session_details(session_id: int, current_user=Depends(get_current_
 @router.get("/dashboard/overview")
 async def get_dashboard_overview(
     user_input_id: Optional[int] = None,
+    contact_id: Optional[UUID] = None,
     current_user=Depends(get_current_user),
     db: AsyncSession = Depends(get_db)
 ):
@@ -439,6 +440,7 @@ async def get_dashboard_overview(
 @router.get("/contacts/tier-summary", response_model=TierSummaryOut)
 async def get_tier_summary(
     user_input_id: Optional[int] = None,
+    contact_id: Optional[UUID] = None,
     current_user=Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
 ):
@@ -475,6 +477,7 @@ async def list_contacts(
     sort_order: str = "desc",
     tier: Optional[str] = None,
     user_input_id: Optional[int] = None,
+    contact_id: Optional[UUID] = None,
     current_user=Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
 ):
@@ -776,6 +779,22 @@ async def get_contact_signals(contact_id: UUID, current_user=Depends(get_current
             summary=s.summary
         )
         signals.append(s)
+
+    def _sig_sort_key(sig):
+        rd = sig.raw_data or {}
+        d_str = rd.get("event_date") or rd.get("published_at")
+        if d_str:
+            try:
+                from datetime import datetime, timezone
+                dt = datetime.fromisoformat(str(d_str).strip().replace("Z", "+00:00"))
+                if dt.tzinfo is not None:
+                    dt = dt.astimezone(timezone.utc).replace(tzinfo=None)
+                return dt
+            except Exception:
+                pass
+        return sig.detected_at or datetime.min
+
+    signals.sort(key=_sig_sort_key, reverse=True)
     return signals
 
 
@@ -882,6 +901,7 @@ async def list_deals(
 @router.get("/deals/pipeline-summary")
 async def get_pipeline_summary(
     user_input_id: Optional[int] = None,
+    contact_id: Optional[UUID] = None,
     current_user=Depends(get_current_user),
     db: AsyncSession = Depends(get_db)
 ):
@@ -1096,6 +1116,7 @@ async def dismiss_action(action_id: str, current_user=Depends(get_current_user),
 @router.get("/revenue/forecast", response_model=Optional[ForecastOut])
 async def get_latest_forecast(
     user_input_id: Optional[int] = None,
+    contact_id: Optional[UUID] = None,
     current_user=Depends(get_current_user),
     db: AsyncSession = Depends(get_db)
 ):
@@ -1178,6 +1199,7 @@ async def get_funnel_metrics(
 async def list_content(
     format: Optional[str] = None, icp_segment: Optional[str] = None,
     user_input_id: Optional[int] = None,
+    contact_id: Optional[UUID] = None,
     limit: int = 20,
     current_user=Depends(get_current_user),
     db: AsyncSession = Depends(get_db)):
@@ -1500,6 +1522,7 @@ async def get_signal_registry(db: AsyncSession = Depends(get_db)):
 @router.get("/outreach/drafts")
 async def get_outreach_drafts(
     user_input_id: Optional[int] = None,
+    contact_id: Optional[UUID] = None,
     current_user=Depends(get_current_user),
     db: AsyncSession = Depends(get_db)
 ):
@@ -1883,15 +1906,28 @@ async def _get_owned_draft(db: AsyncSession, user, draft_id: str) -> OutreachDra
             raise HTTPException(status_code=404, detail="Draft not found")
     return draft
 
+@router.get("/contacts/{contact_id}/drafts")
+async def get_contact_drafts(
+    contact_id: UUID,
+    current_user=Depends(get_current_user),
+    db: AsyncSession = Depends(get_db)
+):
+    return await get_drafts(contact_id=contact_id, current_user=current_user, db=db)
+
+
 @router.get("/drafts")
 async def get_drafts(
     user_input_id: Optional[int] = None,
+    contact_id: Optional[UUID] = None,
     current_user=Depends(get_current_user),
     db: AsyncSession = Depends(get_db)
 ):
     q = select(OutreachDraft)
+    if contact_id is not None:
+        q = q.where(OutreachDraft.contact_id == contact_id)
     if current_user is not None:
-        await _ensure_owned_input(db, current_user, user_input_id)
+        if user_input_id is not None:
+            await _ensure_owned_input(db, current_user, user_input_id)
         own = select(Contact.id).where(Contact.user_id == current_user.id)
         if user_input_id is not None:
             assoc_ids_q = select(ContactUserInputAssociation.contact_id).where(ContactUserInputAssociation.user_input_id == user_input_id)
@@ -1913,14 +1949,39 @@ async def get_drafts(
         signal_res = await db.execute(select(SignalEvent).where(SignalEvent.id == d.signal_id))
         signal = signal_res.scalar_one_or_none()
         
+        is_dict = isinstance(d.matched_services, dict)
+        p_reason = d.business_case
+        if is_dict and "personalisation_reasoning" in d.matched_services:
+            p_reason = d.matched_services["personalisation_reasoning"]
+
+        ref_ids = [d.signal_id] if d.signal_id else []
+        if is_dict and "referenced_signal_ids" in d.matched_services:
+            ref_ids = d.matched_services["referenced_signal_ids"]
+
+        pri_signal = (d.matched_services.get("selected_primary_signal") if is_dict else None) or (signal.signal_type if signal else None)
+        sig_cat = (d.matched_services.get("signal_category") if is_dict else None) or (signal.signal_type if signal else "general_icp")
+        sig_sum = (d.matched_services.get("signal_summary_used") if is_dict else None) or (signal.summary if signal else ((signal.raw_data or {}).get("description") if signal else None))
+
+        services_list = d.matched_services.get("services", []) if is_dict else (d.matched_services if isinstance(d.matched_services, list) else [])
+
         serialized.append({
             "id": d.id,
             "contact_id": d.contact_id,
+            "prospect_id": d.contact_id,
+            "company_id": (contact.company_domain or contact.company) if contact else None,
+            "user_id": d.user_id,
             "signal_id": d.signal_id,
+            "referenced_signal_ids": ref_ids,
+            "selected_primary_signal": pri_signal,
+            "signal_category": sig_cat,
+            "signal_summary_used": sig_sum,
+            "generation_timestamp": d.created_at.isoformat() if d.created_at else None,
+            "personalisation_reasoning": p_reason,
+            "draft_status": d.status,
             "subject": d.subject,
             "body": d.body,
             "business_case": d.business_case,
-            "matched_services": d.matched_services,
+            "matched_services": services_list,
             "channel": d.channel,
             "status": d.status,
             "approval_state": d.approval_state,
@@ -1936,6 +1997,7 @@ async def get_drafts(
             "signal": {
                 "signal_type": signal.signal_type if signal else "",
                 "confidence": signal.confidence if signal else 0.0,
+                "summary": signal.summary if signal else "",
                 "raw_data": signal.raw_data if signal else {}
             } if signal else None
         })
@@ -2195,6 +2257,7 @@ async def poll_gmail_inbox_endpoint():
 @router.get("/notifications", response_model=NotificationsResponse)
 async def list_notifications(
     user_input_id: Optional[int] = None,
+    contact_id: Optional[UUID] = None,
     unread_only: bool = False,
     search: Optional[str] = None,
     category: Optional[str] = None,

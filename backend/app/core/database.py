@@ -48,9 +48,15 @@ async def get_db() -> AsyncSession:
 
 async def init_db():
     async with engine.begin() as conn:
-        # Enable pgvector extension
-        await conn.execute(text("CREATE EXTENSION IF NOT EXISTS vector"))
-        await conn.execute(text("CREATE EXTENSION IF NOT EXISTS pg_trgm"))
+        # Enable pgvector and pg_trgm extensions if supported
+        try:
+            await conn.execute(text("CREATE EXTENSION IF NOT EXISTS vector"))
+        except Exception as exc:
+            logger.warning("Could not enable pgvector extension", error=str(exc))
+        try:
+            await conn.execute(text("CREATE EXTENSION IF NOT EXISTS pg_trgm"))
+        except Exception as exc:
+            logger.warning("Could not enable pg_trgm extension", error=str(exc))
         # Create all tables
         print("Registered Tables:")
         print(Base.metadata.tables.keys())

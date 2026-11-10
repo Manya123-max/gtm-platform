@@ -1,3 +1,4 @@
+import { formatISTDate, formatISTDateTime } from './timezone'
 import {
   Briefcase,
   UserCheck,
@@ -33,15 +34,27 @@ export function humanizeSource(source) {
  */
 export function formatDisplayDate(dateStr) {
   if (!dateStr) return null
+  return formatISTDate(dateStr) || null
+}
+
+export function getSignalFreshness(sig) {
+  if (!sig) return { status: 'Recent', label: 'Recent', color: 'blue' }
+  if (sig.is_stale) {
+    return { status: 'Stale', label: 'Stale (>90d)', color: 'gray' }
+  }
+  const dateStr = sig.event_date || sig.occurred_at || sig.published_at || (sig.raw_data && (sig.raw_data.published_at || sig.raw_data.event_date))
+  if (!dateStr) return { status: 'Recent', label: 'Recent', color: 'blue' }
   try {
-    const s = String(dateStr).trim()
-    const isIsoNaive = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(\.\d+)?$/.test(s)
-    const normalizedStr = isIsoNaive ? `${s}Z` : s
-    const d = new Date(normalizedStr)
-    if (isNaN(d.getTime())) return null
-    return d.toLocaleDateString('en-GB', { day: 'numeric', month: 'short', year: 'numeric' })
+    const d = new Date(dateStr)
+    if (isNaN(d.getTime())) return { status: 'Recent', label: 'Recent', color: 'blue' }
+    const now = new Date()
+    const diffDays = Math.floor((now - d) / (1000 * 60 * 60 * 24))
+    if (diffDays <= 7) return { status: 'Hot', label: 'Hot (<7d)', color: 'emerald' }
+    if (diffDays <= 30) return { status: 'Recent', label: 'Recent (<30d)', color: 'blue' }
+    if (diffDays <= 90) return { status: 'Moderate', label: `${diffDays}d ago`, color: 'amber' }
+    return { status: 'Stale', label: 'Stale (>90d)', color: 'gray' }
   } catch {
-    return null
+    return { status: 'Recent', label: 'Recent', color: 'blue' }
   }
 }
 
@@ -411,6 +424,11 @@ export function extractSignalDetails(sig, contact = {}) {
     score,
     sourceUrl,
     sourceName: humanizeSource(sig.signal_source),
+    freshness: getSignalFreshness(sig),
+    eventDate: formatDisplayDate(sig.event_date || raw.event_date),
+    publishedAt: formatDisplayDate(sig.published_at || raw.published_at),
+    discoveredAt: formatDisplayDate(sig.discovered_at || sig.created_at),
+    isStale: sig.is_stale || getSignalFreshness(sig).status === 'Stale',
   }
 }
 

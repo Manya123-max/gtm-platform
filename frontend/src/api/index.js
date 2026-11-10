@@ -74,6 +74,7 @@ export const fetchOverview = (user_input_id) => unwrap(api.get('/dashboard/overv
 export const fetchContacts = (params = {}) => unwrap(api.get('/contacts', { params }))
 export const fetchTierSummary = (user_input_id) => unwrap(api.get('/contacts/tier-summary', { params: user_input_id ? { user_input_id } : {} }))
 export const fetchContact = id => unwrap(api.get(`/contacts/${id}`))
+export const fetchContactDrafts = id => unwrap(api.get('/drafts', { params: { contact_id: id } }))
 export const fetchThread = id => unwrap(api.get(`/contacts/${id}/thread`))
 export const fetchSignals = id => unwrap(api.get(`/contacts/${id}/signals`))
 export const summarizeSignals = id => unwrap(api.post(`/contacts/${id}/summarize-signals`))

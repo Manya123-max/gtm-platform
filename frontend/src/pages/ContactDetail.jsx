@@ -1,4 +1,4 @@
-import { useState } from 'react'
+import { useState, useMemo } from 'react'
 import { useQuery } from '@tanstack/react-query'
 import { useParams, useNavigate } from 'react-router-dom'
 import {
@@ -7,7 +7,8 @@ import {
   fetchSignals,
   summarizeSignals,
   fetchSalesforceVerification,
-  verifySalesforce
+  verifySalesforce,
+  fetchContactDrafts
 } from '../api'
 import {
   extractSignalDetails,
@@ -90,6 +91,25 @@ export default function ContactDetail() {
     refetchInterval: 10_000,
   })
 
+  const { data: drafts = [], isLoading: isDraftsLoading } = useQuery({
+    queryKey: ['contactDrafts', id],
+    queryFn: () => fetchContactDrafts(id),
+    refetchInterval: 15_000,
+    enabled: Boolean(id),
+  })
+
+  // Salesforce Account Verification Data (evaluated safely above early returns for hooks compliance)
+  const verData = contact?.salesforce_verification || salesforceVer
+  const verStatus = verData?.verification_status || 'pending'
+  const evidenceList = verData?.evidence_items || verData?.evidence || []
+  const lastCheckedText = useMemo(() => {
+    if (verStatus === 'pending') return 'Verification pending'
+    if (verData?.last_checked_at) {
+      return formatDisplayDate(verData.last_checked_at) || 'Checked recently'
+    }
+    return 'Not yet verified'
+  }, [verStatus, verData?.last_checked_at])
+
   // Handle Manual Salesforce Verification / Re-verify
   const handleVerifySalesforce = async () => {
     setIsVerifyingSalesforce(true)
@@ -146,17 +166,7 @@ export default function ContactDetail() {
     `${contact.company || 'The account'} has recent activity associated with ${sigTypeLabel}. These events indicate business activity relevant to go-to-market operations.`
   )
 
-  // Salesforce Account Verification Data (Phase 2)
-  const verData = contact.salesforce_verification || salesforceVer
-  const verStatus = verData?.verification_status || 'pending'
-  const evidenceList = verData?.evidence_items || verData?.evidence || []
-  const lastCheckedText = useMemo(() => {
-    if (verStatus === 'pending') return 'Verification pending'
-    if (verData?.last_checked_at) {
-      return formatDisplayDate(verData.last_checked_at) || 'Checked recently'
-    }
-    return 'Not yet verified'
-  }, [verStatus, verData?.last_checked_at])
+
 
   return (
     <div className="w-full space-y-6 pb-16 selection:bg-[#5B4EFF]/15">
@@ -539,19 +549,34 @@ export default function ContactDetail() {
                           <Icon size={18} />
                         </div>
                         <div className="min-w-0 space-y-0.5">
-                          <div className="flex items-center gap-2">
+                          <div className="flex items-center gap-2 flex-wrap">
                             <span className="text-xs font-bold text-gray-900 group-hover:text-[#5B4EFF] transition-colors truncate">
                               {meta.displayType}
                             </span>
                             <span className="bg-gray-100 text-gray-500 rounded-md px-1.5 py-0.5 text-[10px] font-medium shrink-0">
                               {details.sourceName}
                             </span>
+                            {details.freshness && (
+                              <span className={`px-2 py-0.5 rounded-full text-[10px] font-semibold shrink-0 ${
+                                details.freshness.status === 'Hot'
+                                  ? 'bg-emerald-50 text-emerald-700 border border-emerald-200'
+                                  : details.freshness.status === 'Recent'
+                                  ? 'bg-blue-50 text-blue-700 border border-blue-200'
+                                  : details.freshness.status === 'Moderate'
+                                  ? 'bg-amber-50 text-amber-700 border border-amber-200'
+                                  : 'bg-gray-100 text-gray-500 border border-gray-200'
+                              }`}>
+                                {details.freshness.label}
+                              </span>
+                            )}
                           </div>
                           <div className="text-xs text-gray-600 font-medium truncate">
                             {details.headline}
                           </div>
-                          <div className="text-[11px] text-gray-400 font-normal flex items-center gap-2">
-                            <span>Detected on {formatDisplayDate(sig.detected_at)}</span>
+                          <div className="text-[11px] text-gray-400 font-normal flex items-center gap-2 flex-wrap">
+                            {details.eventDate ? <span>Event date: {details.eventDate}</span> : <span>Detected: {formatDisplayDate(sig.detected_at)}</span>}
+                            {details.publishedAt && <span>• Published: {details.publishedAt}</span>}
+                            {details.discoveredAt && <span>• Discovered: {details.discoveredAt}</span>}
                             {details.pills && details.pills.length > 0 && details.pillsTitle && (
                               <>
                                 <span>•</span>
@@ -579,6 +604,92 @@ export default function ContactDetail() {
               )}
             </div>
 
+          </div>
+
+          {/* Card 1.5: Generated Outreach Drafts (Signal Personalisation & Traceability) */}
+          <div className="bg-white rounded-3xl border border-[#ECE8FE] shadow-[0_2px_16px_rgba(30,27,75,0.03)] p-6 sm:p-7 space-y-4">
+            <div className="flex items-center justify-between gap-3">
+              <div className="flex items-center gap-2 text-xs font-bold text-[#5B4EFF]">
+                <Mail size={14} className="text-[#5B4EFF]" />
+                <span>Generated Outreach Drafts · {drafts.length} {drafts.length === 1 ? 'draft' : 'drafts'}</span>
+              </div>
+              {isDraftsLoading && (
+                <div className="text-[11px] text-gray-400 font-medium animate-pulse">Syncing drafts…</div>
+              )}
+            </div>
+
+            {drafts.length === 0 ? (
+              <div className="py-8 text-center text-xs text-gray-400 bg-[#FAF9FF] rounded-2xl border border-dashed border-[#ECE8FE]">
+                No outreach drafts generated yet for this prospect. Trigger Agent 3 to generate signal-tailored email copy.
+              </div>
+            ) : (
+              <div className="space-y-4">
+                {drafts.map((draft) => {
+                  const matched = draft.matched_services || {}
+                  const reasoning = draft.personalisation_reasoning || matched.personalisation_reasoning || draft.business_case || ''
+                  const primarySig = draft.selected_primary_signal || matched.selected_primary_signal || (draft.signal ? (draft.signal.signal_type || draft.signal.summary) : null)
+                  const category = draft.signal_category || matched.signal_category || 'signal-based'
+                  const services = Array.isArray(matched) ? matched : (matched.services || [])
+
+                  const statusColor =
+                    draft.status === 'sent' || draft.approval_state === 'approved'
+                      ? 'bg-emerald-50 text-emerald-700 border-emerald-200'
+                      : draft.status === 'rejected' || draft.approval_state === 'rejected'
+                      ? 'bg-rose-50 text-rose-700 border-rose-200'
+                      : 'bg-amber-50 text-amber-700 border-amber-200'
+
+                  return (
+                    <div key={draft.id} className="rounded-2xl border border-gray-100 bg-[#FAF9FF]/60 p-5 space-y-3.5 hover:border-[#5B4EFF]/30 transition-all">
+                      <div className="flex items-start justify-between gap-3 flex-wrap">
+                        <div className="space-y-1">
+                          <div className="flex items-center gap-2 flex-wrap">
+                            <span className="text-sm font-bold text-gray-900">{draft.subject || 'No Subject'}</span>
+                            <span className={`px-2.5 py-0.5 rounded-full text-[10px] font-bold border uppercase tracking-wider ${statusColor}`}>
+                              {draft.approval_state || draft.status || 'pending'}
+                            </span>
+                            <span className="bg-[#5B4EFF]/10 text-[#5B4EFF] border border-[#5B4EFF]/20 rounded-full px-2.5 py-0.5 text-[10px] font-semibold">
+                              {category}
+                            </span>
+                          </div>
+                          {primarySig && (
+                            <div className="text-[11px] text-gray-500 font-medium">
+                              Grounded in signal: <span className="text-gray-800 font-semibold">{primarySig}</span>
+                            </div>
+                          )}
+                        </div>
+                        {draft.created_at && (
+                          <span className="text-[11px] text-gray-400 font-medium">
+                            {formatDisplayDate(draft.created_at)}
+                          </span>
+                        )}
+                      </div>
+
+                      {reasoning && (
+                        <div className="bg-amber-50/70 border border-amber-200/60 rounded-xl p-3 text-xs text-amber-900 leading-relaxed">
+                          <strong className="font-semibold text-amber-950">Why this copy was drafted: </strong>
+                          <span>{reasoning}</span>
+                        </div>
+                      )}
+
+                      {services.length > 0 && (
+                        <div className="flex items-center gap-1.5 flex-wrap">
+                          <span className="text-[11px] font-semibold text-gray-500">Matched offerings:</span>
+                          {services.map((srv, sIdx) => (
+                            <span key={sIdx} className="bg-white border border-gray-200 text-gray-700 rounded-lg px-2 py-0.5 text-[10px] font-medium">
+                              {srv}
+                            </span>
+                          ))}
+                        </div>
+                      )}
+
+                      <div className="bg-white rounded-xl border border-gray-200/80 p-4 text-xs text-gray-700 leading-relaxed font-normal whitespace-pre-wrap font-sans">
+                        {draft.body}
+                      </div>
+                    </div>
+                  )
+                })}
+              </div>
+            )}
           </div>
 
           {/* Card 2: Conversation Thread */}

@@ -29,9 +29,9 @@ class Settings(BaseSettings):
     APP_ENV:        str  = Field(default="development", validation_alias=AliasChoices("APP_ENV", "ENVIRONMENT"))
     APP_SECRET_KEY: str  = "change-me"
     DEBUG:          bool = True
-    PRODUCTION_FRONTEND_URL: str = "https://dashing-sorbet-fd7cd5.netlify.app"
+    PRODUCTION_FRONTEND_URL: str = "https://gtqm.netlify.app"
     FRONTEND_URL:   str  = "http://localhost:3000"
-    CORS_ORIGINS:   str  = "http://localhost:3000,http://localhost:3003,http://localhost:5173,http://localhost:8000,http://127.0.0.1:3000,http://127.0.0.1:3003,http://127.0.0.1:5173,https://dashing-sorbet-fd7cd5.netlify.app"
+    CORS_ORIGINS:   str  = "http://localhost:3000,http://localhost:3003,http://localhost:5173,http://localhost:8000,http://127.0.0.1:3000,http://127.0.0.1:3003,http://127.0.0.1:5173,https://gtqm.netlify.app,https://dashing-sorbet-fd7cd5.netlify.app"
 
     @field_validator("DEBUG", mode="before")
     @classmethod
@@ -64,10 +64,13 @@ class Settings(BaseSettings):
             if norm_fe and norm_fe != "*" and norm_fe not in origins:
                 origins.append(norm_fe)
 
-        # Always guarantee the production Netlify frontend origin is permitted
+        # Always guarantee the production Netlify frontend origins are permitted
         norm_prod = _normalize_origin(self.PRODUCTION_FRONTEND_URL)
         if norm_prod and norm_prod not in origins:
             origins.append(norm_prod)
+        for default_net in ["https://gtqm.netlify.app", "https://dashing-sorbet-fd7cd5.netlify.app"]:
+            if default_net not in origins:
+                origins.append(default_net)
 
         return origins
 

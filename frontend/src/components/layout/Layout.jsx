@@ -9,8 +9,9 @@ import {
 } from 'lucide-react'
 import clsx from 'clsx'
 import { useSession } from '../../context/SessionContext'
+import { formatISTRelativeTime } from '../../utils/timezone'
 import { useAuth } from '../../context/AuthContext'
-import { fetchNotifications, markNotificationRead } from '../../api' 
+import { fetchNotifications, markNotificationRead } from '../../api'
 
 const NAV = [
   { to: '/dashboard', icon: LayoutDashboard, label: 'Dashboard' },
@@ -46,7 +47,7 @@ function formatTimeAgo(dateString) {
   if (diffMins < 1) return 'Just now'
   if (diffMins < 60) return `${diffMins} min ago`
   if (diffHours < 24 && date.getDate() === now.getDate()) return `${diffHours} hr ago`
-  
+
   const yesterday = new Date(now)
   yesterday.setDate(now.getDate() - 1)
   const timeStr = date.toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' })
@@ -252,7 +253,7 @@ export default function Layout() {
 
         {/* Topbar: Search Bar on Left, Notifications & Profile Badge on Right */}
         <header className="h-16 flex items-center justify-between px-5 bg-white border-b border-[#EDF1F7] shrink-0 z-10">
-          
+
           {/* Search Bar matching Figma */}
           <div className="relative w-80 sm:w-96">
             <input
@@ -269,7 +270,7 @@ export default function Layout() {
 
           {/* Right Topbar Actions */}
           <div className="flex items-center gap-4">
-            
+
             {/* Notification Bell with Red Badge matching Figma */}
             <div className="relative" ref={dropdownRef}>
               <button
@@ -431,4 +432,4 @@ export default function Layout() {
       </div>
     </div>
   )
-}
+}

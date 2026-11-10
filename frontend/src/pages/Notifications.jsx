@@ -19,54 +19,16 @@ import {
 } from 'lucide-react'
 import { fetchNotifications, markNotificationRead, markAllNotificationsRead } from '../api'
 import { useSession } from '../context/SessionContext'
+import { formatISTRelativeTime, groupItemsByISTDay } from '../utils/timezone'
 
-// Helper to format friendly relative time (e.g. "5 min ago", "Yesterday, 4:30 PM")
+// Helper to format friendly relative time in IST
 function formatTimeAgo(dateString) {
-  if (!dateString) return ''
-  const date = new Date(dateString)
-  const now = new Date()
-  const diffMs = now - date
-  const diffMins = Math.floor(diffMs / (1000 * 60))
-  const diffHours = Math.floor(diffMs / (1000 * 60 * 60))
-  const diffDays = Math.floor(diffMs / (1000 * 60 * 60 * 24))
-
-  if (diffMins < 1) return 'Just now'
-  if (diffMins < 60) return `${diffMins} min ago`
-  if (diffHours < 24 && date.getDate() === now.getDate()) return `${diffHours} hr ago`
-  
-  const yesterday = new Date(now)
-  yesterday.setDate(now.getDate() - 1)
-  const timeStr = date.toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' })
-  if (date.getDate() === yesterday.getDate() && date.getMonth() === yesterday.getMonth() && date.getFullYear() === yesterday.getFullYear()) {
-    return `Yesterday, ${timeStr}`
-  }
-
-  const monthNames = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec']
-  return `${monthNames[date.getMonth()]} ${date.getDate()}, ${timeStr}`
+  return formatISTRelativeTime(dateString)
 }
 
-// Helper to group notifications into Today, Yesterday, and Earlier
+// Helper to group notifications into Today, Yesterday, and Earlier in IST
 function groupNotifications(list) {
-  const today = []
-  const yesterday = []
-  const earlier = []
-
-  const now = new Date()
-  const yest = new Date(now)
-  yest.setDate(now.getDate() - 1)
-
-  list.forEach(item => {
-    const d = new Date(item.created_at)
-    if (d.getDate() === now.getDate() && d.getMonth() === now.getMonth() && d.getFullYear() === now.getFullYear()) {
-      today.push(item)
-    } else if (d.getDate() === yest.getDate() && d.getMonth() === yest.getMonth() && d.getFullYear() === yest.getFullYear()) {
-      yesterday.push(item)
-    } else {
-      earlier.push(item)
-    }
-  })
-
-  return { today, yesterday, earlier }
+  return groupItemsByISTDay(list, item => item.created_at)
 }
 
 // Synthesize Figma display elements (tag, title, description, action label) based on notification type and content

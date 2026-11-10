@@ -3,13 +3,16 @@
 Production Process Supervisor for GTM Platform on Render Free Plan.
 Runs:
 1. Safe database baseline reconciliation and migrations (blocks until success).
-2. Celery Worker (concurrency: 1, listening on: default, agents, webhooks).
-3. FastAPI / Uvicorn server (bound to 0.0.0.0:${PORT:-8000}).
+2. Production configuration validation (aborts if missing/invalid production URLs).
+3. Celery Worker (--pool=solo, concurrency: 1, listening on: default, agents, webhooks).
+4. FastAPI / Uvicorn server (bound to 0.0.0.0:${PORT:-8000}).
 
 Guarantees:
 - Never starts Celery or Uvicorn if migration fails or schema does not match baseline.
+- Never starts Celery or Uvicorn if production configuration validation fails.
 - Single container operation without requiring paid background workers.
-- Graceful shutdown handling for SIGTERM/SIGINT without orphan processes.
+- Graceful shutdown handling for SIGTERM/SIGINT with independent parallel timeouts.
+- Preserves child exit codes and reports failures honestly to container orchestrator.
 """
 import os
 import sys
@@ -24,6 +27,7 @@ sys.path.insert(0, str(backend_dir))
 
 CHILD_PROCESSES = {}
 SHUTTING_DOWN = False
+EXIT_CODE = 0
 
 
 def log(msg: str):
@@ -31,40 +35,56 @@ def log(msg: str):
     print(f"[{timestamp}] [SUPERVISOR] {msg}", flush=True)
 
 
-def handle_shutdown_signal(signum, frame):
-    global SHUTTING_DOWN
+def handle_shutdown(signum=None, frame=None, exit_code=0):
+    global SHUTTING_DOWN, EXIT_CODE
     if SHUTTING_DOWN:
         return
     SHUTTING_DOWN = True
-    sig_name = signal.Signals(signum).name if signum else "SHUTDOWN"
-    log(f"Received {sig_name}. Initiating graceful termination of all services...")
+    if exit_code != 0 and EXIT_CODE == 0:
+        EXIT_CODE = exit_code
 
-    # Forward termination signal to all child processes
+    sig_name = signal.Signals(signum).name if signum else f"CODE_{EXIT_CODE}"
+    log(f"Initiating graceful termination of all services (trigger: {sig_name}, target exit_code: {EXIT_CODE})...")
+
+    # Step 1: Send SIGTERM to both child processes in parallel for graceful shutdown
     for name, proc in list(CHILD_PROCESSES.items()):
         if proc.poll() is None:
-            log(f"Sending termination signal to {name} (PID: {proc.pid})...")
+            log(f"Sending SIGTERM to {name} (PID: {proc.pid})...")
             try:
-                # Uvicorn responds immediately to SIGINT; Celery to SIGTERM
-                proc.send_signal(signal.SIGINT if "uvicorn" in name else signal.SIGTERM)
+                proc.send_signal(signal.SIGTERM)
             except ProcessLookupError:
                 pass
 
-    # Wait up to 5 seconds for graceful exit
-    deadline = time.time() + 5.0
+    # Step 2: Parallel graceful shutdown allowance (up to 10 seconds total)
+    # Both processes shut down concurrently without starving each other.
+    deadline = time.time() + 10.0
+    while time.time() < deadline:
+        running = [name for name, proc in CHILD_PROCESSES.items() if proc.poll() is None]
+        if not running:
+            break
+        time.sleep(0.2)
+
+    # Step 3: Check status and force kill any lingering processes with SIGKILL
     for name, proc in list(CHILD_PROCESSES.items()):
-        remaining = max(0.1, deadline - time.time())
-        try:
-            proc.wait(timeout=remaining)
-            log(f"Process {name} exited cleanly with code {proc.returncode}.")
-        except subprocess.TimeoutExpired:
+        poll_code = proc.poll()
+        if poll_code is not None:
+            log(f"Process {name} exited with code {poll_code}.")
+        else:
             log(f"Process {name} did not exit within timeout. Sending SIGKILL...")
             try:
                 proc.kill()
-            except ProcessLookupError:
+                proc.wait(timeout=2.0)
+                log(f"Process {name} killed.")
+            except (ProcessLookupError, subprocess.TimeoutExpired):
                 pass
 
-    log("All child processes terminated. Exiting supervisor.")
-    sys.exit(0)
+    log(f"All child processes terminated. Supervisor exiting with code {EXIT_CODE}.")
+    sys.exit(EXIT_CODE)
+
+
+def handle_external_signal(signum, frame):
+    """Callback for OS signals (SIGTERM from Render or SIGINT from Ctrl+C)."""
+    handle_shutdown(signum=signum, frame=frame, exit_code=0)
 
 
 def run_database_migrations_or_abort():
@@ -83,38 +103,56 @@ def run_database_migrations_or_abort():
         sys.exit(1)
 
 
+def validate_config_or_abort():
+    """
+    Validates production configuration before launching services.
+    Ensures Redis broker and database URLs are valid for production.
+    """
+    from app.core.config import settings
+    prod_errors = settings.validate_production_readiness()
+    is_prod = settings.APP_ENV.lower() in {"prod", "production"} or not settings.DEBUG
+    if prod_errors and is_prod:
+        log("CRITICAL: Production configuration validation failed:")
+        for err in prod_errors:
+            log(f"  - {err}")
+        sys.exit(1)
+
+
 def main():
-    signal.signal(signal.SIGTERM, handle_shutdown_signal)
-    signal.signal(signal.SIGINT, handle_shutdown_signal)
+    signal.signal(signal.SIGTERM, handle_external_signal)
+    signal.signal(signal.SIGINT, handle_external_signal)
 
     log("Starting GTM Platform single-container environment on Render Free tier...")
 
-    # 1. Step 1: Run migration and baseline verification FIRST
-    # If this fails, the process exits immediately with code 1
+    # Step 1: Run migration and baseline verification FIRST
     run_database_migrations_or_abort()
 
+    # Step 2: Validate configuration (e.g. production Redis/Valkey endpoints)
+    validate_config_or_abort()
+
     port = os.environ.get("PORT", "8000")
-    # Concurrency 1 is optimal for Render Free (512MB RAM, shared CPU)
+    # Concurrency 1 and solo pool are optimal for Render Free (512MB RAM, shared CPU)
     concurrency = os.environ.get("CELERY_CONCURRENCY", "1")
     log_level = os.environ.get("LOG_LEVEL", "info")
 
-    # 2. Step 2: Spawn Celery Worker ONLY after migration succeeds
+    # Step 3: Spawn Celery Worker with solo pool and canonical app ref
     celery_cmd = [
         sys.executable, "-m", "celery",
-        "-A", "app.core.celery_app.celery_app",
+        "-A", "app.core.celery_app:celery_app",
         "worker",
         f"--loglevel={log_level}",
         "-Q", "default,agents,webhooks",
+        "--pool=solo",
         f"--concurrency={concurrency}",
         "--without-gossip",
         "--without-mingle",
     ]
-    log(f"Spawning Celery Worker (concurrency={concurrency}, queues=default,agents,webhooks)...")
+    log(f"Spawning Celery Worker (--pool=solo, concurrency={concurrency}, queues=default,agents,webhooks)...")
     celery_proc = subprocess.Popen(celery_cmd, cwd=str(backend_dir))
     CHILD_PROCESSES["celery-worker"] = celery_proc
     log(f"Celery Worker started (PID: {celery_proc.pid}).")
 
-    # 3. Step 3: Spawn Uvicorn Web Server ONLY after migration succeeds
+    # Step 4: Spawn Uvicorn Web Server
     uvicorn_cmd = [
         sys.executable, "-m", "uvicorn",
         "app.main:app",
@@ -129,15 +167,16 @@ def main():
 
     log("All services running. Entering supervisory health loop.")
 
-    # 4. Step 4: Supervisory Health Loop
+    # Step 5: Supervisory Health Loop
     while not SHUTTING_DOWN:
         for name, proc in list(CHILD_PROCESSES.items()):
             poll_code = proc.poll()
             if poll_code is not None:
                 log(f"CRITICAL: Managed service '{name}' died unexpectedly with exit code {poll_code}.")
-                # If either service crashes, terminate remaining services and exit
-                handle_shutdown_signal(signal.SIGTERM, None)
-                sys.exit(poll_code or 1)
+                # Policy: an unexpectedly terminated service triggers immediate fail-safe shutdown
+                # with non-zero exit code to alert Render rather than silently accepting requests.
+                handle_shutdown(signum=None, frame=None, exit_code=poll_code or 1)
+                return
         time.sleep(2)
 
 

@@ -218,3 +218,45 @@ async def test_workflow_status_polling_endpoint():
         wf_data = data.get("workflow", data)
         assert wf_data.get("workflow_name") == "gtm_intake_pipeline"
         assert wf_data.get("status") in ("running", "completed")
+
+
+def test_packaging_and_kombu_redis_transport_imports():
+    """Verify packaging and kombu redis transport are cleanly importable."""
+    import packaging
+    import packaging.version
+    import kombu.transport.redis
+    assert packaging.__version__ is not None
+    assert kombu.transport.redis is not None
+
+
+def test_run_server_celery_worker_configuration():
+    """Verify run_server.py configures Celery with solo pool, canonical app ref, and queues."""
+    code = (backend_dir / "run_server.py").read_text(encoding="utf-8")
+    assert "--pool=solo" in code
+    assert "app.core.celery_app:celery_app" in code
+    assert "default,agents,webhooks" in code
+    assert 'proc.send_signal(signal.SIGTERM)' in code
+
+
+def test_celery_app_broker_connection_retry_on_startup():
+    """Verify Celery app has broker_connection_retry_on_startup enabled."""
+    assert celery_app.conf.broker_connection_retry_on_startup is True
+
+
+def test_production_redis_and_celery_validation():
+    """Verify production settings validator rejects localhost and docker hostnames."""
+    from app.core.config import Settings
+    s = Settings(
+        APP_ENV="production",
+        DEBUG=False,
+        APP_SECRET_KEY="secure-secret-key-1234567890123456",
+        JWT_SECRET_KEY="secure-jwt-key-123456789012345678",
+        DATABASE_URL="postgresql+asyncpg://gtm:pass@render-db:5432/gtm",
+        REDIS_URL="redis://localhost:6379/0",
+        CELERY_BROKER_URL="redis://localhost:6379/1",
+        CELERY_RESULT_BACKEND="redis://redis:6379/2",
+    )
+    errors = s.validate_production_readiness()
+    assert any("REDIS_URL" in err for err in errors)
+    assert any("CELERY_BROKER_URL" in err for err in errors)
+    assert any("CELERY_RESULT_BACKEND" in err for err in errors)

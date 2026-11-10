@@ -5,8 +5,9 @@ Subscription tier notes (as of July 2026):
 - Apollo.io     : Organization tier → higher credit pool, advanced filters,
                   bulk enrichment, CSV export, sequence automation
 """
+import os
 from pydantic_settings import BaseSettings, SettingsConfigDict
-from pydantic import field_validator
+from pydantic import field_validator, Field, AliasChoices
 from functools import lru_cache
 from typing import List, Optional
 
@@ -25,7 +26,7 @@ class Settings(BaseSettings):
     )
 
     # ── App ───────────────────────────────────────────────────────────────
-    APP_ENV:        str  = "development"
+    APP_ENV:        str  = Field(default="development", validation_alias=AliasChoices("APP_ENV", "ENVIRONMENT"))
     APP_SECRET_KEY: str  = "change-me"
     DEBUG:          bool = True
     PRODUCTION_FRONTEND_URL: str = "https://dashing-sorbet-fd7cd5.netlify.app"
@@ -81,6 +82,12 @@ class Settings(BaseSettings):
                 errors.append("DATABASE_URL must point to a production database, not localhost")
             if self.AUTH_ENABLED and not (self.JWT_SECRET_KEY or (self.APP_SECRET_KEY and self.APP_SECRET_KEY != "change-me")):
                 errors.append("JWT_SECRET_KEY or a secure APP_SECRET_KEY is required when AUTH_ENABLED=True")
+            if not self.REDIS_URL or "localhost" in self.REDIS_URL or "redis://redis:" in self.REDIS_URL:
+                errors.append("REDIS_URL must point to a production Redis/Valkey service, not localhost or docker hostname")
+            if not self.CELERY_BROKER_URL or "localhost" in self.CELERY_BROKER_URL or "redis://redis:" in self.CELERY_BROKER_URL:
+                errors.append("CELERY_BROKER_URL must point to a production Redis/Valkey service, not localhost or docker hostname")
+            if not self.CELERY_RESULT_BACKEND or "localhost" in self.CELERY_RESULT_BACKEND or "redis://redis:" in self.CELERY_RESULT_BACKEND:
+                errors.append("CELERY_RESULT_BACKEND must point to a production Redis/Valkey service, not localhost or docker hostname")
         return errors
 
     # ── Auth ──────────────────────────────────────────────────────────────────
@@ -128,7 +135,7 @@ class Settings(BaseSettings):
     # ── Redis / Celery ────────────────────────────────────────────────────
     REDIS_URL:              str = "redis://localhost:6379/0"
     CELERY_BROKER_URL:      str = "redis://localhost:6379/1"
-    CELERY_RESULT_BACKEND:  str = "redis://redis:6379/2"
+    CELERY_RESULT_BACKEND:  str = "redis://localhost:6379/2"
 
     # ── LLM providers — fallback chain: Groq → Gemini → Mistral → DeepSeek → Claude ──
     ANTHROPIC_API_KEY: str = ""

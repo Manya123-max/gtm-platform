@@ -10,8 +10,9 @@ alembic==1.14.0
 pgvector==0.3.6
 
 # ── Redis / Celery ─────────────────────────────────────────────────────────
-redis==5.2.1
-celery[redis]==5.4.0
+redis==6.1.0
+kombu==5.7.0
+celery==5.4.0
 packaging>=24.0
 # flower removed — saves ~200MB, access task status via API instead
 

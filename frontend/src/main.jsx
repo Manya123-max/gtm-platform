@@ -17,6 +17,7 @@ import Login from './pages/Login'
 import Register from './pages/Register'
 import ForgotPassword from './pages/ForgotPassword'
 import ResetPassword from './pages/ResetPassword'
+import PublicBooking from './pages/PublicBooking'
 import ProtectedRoute from './components/ProtectedRoute'
 import { SessionProvider } from './context/SessionContext'
 import { AuthProvider } from './context/AuthContext'
@@ -33,11 +34,14 @@ ReactDOM.createRoot(document.getElementById('root')).render(
         <SessionProvider>
         <BrowserRouter>
           <Routes>
-            {/* Public auth routes */}
+            {/* Public auth & calendar scheduling routes */}
             <Route path="/login"           element={<Login initialMode="login" />} />
             <Route path="/register"        element={<Register />} />
             <Route path="/forgot-password" element={<ForgotPassword />} />
             <Route path="/reset-password"  element={<ResetPassword />} />
+            <Route path="/book/:username"  element={<PublicBooking />} />
+            <Route path="/book"            element={<PublicBooking />} />
+            <Route path="/schedule/:username" element={<PublicBooking />} />
 
             {/* Protected application routes */}
             <Route element={<ProtectedRoute />}>

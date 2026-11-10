@@ -766,3 +766,49 @@ class SalesforceVerificationEvidence(Base):
     )
 
 
+class ScheduledMeeting(Base):
+    """
+    Direct scheduled meeting bookings from the native calendar scheduler.
+    Tracks meeting platform (Zoom, Google Meet, Teams), conference links,
+    attendee info, date/time, status, and calendar event references.
+    """
+    __tablename__ = "scheduled_meetings"
+
+    id: Mapped[str] = mapped_column(UUID(as_uuid=False), primary_key=True, default=generate_uuid)
+    user_id: Mapped[str] = mapped_column(UUID(as_uuid=False), ForeignKey("users.id", ondelete="CASCADE"), nullable=False, index=True)
+    contact_id: Mapped[Optional[str]] = mapped_column(UUID(as_uuid=False), ForeignKey("contacts.id", ondelete="SET NULL"), nullable=True, index=True)
+    deal_id: Mapped[Optional[str]] = mapped_column(UUID(as_uuid=False), ForeignKey("deals.id", ondelete="SET NULL"), nullable=True, index=True)
+
+    title: Mapped[str] = mapped_column(String(255), nullable=False)
+    description: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+
+    # Meeting Time
+    start_time: Mapped[datetime] = mapped_column(DateTime, nullable=False, index=True)
+    end_time: Mapped[datetime] = mapped_column(DateTime, nullable=False)
+    timezone: Mapped[str] = mapped_column(String(100), default="UTC", nullable=False)
+    duration_minutes: Mapped[int] = mapped_column(Integer, default=30, nullable=False)
+
+    # Platform & Conference Link
+    platform: Mapped[str] = mapped_column(String(50), nullable=False)  # "zoom" | "google_meet" | "teams"
+    meeting_link: Mapped[str] = mapped_column(String(500), nullable=False)
+    meeting_id: Mapped[Optional[str]] = mapped_column(String(100), nullable=True)
+    passcode: Mapped[Optional[str]] = mapped_column(String(50), nullable=True)
+
+    # Attendee info
+    attendee_name: Mapped[str] = mapped_column(String(200), nullable=False)
+    attendee_email: Mapped[str] = mapped_column(String(255), nullable=False, index=True)
+    attendee_company: Mapped[Optional[str]] = mapped_column(String(200), nullable=True)
+    attendee_notes: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+
+    # Status
+    status: Mapped[str] = mapped_column(String(50), default="scheduled")  # "scheduled" | "completed" | "cancelled" | "rescheduled"
+
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
+    updated_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+
+    user: Mapped["User"] = relationship("User")
+    contact: Mapped[Optional["Contact"]] = relationship("Contact")
+    deal: Mapped[Optional["Deal"]] = relationship("Deal")
+
+
+

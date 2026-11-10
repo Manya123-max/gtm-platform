@@ -4,8 +4,8 @@ import {
   Mail, Calendar, CheckCircle, XCircle, AlertCircle,
   ExternalLink, Shield, Key, RefreshCw, Save, User, Building,
   Check, Lock, Info, Sparkles, Edit3, UserPlus, Users,
-  ToggleLeft, ToggleRight, Trash2, ArrowRight, Server,
-  X, Cloud, CheckCircle2
+  ToggleLeft, ToggleRight, Trash2, ArrowRight,
+  X, CheckCircle2, Video, Copy
 } from 'lucide-react'
 import { useAuth } from '../context/AuthContext'
 import {
@@ -34,6 +34,7 @@ export default function Settings() {
   const [isCustomizingCal, setIsCustomizingCal] = useState(false)
   const [saveStatus, setSaveStatus] = useState(null)
   const [oauthError, setOauthError] = useState(null)
+  const [copiedNativeLink, setCopiedNativeLink] = useState(false)
 
   // Admin user management state
   const [showAddUserModal, setShowAddUserModal] = useState(false)
@@ -686,121 +687,71 @@ export default function Settings() {
             </div>
           )}
 
+          {/* Native Multi-Platform Meeting Card */}
+          <div className="mt-4 pt-4 border-t border-gray-100">
+            <div className="bg-gradient-to-r from-[#EEF2FF] to-[#F5F3FF] border border-[#C7D2FE] rounded-2xl p-4">
+              <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 mb-3">
+                <div className="flex items-center gap-2">
+                  <div className="w-8 h-8 rounded-xl bg-[#5B4EFF] text-white flex items-center justify-center shadow-xs">
+                    <Video size={16} />
+                  </div>
+                  <div>
+                    <h4 className="text-xs font-bold text-gray-900">Multi-Platform Meeting Scheduler</h4>
+                    <p className="text-[11px] text-gray-500">
+                      Prospects choose day, time slot, and meeting platform (Zoom, Google Meet, or Teams)
+                    </p>
+                  </div>
+                </div>
+                <div className="flex items-center gap-2">
+                  <button
+                    type="button"
+                    onClick={() => {
+                      const link = `${window.location.origin}/book/${resolvedCalUsername || 'shree-lakshmi'}`
+                      navigator.clipboard.writeText(link)
+                      setCopiedNativeLink(true)
+                      setTimeout(() => setCopiedNativeLink(false), 2000)
+                    }}
+                    className="bg-white border border-gray-200 hover:bg-gray-50 text-gray-700 text-xs font-semibold px-3 py-1.5 rounded-lg flex items-center gap-1.5 shadow-2xs transition cursor-pointer"
+                  >
+                    {copiedNativeLink ? <Check size={13} className="text-[#059669]" /> : <Copy size={13} />}
+                    <span>{copiedNativeLink ? 'Copied Link!' : 'Copy Link'}</span>
+                  </button>
+                  <a
+                    href={`/book/${resolvedCalUsername || 'shree-lakshmi'}`}
+                    target="_blank"
+                    rel="noopener noreferrer"
+                    className="bg-[#5B4EFF] hover:bg-[#4F46E5] text-white text-xs font-semibold px-3 py-1.5 rounded-lg flex items-center gap-1.5 shadow-2xs transition"
+                  >
+                    <span>Preview Page</span>
+                    <ExternalLink size={12} />
+                  </a>
+                </div>
+              </div>
+
+              {/* Supported Platforms Chips */}
+              <div className="flex flex-wrap items-center gap-2 pt-1">
+                <span className="text-[10px] font-bold text-gray-400 uppercase tracking-wider">
+                  Attendee Selects:
+                </span>
+                <span className="inline-flex items-center gap-1 bg-white border border-[#2D8CFF]/30 text-[#2D8CFF] text-[10px] font-bold px-2 py-0.5 rounded-md">
+                  <span className="w-1.5 h-1.5 rounded-full bg-[#2D8CFF]" /> Zoom Meeting
+                </span>
+                <span className="inline-flex items-center gap-1 bg-white border border-[#00897B]/30 text-[#00897B] text-[10px] font-bold px-2 py-0.5 rounded-md">
+                  <span className="w-1.5 h-1.5 rounded-full bg-[#00897B]" /> Google Meet
+                </span>
+                <span className="inline-flex items-center gap-1 bg-white border border-[#5059C9]/30 text-[#5059C9] text-[10px] font-bold px-2 py-0.5 rounded-md">
+                  <span className="w-1.5 h-1.5 rounded-full bg-[#5059C9]" /> Microsoft Teams
+                </span>
+              </div>
+            </div>
+          </div>
+
           <div className="flex items-center justify-between pt-3 border-t border-gray-100 text-xs">
             <span className="text-gray-400 font-normal">
               Inserted by Agent 3 into outreach drafts &amp; by Agent 4 into meeting replies
             </span>
             <span className="text-[#059669] font-semibold">
               Backend Source of Truth Active
-            </span>
-          </div>
-        </div>
-      </div>
-
-      {/* ──────────────────────────────────────────────────────────
-          SECTION 5: Company-Level Centralized Integrations
-      ────────────────────────────────────────────────────────── */}
-      <div className="space-y-3">
-        <div className="flex items-center gap-2">
-          <Server size={16} className="text-[#5B4EFF]" />
-          <h2 className="text-sm font-bold text-gray-900">Company-Level Centralized Integrations</h2>
-          <span className="text-xs text-gray-400 font-normal">
-            (Centralized infrastructure managed by administrators — credentials protected)
-          </span>
-        </div>
-
-        {/* Purple Alert Banner matching Figma */}
-        <div className="bg-[#F5F3FF] border border-[#DDD6FE] rounded-xl p-3.5 text-xs text-[#5B21B6] leading-relaxed">
-          Salesforce CRM is the sole CRM source of truth for all Accounts, Contacts, Opportunities, and Deal activity. Slack handles team notifications and outreach approvals. Individual sales representatives cannot view or modify company API keys, client secrets, or environment credentials.
-        </div>
-
-        {/* 4 Integration Cards Grid */}
-        <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4">
-          {/* Card 1: Slack Workspace */}
-          <div className="bg-white rounded-2xl border border-gray-100 shadow-2xs p-4 flex flex-col justify-between">
-            <div>
-              <div className="flex items-center justify-between">
-                {/* Slack Colored Icon */}
-                <div className="w-7 h-7 flex items-center justify-center">
-                  <svg viewBox="0 0 24 24" className="w-5 h-5">
-                    <path fill="#E01E5A" d="M5.04 14.5a2.52 2.52 0 0 1-2.52-2.52c0-1.39 1.13-2.52 2.52-2.52h2.52v2.52c0 1.39-1.13 2.52-2.52 2.52z"/>
-                    <path fill="#36C5F0" d="M14.5 5.04a2.52 2.52 0 0 1-2.52-2.52c0-1.39 1.13-2.52 2.52-2.52s2.52 1.13 2.52 2.52v2.52h-2.52z"/>
-                    <path fill="#2EB67D" d="M18.96 9.46c1.39 0 2.52 1.13 2.52 2.52s-1.13 2.52-2.52 2.52h-2.52V9.46h2.52z"/>
-                    <path fill="#ECB22E" d="M9.46 18.96c0 1.39-1.13 2.52-2.52 2.52s-2.52-1.13-2.52-2.52v-2.52h2.52v2.52z"/>
-                  </svg>
-                </div>
-                <span className="border border-gray-200 bg-gray-50 text-gray-600 text-[10px] font-semibold px-2 py-0.5 rounded-md">
-                  Managed
-                </span>
-              </div>
-              <h3 className="font-bold text-xs text-gray-900 mt-3">Slack Workspace</h3>
-              <p className="text-[11px] text-gray-500 mt-1 min-h-[32px] leading-snug">
-                Outreach draft approvals and sales notifications
-              </p>
-            </div>
-            <span className="text-[10px] text-gray-400 font-normal mt-4 block">
-              Company Scope
-            </span>
-          </div>
-
-          {/* Card 2: Salesforce CRM */}
-          <div className="bg-white rounded-2xl border border-gray-100 shadow-2xs p-4 flex flex-col justify-between">
-            <div>
-              <div className="flex items-center justify-between">
-                <Cloud size={20} className="text-[#00A1E0]" />
-                <span className="border border-gray-200 bg-gray-50 text-gray-600 text-[10px] font-semibold px-2 py-0.5 rounded-md">
-                  Managed
-                </span>
-              </div>
-              <h3 className="font-bold text-xs text-gray-900 mt-3">Salesforce CRM</h3>
-              <p className="text-[11px] text-gray-500 mt-1 min-h-[32px] leading-snug">
-                Salesforce OAuth/Token required in .env
-              </p>
-            </div>
-            <span className="text-[10px] text-gray-400 font-normal mt-4 block">
-              Company Scope
-            </span>
-          </div>
-
-          {/* Card 3: Apollo.io Prospecting */}
-          <div className="bg-white rounded-2xl border border-gray-100 shadow-2xs p-4 flex flex-col justify-between">
-            <div>
-              <div className="flex items-center justify-between">
-                <div className="w-5 h-5 bg-black rounded flex items-center justify-center text-white text-[11px] font-black">
-                  ▲
-                </div>
-                <span className="border border-[#A7F3D0] bg-[#ECFDF5] text-[#059669] text-[10px] font-semibold px-2 py-0.5 rounded-md">
-                  Active
-                </span>
-              </div>
-              <h3 className="font-bold text-xs text-gray-900 mt-3">Apollo.io Prospecting</h3>
-              <p className="text-[11px] text-gray-500 mt-1 min-h-[32px] leading-snug">
-                Prospect sourcing and contact enrichment active
-              </p>
-            </div>
-            <span className="text-[10px] text-gray-400 font-normal mt-4 block">
-              Company Scope
-            </span>
-          </div>
-
-          {/* Card 4: Resend Email */}
-          <div className="bg-white rounded-2xl border border-gray-100 shadow-2xs p-4 flex flex-col justify-between">
-            <div>
-              <div className="flex items-center justify-between">
-                <div className="w-5 h-5 bg-black rounded flex items-center justify-center text-white text-[11px] font-bold">
-                  R
-                </div>
-                <span className="border border-[#A7F3D0] bg-[#ECFDF5] text-[#059669] text-[10px] font-semibold px-2 py-0.5 rounded-md">
-                  Active
-                </span>
-              </div>
-              <h3 className="font-bold text-xs text-gray-900 mt-3">Resend Email</h3>
-              <p className="text-[11px] text-gray-500 mt-1 min-h-[32px] leading-snug">
-                Weekly digest and transaction fallback
-              </p>
-            </div>
-            <span className="text-[10px] text-gray-400 font-normal mt-4 block">
-              Company Scope
             </span>
           </div>
         </div>

@@ -19,4 +19,5 @@ from .models import (
     User,
     UserIntegration,
     Notification,
+    ScheduledMeeting,
 )

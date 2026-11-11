@@ -607,7 +607,7 @@ class DraftManager:
         )
         return result.scalars().first() is not None
 
-    async def approve_draft(self, draft_id: str) -> bool:
+    async def approve_draft(self, draft_id: str, provider: Optional[str] = None) -> bool:
         """Approve a draft and trigger send logic."""
         result = await self.db.execute(select(OutreachDraft).where(OutreachDraft.id == draft_id))
         draft = result.scalar_one_or_none()
@@ -653,6 +653,12 @@ class DraftManager:
         provider_id = None
         success = False
 
+        # 0. Client compose dispatch (Outlook or Gmail web/desktop compose deeplink opened by sales rep)
+        if provider in {"outlook", "gmail", "client"}:
+            provider_id = f"client_{provider}_deeplink"
+            success = True
+            logger.info("A3: Outbound email initiated via client compose deeplink", provider=provider, to=contact.email)
+
         # Identify assigned sales rep
         rep_user_id = getattr(draft, "user_id", None) or (contact.user_id if contact else None)
         user = None
@@ -668,7 +674,7 @@ class DraftManager:
         )
 
         # Priority 1 (Production Company Mailbox): Microsoft 365 / Microsoft Graph (POST /me/sendMail)
-        if rep_user_id and user:
+        if not success and rep_user_id and user:
             from app.services.microsoft_graph_service import MicrosoftGraphService
             ms_svc = MicrosoftGraphService()
             ms_int_res = await self.db.execute(
@@ -707,7 +713,7 @@ class DraftManager:
                         )
                         success = False
 
-            elif is_production_user:
+            elif is_production_user and not provider:
                 # Production rep without connected Microsoft 365 mailbox MUST NOT fall back to personal Gmail
                 err_msg = f"Microsoft 365 mailbox is not connected for this sales representative ({user.email})."
                 logger.error("A3: Outreach blocked - production email requires Microsoft 365 connection", error=err_msg)

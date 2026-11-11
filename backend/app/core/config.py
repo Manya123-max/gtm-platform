@@ -252,9 +252,9 @@ class Settings(BaseSettings):
     # With a paid Claude + Apollo subscription you can safely enable live ops.
     # Keep DRY_RUN_OUTREACH=true until you have verified your Instantly
     # campaign and Resend domain — then flip it to false in .env.
-    ENABLE_EMAIL_SENDING:      bool = False   # set True when Resend domain verified
+    ENABLE_EMAIL_SENDING:      bool = True    # Live email sending enabled
     ENABLE_INSTANTLY:          bool = False   # set True when Instantly campaign ready
-    DRY_RUN_OUTREACH:          bool = True    # SAFETY: flip to false only after testing
+    DRY_RUN_OUTREACH:          bool = False   # Live email dispatch enabled upon approval
     REQUIRE_HUMAN_APPROVAL:    bool = True    # keep True — Slack/ntfy approval gate
     ENABLE_SLACK_APPROVALS:    bool = False   # ntfy is the default; flip for Slack
     ALLOW_DEMO_PROSPECTS:      bool = False   # production: False

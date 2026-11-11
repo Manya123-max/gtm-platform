@@ -126,8 +126,9 @@ export default function Outreach() {
 
   // Approve / Send Mutation
   const approveMut = useMutation({
-    mutationFn: approveOutreachDraft,
-    onSuccess: (data, draftId) => {
+    mutationFn: (variables) => approveOutreachDraft(variables),
+    onSuccess: (data, variables) => {
+      const draftId = typeof variables === 'object' && variables !== null ? variables.id : variables
       qc.invalidateQueries({ queryKey: ['outreach-drafts'] })
       setSelectedDraft(prev => (prev && prev.id === draftId ? { ...prev, approval_state: 'approved', status: 'sent' } : prev))
       setShowSendViaDropdown(false)
@@ -186,8 +187,8 @@ export default function Outreach() {
       window.open(outlookUrl, '_blank', 'noopener,noreferrer')
     }
 
-    // Call approve in backend
-    approveMut.mutate(selectedDraft.id)
+    // Call approve in backend with provider info
+    approveMut.mutate({ id: selectedDraft.id, provider })
     setShowSendViaDropdown(false)
   }
 

@@ -93,7 +93,12 @@ export const fetchContent = (params = {}) => unwrap(api.get('/content', { params
 export const fetchSignalRegistry = () => unwrap(api.get('/signals/registry'))
 export const fetchDrafts = (user_input_id) => unwrap(api.get('/outreach/drafts', { params: user_input_id ? { user_input_id } : {} }))
 export const fetchOutreachDrafts = (user_input_id) => unwrap(api.get('/drafts', { params: user_input_id ? { user_input_id } : {} }))
-export const approveOutreachDraft = id => unwrap(api.post(`/drafts/${id}/approve`))
+export const approveOutreachDraft = (idOrObj, payload) => {
+  if (typeof idOrObj === 'object' && idOrObj !== null) {
+    return unwrap(api.post(`/drafts/${idOrObj.id}/approve`, { provider: idOrObj.provider, ...(payload || {}) }))
+  }
+  return unwrap(api.post(`/drafts/${idOrObj}/approve`, payload || {}))
+}
 export const rejectOutreachDraft = id => unwrap(api.post(`/drafts/${id}/reject`))
 export const editOutreachDraft = (id, subject, body) => unwrap(api.post(`/drafts/${id}/edit`, { subject, body }))
 export const previewOutreachDraft = id => unwrap(api.get(`/drafts/${id}/preview`))

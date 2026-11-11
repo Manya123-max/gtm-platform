@@ -5,7 +5,7 @@ from datetime import datetime, timedelta
 from typing import List, Optional, Dict, Any, cast, Union
 from uuid import UUID
 
-from fastapi import APIRouter, Depends, HTTPException, Query, BackgroundTasks
+from fastapi import APIRouter, Depends, HTTPException, Query, BackgroundTasks, Body
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select, and_, or_, func, desc, asc, String as SAString
 from sqlalchemy.orm import selectinload
@@ -2040,7 +2040,12 @@ async def preview_draft(draft_id: str, current_user=Depends(get_current_user), d
     }
 
 @router.post("/drafts/{draft_id}/approve")
-async def approve_draft_route(draft_id: str, current_user=Depends(get_current_user), db: AsyncSession = Depends(get_db)):
+async def approve_draft_route(
+    draft_id: str,
+    payload: Optional[Dict[str, Any]] = Body(None),
+    current_user=Depends(get_current_user),
+    db: AsyncSession = Depends(get_db)
+):
     from app.agents.a3_outreach import DraftManager
     draft_manager = DraftManager(db)
     # Fetch draft details (ownership enforced)
@@ -2050,8 +2055,9 @@ async def approve_draft_route(draft_id: str, current_user=Depends(get_current_us
         
     contact_id = draft.contact_id
     
-    # Perform approval and dispatch
-    res = await draft_manager.approve_draft(draft_id)
+    # Perform approval and dispatch (supporting client deeplink provider or server dispatch)
+    prov = (payload or {}).get("provider") if isinstance(payload, dict) else None
+    res = await draft_manager.approve_draft(draft_id, provider=prov)
     success = res.get("success", False) if isinstance(res, dict) else bool(res)
     error_msg = res.get("error") if isinstance(res, dict) else None
 

@@ -145,6 +145,9 @@ class ApolloQueryBuilder:
             if mapped_stages:
                 payload["organization_latest_funding_stage_cd"] = mapped_stages
 
+        if norm_cfg.organization_ids:
+            payload["organization_ids"] = list(norm_cfg.organization_ids)[:25]
+
         if norm_cfg.lookalike_organization_ids:
             payload["lookalike_organization_ids"] = list(norm_cfg.lookalike_organization_ids)[:5]
 

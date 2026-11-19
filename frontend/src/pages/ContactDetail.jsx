@@ -166,8 +166,6 @@ export default function ContactDetail() {
     `${contact.company || 'The account'} has recent activity associated with ${sigTypeLabel}. These events indicate business activity relevant to go-to-market operations.`
   )
 
-
-
   return (
     <div className="w-full space-y-6 pb-16 selection:bg-[#5B4EFF]/15">
       

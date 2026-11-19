@@ -1,8 +1,9 @@
-import React, { useState } from 'react';
-import { useNavigate } from 'react-router-dom';
+import React, { useState, useEffect, useRef } from 'react';
+import { useNavigate, useLocation } from 'react-router-dom';
 import { useQueryClient } from '@tanstack/react-query';
+import { History as HistoryIcon, RotateCcw } from 'lucide-react';
 import { useSession } from '../context/SessionContext';
-import { submitInput } from '../api';
+import { submitInput, fetchSessionDetails } from '../api';
 import SearchableMultiSelect from './SearchableMultiSelect';
 import { APOLLO_SIGNALS } from '../constants/apolloSignals';
 
@@ -26,8 +27,12 @@ const FUNDING_OPTIONS = [
 
 function InputForm() {
     const navigate = useNavigate();
+    const location = useLocation();
     const queryClient = useQueryClient();
-    const { setActiveSessionId } = useSession();
+    const { activeSessionId, setActiveSessionId, setActiveSession, activeSessionData } = useSession();
+
+    const [loadedFromSession, setLoadedFromSession] = useState(null);
+    const dismissedRef = useRef(false);
 
     const [formData, setFormData] = useState({
         ourCompanyName: '',
@@ -44,6 +49,85 @@ function InputForm() {
 
     const [status, setStatus] = useState({ type: '', message: '' });
     const [submitting, setSubmitting] = useState(false);
+
+    const populateFormFromItem = (item) => {
+        if (!item) return;
+
+        // Parse comma-separated signals into an array for SearchableMultiSelect
+        let parsedSignals = [];
+        if (Array.isArray(item.signals)) {
+            parsedSignals = item.signals;
+        } else if (typeof item.signals === 'string' && item.signals.trim()) {
+            parsedSignals = item.signals.split(',').map(s => s.trim()).filter(Boolean);
+        }
+
+        // Parse comma-separated funding stages into an array
+        let parsedFunding = [];
+        if (Array.isArray(item.funding_stages)) {
+            parsedFunding = item.funding_stages;
+        } else if (typeof item.funding_stages === 'string' && item.funding_stages.trim()) {
+            parsedFunding = item.funding_stages.split(',').map(s => s.trim()).filter(Boolean);
+        }
+
+        setFormData({
+            ourCompanyName: item.our_company_name || '',
+            ourServices: item.our_services || '',
+            targetLocation: item.target_location || '',
+            targetIndustries: item.target_industries || '',
+            targetCompanySize: item.target_company_size || '',
+            targetKeywords: item.target_keywords || '',
+            companyLookalike: item.company_lookalike || '',
+            signals: parsedSignals,
+            fundingStages: parsedFunding,
+            targetJobTitles: item.target_job_titles || '',
+        });
+
+        setLoadedFromSession({
+            id: item.id,
+            companyName: item.our_company_name,
+        });
+        dismissedRef.current = false;
+    };
+
+    // Auto-populate when navigating from History or when active session is present
+    useEffect(() => {
+        if (location.state?.loadHistoryItem) {
+            populateFormFromItem(location.state.loadHistoryItem);
+        } else if (activeSessionData && !loadedFromSession && !dismissedRef.current) {
+            populateFormFromItem(activeSessionData);
+        } else if (activeSessionId && !loadedFromSession && !dismissedRef.current) {
+            fetchSessionDetails(activeSessionId)
+                .then(data => {
+                    if (data && !dismissedRef.current) {
+                        populateFormFromItem(data);
+                    }
+                })
+                .catch(err => {
+                    console.warn('Could not auto-load active session details into form:', err);
+                });
+        }
+    }, [location.state, activeSessionData, activeSessionId]);
+
+    const handleResetForm = () => {
+        dismissedRef.current = true;
+        setLoadedFromSession(null);
+        setFormData({
+            ourCompanyName: '',
+            ourServices: '',
+            targetLocation: '',
+            targetIndustries: '',
+            targetCompanySize: '',
+            targetKeywords: '',
+            companyLookalike: '',
+            signals: [],
+            fundingStages: [],
+            targetJobTitles: '',
+        });
+        setStatus({
+            type: 'info',
+            message: 'Form cleared to blank. You can define a brand new search.',
+        });
+    };
 
     const handleChange = (e) => {
         const { name, value } = e.target;
@@ -90,14 +174,23 @@ function InputForm() {
             signals: (formData.signals || []).join(', '),
             funding_stages: (formData.fundingStages || []).join(', '),
             target_job_titles: formData.targetJobTitles.trim(),
+            user_input_id: loadedFromSession?.id || null,
         };
 
         try {
             const data = await submitInput(payload);
             console.log('Input saved successfully:', data);
 
-            if (data?.user_input_id && setActiveSessionId) {
-                setActiveSessionId(data.user_input_id);
+            if (data?.user_input_id) {
+                if (setActiveSession) {
+                    setActiveSession({
+                        id: data.user_input_id,
+                        our_company_name: payload.our_company_name,
+                        ...payload,
+                    });
+                } else if (setActiveSessionId) {
+                    setActiveSessionId(data.user_input_id);
+                }
             }
 
             // Invalidate queries so dependent pages refresh immediately
@@ -109,7 +202,9 @@ function InputForm() {
 
             setStatus({
                 type: 'success',
-                message: 'Offering and ICP saved! Initializing GTM pipeline...',
+                message: loadedFromSession?.id
+                    ? 'Search criteria updated! Discovering and appending new prospects...'
+                    : 'Offering and ICP saved! Initializing GTM pipeline...',
             });
 
             setTimeout(() => {
@@ -141,12 +236,50 @@ function InputForm() {
             {/* ── Main Form Card ── */}
             <div className="bg-white rounded-3xl border border-gray-100 shadow-[0_2px_16px_rgba(30,27,75,0.03)] p-6 sm:p-10">
                 <form onSubmit={handleSubmit} className="space-y-5 sm:space-y-6">
+                    {/* Loaded from Past Search History Banner */}
+                    {loadedFromSession && (
+                        <div className="bg-[#EEF2FF] border border-[#C7D2FE] rounded-2xl p-4 flex flex-col sm:flex-row sm:items-center sm:justify-between gap-3 text-xs shadow-2xs">
+                            <div className="flex items-center gap-2.5">
+                                <span className="p-1.5 rounded-lg bg-indigo-600 text-white flex items-center justify-center shadow-xs shrink-0">
+                                    <HistoryIcon size={14} />
+                                </span>
+                                <div>
+                                    <div className="flex items-center gap-2 flex-wrap">
+                                        <span className="font-semibold text-[#312E81]">
+                                            Editing Past Search
+                                        </span>
+                                        {loadedFromSession.companyName && (
+                                            <span className="bg-indigo-100 text-indigo-700 px-2 py-0.5 rounded-md font-medium text-[11px]">
+                                                {loadedFromSession.companyName}
+                                            </span>
+                                        )}
+                                    </div>
+                                    <p className="text-[11px] text-gray-500 font-normal mt-0.5">
+                                        Past search criteria loaded. You can tweak any values and submit to re-run research.
+                                    </p>
+                                </div>
+                            </div>
+
+                            <button
+                                type="button"
+                                onClick={handleResetForm}
+                                className="self-start sm:self-center shrink-0 flex items-center gap-1.5 px-3 py-1.5 rounded-xl border border-gray-300 bg-white hover:bg-gray-50 text-gray-700 text-xs font-medium transition-colors shadow-2xs cursor-pointer"
+                                title="Clear all fields to start an empty search"
+                            >
+                                <RotateCcw size={12} className="text-gray-500" />
+                                <span>Clear to Blank Form</span>
+                            </button>
+                        </div>
+                    )}
+
                     {/* Status Alert */}
                     {status.message && (
                         <div
                             className={`p-4 rounded-xl text-xs font-semibold border transition-all ${
                                 status.type === 'success'
                                     ? 'bg-emerald-50 text-emerald-700 border-emerald-200/80'
+                                    : status.type === 'info'
+                                    ? 'bg-blue-50 text-blue-700 border-blue-200/80'
                                     : 'bg-red-50 text-red-700 border-red-200/80'
                             }`}
                         >
@@ -324,10 +457,10 @@ function InputForm() {
                             {submitting ? (
                                 <>
                                     <div className="w-4 h-4 border-2 border-white/30 border-t-white rounded-full animate-spin" />
-                                    <span>Starting GTM Pipeline...</span>
+                                    <span>{loadedFromSession?.id ? 'Updating Search...' : 'Starting GTM Pipeline...'}</span>
                                 </>
                             ) : (
-                                <span>Start GTM Pipeline</span>
+                                <span>{loadedFromSession?.id ? 'Update & Re-run Search' : 'Start GTM Pipeline'}</span>
                             )}
                         </button>
                     </div>

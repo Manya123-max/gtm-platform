@@ -321,6 +321,15 @@ async def get_session_details(session_id: int, current_user=Depends(get_current_
         "id": row.id,
         "our_company_name": row.our_company_name,
         "our_services": row.our_services,
+        "target_location": row.target_location,
+        "target_industries": row.target_industries or "",
+        "target_company_size": row.target_company_size,
+        "target_keywords": row.target_keywords or "",
+        "company_lookalike": getattr(row, "company_lookalike", None) or "",
+        "signals": getattr(row, "signals", None) or "",
+        "funding_stages": getattr(row, "funding_stages", None) or "",
+        "target_job_titles": row.target_job_titles,
+        "created_at": row.created_at.isoformat() if getattr(row, "created_at", None) else None,
     }
 
 
@@ -1553,11 +1562,18 @@ class AgentScheduleRequest(BaseModel):
     agent: str
     enabled: bool
     cron: Optional[str] = None
+    scheduled_at: Optional[str] = None
+    timezone: Optional[str] = "Asia/Kolkata"
+    schedule_type: Optional[str] = "once"
 
 SCHEDULABLE_AGENT_TASKS = {
-    "A1": ("app.workers.scheduler_tasks.run_prospect_agent", settings.PROSPECT_AGENT_SCHEDULE),
-    "A2": ("app.workers.scheduler_tasks.run_signal_agent", settings.SIGNAL_AGENT_SCHEDULE),
-    "A6": ("app.workers.scheduler_tasks.run_content_agent", settings.CONTENT_AGENT_SCHEDULE),
+    "A1": ("app.workers.scheduler_tasks.run_prospect_agent", settings.PROSPECT_AGENT_SCHEDULE or "0 8 * * 1"),
+    "A2": ("app.workers.scheduler_tasks.run_signal_agent", settings.SIGNAL_AGENT_SCHEDULE or "0 * * * *"),
+    "A3": ("app.workers.scheduler_tasks.run_outreach_agent", "*/30 * * * *"),
+    "A4": ("app.workers.agent_tasks.run_a4_test", "0 9 * * 1-5"),
+    "A5": ("app.workers.scheduler_tasks.run_deal_scan", "0 18 * * 1-5"),
+    "A6": ("app.workers.scheduler_tasks.run_content_agent", settings.CONTENT_AGENT_SCHEDULE or "0 9 * * 2"),
+    "A7": ("app.workers.scheduler_tasks.run_revenue_agent", "0 2 * * *"),
 }
 
 
@@ -1572,6 +1588,8 @@ async def _ensure_agent_schedule_rows(db: AsyncSession) -> None:
                 cron=default_cron,
                 task_name=task_name,
                 last_run_at=datetime.utcnow(),
+                timezone="Asia/Kolkata",
+                schedule_type="cron",
             ))
             changed = True
     if changed:
@@ -1587,7 +1605,10 @@ async def get_agent_schedules(db: AsyncSession = Depends(get_db)):
         row.agent_id: {
             "scheduled": row.enabled,
             "cron": row.cron,
-            "last_run_at": row.last_run_at,
+            "last_run_at": row.last_run_at.isoformat() if row.last_run_at else None,
+            "scheduled_at": row.scheduled_at.isoformat() if row.scheduled_at else None,
+            "timezone": getattr(row, "timezone", "Asia/Kolkata") or "Asia/Kolkata",
+            "schedule_type": getattr(row, "schedule_type", "once") or "once",
         }
         for row in rows
     }
@@ -1608,13 +1629,33 @@ async def update_agent_schedule(body: AgentScheduleRequest, db: AsyncSession = D
             enabled=False,
             cron=default_cron,
             task_name=task_name,
+            timezone="Asia/Kolkata",
+            schedule_type="once",
         )
         db.add(row)
 
     row.enabled = body.enabled
     row.cron = body.cron or row.cron or default_cron
     row.task_name = task_name
+    row.timezone = body.timezone or "Asia/Kolkata"
+    row.schedule_type = body.schedule_type or "once"
     row.updated_at = datetime.utcnow()
+
+    # Parse scheduled_at if provided
+    if body.scheduled_at:
+        try:
+            from datetime import timezone as dt_tz
+            clean_str = body.scheduled_at.replace("Z", "+00:00")
+            dt_val = datetime.fromisoformat(clean_str)
+            if dt_val.tzinfo is not None:
+                dt_val = dt_val.astimezone(dt_tz.utc).replace(tzinfo=None)
+            row.scheduled_at = dt_val
+        except Exception as exc:
+            logger.warning("Invalid scheduled_at format", raw=body.scheduled_at, error=str(exc))
+            row.scheduled_at = None
+    else:
+        row.scheduled_at = None
+
     if body.enabled and row.last_run_at is None:
         row.last_run_at = datetime.utcnow()
     await db.commit()
@@ -1623,6 +1664,9 @@ async def update_agent_schedule(body: AgentScheduleRequest, db: AsyncSession = D
         "agent": agent_id,
         "scheduled": row.enabled,
         "cron": row.cron,
+        "scheduled_at": row.scheduled_at.isoformat() if row.scheduled_at else None,
+        "timezone": row.timezone,
+        "schedule_type": row.schedule_type,
         "persisted": True,
     }
 
@@ -1653,6 +1697,7 @@ def _expand_size_range(size_str: str) -> list:
 
 
 class InputData(BaseModel):
+    user_input_id:       Optional[int] = None                     # optional: if re-running/updating an existing search
     our_company_name:    str                                      # vendor's company name
     our_services:        str                                      # what we sell — personalization context only
     target_location:     str                                      # where prospect companies are based
@@ -1706,6 +1751,37 @@ async def get_input_history(current_user=Depends(get_current_user), db: AsyncSes
         }
         for r in rows
     ]
+
+
+@router.get("/input-history/{input_id}")
+async def get_single_input_history(
+    input_id: int,
+    current_user=Depends(get_current_user),
+    db: AsyncSession = Depends(get_db)
+):
+    """Return a single search history item by ID belonging to the authenticated user."""
+    from app.models.models import UserInput
+    from sqlalchemy import select
+    result = await db.execute(select(UserInput).where(UserInput.id == input_id))
+    row = result.scalar_one_or_none()
+    if not row:
+        raise HTTPException(status_code=404, detail=f"Search history #{input_id} not found")
+    if current_user is not None and row.user_id is not None and row.user_id != current_user.id:
+        raise HTTPException(status_code=403, detail="You are not authorized to view another user's search history")
+    return {
+        "id":                  row.id,
+        "our_company_name":    row.our_company_name,
+        "our_services":        row.our_services,
+        "target_location":     row.target_location,
+        "target_industries":   row.target_industries or "",
+        "target_company_size": row.target_company_size,
+        "target_keywords":     row.target_keywords or "",
+        "company_lookalike":   getattr(row, "company_lookalike", None) or "",
+        "signals":             getattr(row, "signals", None) or "",
+        "funding_stages":      getattr(row, "funding_stages", None) or "",
+        "target_job_titles":   row.target_job_titles,
+        "created_at":          row.created_at.isoformat() if getattr(row, "created_at", None) else None,
+    }
 
 
 @router.delete("/input-history/{input_id}")
@@ -1810,22 +1886,44 @@ async def submit_input(data: InputData, current_user=Depends(get_current_user), 
     from app.workers.orchestrator_tasks import build_pipeline_chain
     from app.services.icp_normalizer import normalize_icp_input
 
-    record = UserInput(
-        our_company_name=    data.our_company_name,
-        our_services=        data.our_services,
-        target_location=     data.target_location,
-        target_industries=   data.target_industries or None,
-        target_company_size= data.target_company_size,
-        target_keywords=     data.target_keywords or None,
-        company_lookalike=   data.company_lookalike or None,
-        signals=             data.signals or None,
-        funding_stages=      data.funding_stages or None,
-        target_job_titles=   data.target_job_titles,
-        user_id=             current_user.id if current_user is not None else None,
-    )
-    db.add(record)
-    await db.commit()
-    await db.refresh(record)
+    record = None
+    if data.user_input_id:
+        record = await db.get(UserInput, data.user_input_id)
+        if record:
+            if current_user is not None and record.user_id is not None and record.user_id != current_user.id:
+                raise HTTPException(status_code=403, detail="You are not authorized to update this search history")
+            record.our_company_name    = data.our_company_name
+            record.our_services        = data.our_services
+            record.target_location     = data.target_location
+            record.target_industries   = data.target_industries or None
+            record.target_company_size = data.target_company_size
+            record.target_keywords     = data.target_keywords or None
+            record.company_lookalike   = data.company_lookalike or None
+            record.signals             = data.signals or None
+            record.funding_stages      = data.funding_stages or None
+            record.target_job_titles   = data.target_job_titles
+            if record.user_id is None and current_user is not None:
+                record.user_id = current_user.id
+            await db.commit()
+            await db.refresh(record)
+
+    if record is None:
+        record = UserInput(
+            our_company_name=    data.our_company_name,
+            our_services=        data.our_services,
+            target_location=     data.target_location,
+            target_industries=   data.target_industries or None,
+            target_company_size= data.target_company_size,
+            target_keywords=     data.target_keywords or None,
+            company_lookalike=   data.company_lookalike or None,
+            signals=             data.signals or None,
+            funding_stages=      data.funding_stages or None,
+            target_job_titles=   data.target_job_titles,
+            user_id=             current_user.id if current_user is not None else None,
+        )
+        db.add(record)
+        await db.commit()
+        await db.refresh(record)
 
     agent_ids = get_enabled_pipeline()
     if "A4" in agent_ids:

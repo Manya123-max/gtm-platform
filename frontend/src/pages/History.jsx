@@ -13,6 +13,7 @@ import {
   AlertTriangle,
   X,
   History as HistoryIcon,
+  Edit2,
 } from 'lucide-react'
 import { fetchInputHistory, deleteInputHistory, deleteAllInputHistory } from '../api'
 import { useSession } from '../context/SessionContext'
@@ -22,7 +23,7 @@ export default function History() {
   const navigate = useNavigate()
   const { user } = useAuth()
   const queryClient = useQueryClient()
-  const { activeSessionId, setActiveSessionId } = useSession()
+  const { activeSessionId, setActiveSessionId, setActiveSession } = useSession()
 
   // Search & Filter States
   const [searchQuery, setSearchQuery] = useState('')
@@ -141,19 +142,14 @@ export default function History() {
     return filteredAndSortedHistory.slice(start, start + pageSize)
   }, [filteredAndSortedHistory, currentPage, pageSize])
 
-  const handleViewSearch = (id) => {
-    setActiveSessionId(id)
+  const handleEditAndResearch = (item) => {
+    setActiveSession(item)
+    navigate('/input', { state: { loadHistoryItem: item } })
   }
 
-  // Active check matching screenshot (Cards #5 and #4 or activeSessionId)
+  // Active check strictly matching the authenticated user's active session
   const isItemActive = (item) => {
-    if (activeSessionId) {
-      if (activeSessionId === 5) {
-        return item.id === 5 || item.id === 4
-      }
-      return item.id === activeSessionId
-    }
-    return item.id === 5 || item.id === 4
+    return Boolean(activeSessionId && item.id === activeSessionId)
   }
 
   return (
@@ -304,15 +300,17 @@ export default function History() {
             return (
               <div
                 key={item.id}
-                className="bg-white rounded-2xl border border-gray-200/90 hover:border-indigo-200 shadow-2xs p-5 transition-all"
+                onClick={() => handleEditAndResearch(item)}
+                className="bg-white rounded-2xl border border-gray-200/90 hover:border-indigo-300 hover:shadow-sm shadow-2xs p-5 transition-all cursor-pointer group"
+                title="Click anywhere to load this search criteria into the Input form"
               >
                 {/* Card Top Row: Company Icon + Name + Size pill + Badges/Actions */}
                 <div className="flex items-center justify-between mb-4">
                   <div className="flex items-center gap-3">
-                    <div className="w-8 h-8 rounded-lg bg-[#4F46E5] flex items-center justify-center text-white shrink-0 shadow-2xs">
+                    <div className="w-8 h-8 rounded-lg bg-[#4F46E5] flex items-center justify-center text-white shrink-0 shadow-2xs group-hover:scale-105 transition-transform">
                       <Building2 size={16} />
                     </div>
-                    <h3 className="font-bold text-gray-900 text-base leading-none">
+                    <h3 className="font-bold text-gray-900 text-base leading-none group-hover:text-indigo-600 transition-colors">
                       {item.our_company_name}
                     </h3>
                     {item.target_company_size && (
@@ -323,19 +321,28 @@ export default function History() {
                   </div>
 
                   <div className="flex items-center gap-2">
-                    {/* Active badge vs View Search button */}
-                    {active ? (
+                    {/* Active badge & Edit/Load Search button */}
+                    {active && (
                       <span className="bg-[#ECFDF5] text-[#059669] border border-[#A7F3D0] text-[11px] font-semibold px-2.5 py-0.5 rounded-full inline-flex items-center">
                         Active
                       </span>
-                    ) : (
-                      <button
-                        onClick={() => handleViewSearch(item.id)}
-                        className="text-[#2563EB] bg-[#EFF6FF] hover:bg-blue-100 border border-[#BFDBFE] text-[11px] font-medium px-3 py-0.5 rounded-full transition-colors cursor-pointer"
-                      >
-                        View Search
-                      </button>
                     )}
+
+                    <button
+                      onClick={(e) => {
+                        e.stopPropagation()
+                        handleEditAndResearch(item)
+                      }}
+                      className={`text-[11px] font-medium px-3 py-0.5 rounded-full transition-colors cursor-pointer inline-flex items-center gap-1.5 ${
+                        active
+                          ? 'text-[#4F46E5] bg-[#EEF2FF] hover:bg-indigo-100 border border-[#C7D2FE]'
+                          : 'text-[#2563EB] bg-[#EFF6FF] hover:bg-blue-100 border border-[#BFDBFE]'
+                      }`}
+                      title="Load this search into the input form to edit and re-search"
+                    >
+                      <Edit2 size={11} />
+                      <span>{active ? 'Edit & Re-search' : 'View & Edit Search'}</span>
+                    </button>
 
                     {/* ID Pill Badge */}
                     <span className="border border-gray-200 bg-white text-gray-500 text-[11px] font-medium px-2 py-0.5 rounded-md">

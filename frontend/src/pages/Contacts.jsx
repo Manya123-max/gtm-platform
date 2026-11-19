@@ -86,6 +86,7 @@ export default function Contacts() {
       const res = await runOrchestratorWorkflow({
         workflowName: 'manual_full_gtm',
         agentIds: DEFAULT_PIPELINE_AGENTS,
+        payload: activeSessionId != null ? { user_input_id: activeSessionId } : {},
       })
       navigate('/agents', { state: { runId: res?.workflow?.id || res?.id } })
     } catch (err) {

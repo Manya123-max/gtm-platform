@@ -19,7 +19,7 @@ from typing import Any, Dict, List, Optional, Tuple
 
 import httpx
 import structlog
-from sqlalchemy import select
+from sqlalchemy import select, or_
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.config import settings
@@ -52,51 +52,52 @@ class ProspectAgent:
         seed_companies = CompanyLookalikeService.normalize_reference_companies(raw_lookalikes)
 
         use_apollo = icp_config.get("use_apollo")
-        # Step 1: Discover prospects matching standard ICP criteria via live Apollo API
-        if use_apollo is False or not settings.APOLLO_API_KEY:
-            logger.warning("A1: Live Apollo API discovery unavailable - missing or disabled API key")
-            raw_contacts = []
-            provider_meta = {
-                "provider": "apollo",
-                "method": "people_search_bulk_match",
-                "page": None,
-                "reason": "missing_apollo_api_key",
-                "total_entries": 0,
-                "raw_search_count": 0,
-            }
-        else:
-            raw_contacts, provider_meta = await self._fetch_from_apollo(icp_config)
-            # Live discovery only: never fall back to CSV or seeded offline prospects
+        has_apollo = bool(settings.APOLLO_API_KEY and use_apollo is not False)
 
-        # Step 2: Discover prospects via Company Look-alike if reference companies provided
+        # ── Two-Stage Lookalike Workflow vs Standard ICP Workflow ──
         if seed_companies:
-            logger.info("A1: Running Company Look-alike discovery", seeds=seed_companies)
-            lookalike_contacts = []
-            lookalike_meta = {}
+            logger.info("A1: Company Look-alike mode active — discovering similar organizations first", seeds=seed_companies)
+            if not has_apollo:
+                logger.warning("A1 Lookalike: Live Apollo API unavailable - falling back to offline lookalike store")
+                raw_contacts, provider_meta = await self._fetch_lookalikes_from_offline(icp_config, seed_companies)
+            else:
+                raw_contacts, provider_meta = await self._fetch_lookalikes_from_apollo(icp_config, seed_companies)
 
-            if use_apollo is False or not settings.APOLLO_API_KEY:
-                logger.warning("A1 Lookalike: Live Apollo API unavailable for lookalikes")
-                lookalike_meta = {
+            # If lookalike search returned fewer than threshold candidates, supplement with standard ICP search
+            threshold_min = min(int(icp_config.get("enrich_limit", 10)), 5)
+            if len(raw_contacts) < threshold_min and has_apollo:
+                logger.info(
+                    "A1 Lookalike: Candidate count below threshold, supplementing with standard ICP candidates",
+                    lookalike_count=len(raw_contacts),
+                    threshold_min=threshold_min,
+                )
+                std_contacts, std_meta = await self._fetch_from_apollo(icp_config)
+                raw_contacts = CompanyLookalikeService.combine_and_deduplicate_prospects(
+                    icp_prospects=std_contacts,
+                    lookalike_prospects=raw_contacts,
+                    seed_company_names=seed_companies,
+                    seed_org_ids=provider_meta.get("resolved_org_ids", []),
+                    seed_domains=provider_meta.get("seed_domains", []),
+                )
+                if std_contacts:
+                    provider_meta["supplemented_with_icp"] = True
+                    provider_meta["supplemented_count"] = len(std_contacts)
+        else:
+            # Standard ICP Discovery (no lookalikes specified)
+            logger.info("A1: Standard ICP discovery (no lookalikes specified)")
+            if not has_apollo:
+                logger.warning("A1: Live Apollo API discovery unavailable - missing or disabled API key")
+                raw_contacts = []
+                provider_meta = {
                     "provider": "apollo",
-                    "method": "lookalike_people_search",
+                    "method": "people_search_bulk_match",
+                    "page": None,
                     "reason": "missing_apollo_api_key",
-                    "seed_company_names": seed_companies,
+                    "total_entries": 0,
+                    "raw_search_count": 0,
                 }
             else:
-                lookalike_contacts, lookalike_meta = await self._fetch_lookalikes_from_apollo(icp_config, seed_companies)
-                # Live discovery only: never fall back to CSV or seeded offline prospects
-
-            # Step 3: Combine and deduplicate candidates from both discovery paths
-            raw_contacts = CompanyLookalikeService.combine_and_deduplicate_prospects(
-                icp_prospects=raw_contacts,
-                lookalike_prospects=lookalike_contacts,
-                seed_company_names=lookalike_meta.get("seed_company_names", seed_companies),
-                seed_org_ids=lookalike_meta.get("resolved_org_ids", []),
-                seed_domains=lookalike_meta.get("seed_domains", []),
-            )
-            provider_meta["lookalike_meta"] = lookalike_meta
-            if lookalike_contacts and provider_meta.get("method"):
-                provider_meta["method"] = f"{provider_meta['method']}_with_lookalikes"
+                raw_contacts, provider_meta = await self._fetch_from_apollo(icp_config)
 
         if icp_config.get("signals"):
             from app.services.apollo_signals_service import ApolloSignalsService
@@ -113,10 +114,12 @@ class ProspectAgent:
                     unsupported_signals=[u["signal"] for u in sig_diag["unsupported_signals"]],
                 )
 
+        meta_to_log = dict(provider_meta)
+        meta_to_log.pop("count", None)
         logger.info(
             "Prospect fetch complete",
             count=len(raw_contacts),
-            **provider_meta,
+            **meta_to_log,
         )
 
         scored = await self._score_contacts(raw_contacts)
@@ -398,6 +401,16 @@ class ProspectAgent:
         from app.services.company_lookalike_service import CompanyLookalikeService
         csv_candidates = self._load_csv_candidates()
         enrich_limit = int(icp_config.get("enrich_limit", getattr(settings, "APOLLO_ENRICH_LIMIT", 10)))
+
+        # Stage 1: Discover similar organizations offline
+        org_disc = CompanyLookalikeService.offline_discover_similar_organizations(
+            seed_companies=seed_companies,
+            icp_config=icp_config,
+            csv_candidates=csv_candidates,
+        )
+        discovered_names = [o["name"] for o in org_disc.get("discovered_organizations", [])]
+
+        # Stage 2: Discover prospects from those similar organizations
         lookalikes = CompanyLookalikeService.offline_lookalike_discovery(
             seed_companies=seed_companies,
             icp_config=icp_config,
@@ -409,6 +422,7 @@ class ProspectAgent:
             "method": "offline_lookalike_store",
             "seed_company_names": seed_companies,
             "resolved_org_ids": [],
+            "discovered_organizations": discovered_names,
             "count": len(lookalikes),
             "reason": "offline_lookalikes_found" if lookalikes else "offline_lookalikes_empty",
         }
@@ -440,25 +454,36 @@ class ProspectAgent:
 
         try:
             async with httpx.AsyncClient(timeout=30) as client:
-                # 1. Resolve seed reference companies
-                resolution = await CompanyLookalikeService.resolve_reference_companies(
-                    client, headers, seed_companies
+                # ── STAGE 1: Discover Similar Organizations First ──
+                discovery = await CompanyLookalikeService.discover_similar_organizations(
+                    client=client,
+                    headers=headers,
+                    seed_companies=seed_companies,
+                    icp_config=icp_config,
+                    target_count=15,
                 )
+                discovered_orgs = discovery.get("discovered_organizations", [])
+                discovered_org_ids = discovery.get("organization_ids", [])
+                resolution = discovery.get("seed_resolution", {})
                 resolved_org_ids = resolution.get("resolved_org_ids", [])
-                seed_company_names = resolution.get("seed_company_names", [])
+                seed_company_names = resolution.get("seed_company_names", seed_companies)
 
-                if not resolved_org_ids:
-                    logger.warning("A1 Lookalike: No seed companies could be resolved", resolution=resolution)
+                if not discovered_org_ids and not resolved_org_ids:
+                    logger.warning("A1 Lookalike: No seed or similar organizations could be resolved", resolution=resolution)
                     return [], {
                         "provider": "apollo",
                         "method": "lookalike_people_search",
-                        "reason": "no_seed_companies_resolved",
+                        "reason": "no_organizations_resolved",
+                        "discovered_organizations": [],
                         **resolution,
                     }
 
-                # 2. Build Apollo People Search payload with lookalike_organization_ids
+                # ── STAGE 2: Search Prospects Inside Discovered Similar Organizations ──
                 body = self._build_search_body(icp_config, page=1, per_page=100)
-                body["lookalike_organization_ids"] = resolved_org_ids[:5]
+                if discovered_org_ids:
+                    body["organization_ids"] = discovered_org_ids[:15]
+                if resolved_org_ids:
+                    body["lookalike_organization_ids"] = resolved_org_ids[:5]
 
                 search_resp = await client.post(
                     "https://api.apollo.io/api/v1/mixed_people/api_search",
@@ -474,6 +499,7 @@ class ProspectAgent:
                         "provider": "apollo",
                         "method": "lookalike_people_search",
                         "reason": "lookalike_search_returned_no_people",
+                        "discovered_organizations": [o["name"] for o in discovered_orgs],
                         **resolution,
                     }
 
@@ -497,6 +523,7 @@ class ProspectAgent:
                         "provider": "apollo",
                         "method": "lookalike_people_search",
                         "reason": "all_lookalike_candidates_already_in_db",
+                        "discovered_organizations": [o["name"] for o in discovered_orgs],
                         **resolution,
                     }
 
@@ -512,8 +539,16 @@ class ProspectAgent:
                         continue
 
                     contact["source"] = "apollo (lookalike)"
-                    contact["discovery_method"] = "lookalike"
+                    contact["discovery_method"] = "lookalike_organization"
                     contact["lookalike_seed_companies"] = list(seed_companies)
+
+                    # Match specific discovered similar organization
+                    contact_comp = (contact.get("company") or "").lower()
+                    for d_org in discovered_orgs:
+                        d_name = d_org.get("name", "").lower()
+                        if d_name in contact_comp or contact_comp in d_name:
+                            contact["matched_similar_company"] = d_org.get("name")
+                            break
 
                     # Org enrich if needed
                     if (
@@ -544,6 +579,7 @@ class ProspectAgent:
                     "method": "lookalike_people_search",
                     "count": len(contacts),
                     "reason": "lookalike_contacts_found" if contacts else "lookalike_bulk_match_no_emails",
+                    "discovered_organizations": [o["name"] for o in discovered_orgs],
                     **resolution,
                 }
 
@@ -1141,6 +1177,7 @@ class ProspectAgent:
             "updated_count": 0,
             "contact_ids": inserted_ids,
             "inserted_contact_ids": inserted_ids,
+            "user_input_id": user_input_id,
         }
 
     # ------------------------------------------------------------------

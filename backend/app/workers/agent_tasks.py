@@ -185,6 +185,30 @@ def dispatch_agent_schedules(config: Optional[Dict] = None):
             )
             schedules = result.scalars().all()
             for schedule in schedules:
+                # 1. One-time schedule at specific date/time (scheduled_at)
+                if getattr(schedule, "scheduled_at", None) is not None:
+                    if schedule.scheduled_at <= now:
+                        try:
+                            celery_app.send_task(schedule.task_name, queue="agents")
+                            schedule.last_run_at = now
+                            if getattr(schedule, "schedule_type", "once") == "once":
+                                schedule.enabled = False
+                                schedule.scheduled_at = None
+                            dispatched.append(schedule.agent_id)
+                            logger.info(
+                                "Dispatched one-time scheduled agent",
+                                agent_id=schedule.agent_id,
+                                task_name=schedule.task_name,
+                            )
+                        except Exception as exc:
+                            logger.error(
+                                "Failed to dispatch scheduled agent",
+                                agent_id=schedule.agent_id,
+                                error=str(exc),
+                            )
+                    continue
+
+                # 2. Recurring schedule via cron expression
                 base = schedule.last_run_at or now
                 try:
                     next_run = croniter(schedule.cron, base).get_next(datetime)

@@ -5,12 +5,17 @@ import { useAuth } from './AuthContext'
 const SessionContext = createContext({
   activeSessionId: null,
   setActiveSessionId: () => {},
+  setActiveSession: () => {},
+  activeSessionData: null,
+  setActiveSessionData: () => {},
+  ourCompanyName: '',
   isLoading: true,
 })
 
 export function SessionProvider({ children }) {
   const { user } = useAuth()
   const [activeSessionId, setActiveSessionIdState] = useState(null)
+  const [activeSessionData, setActiveSessionData] = useState(null)
   const [ourCompanyName, setOurCompanyName] = useState('')
   const [isLoading, setIsLoading] = useState(true)
 
@@ -18,6 +23,7 @@ export function SessionProvider({ children }) {
   useEffect(() => {
     if (!user) {
       setActiveSessionIdState(null)
+      setActiveSessionData(null)
       setOurCompanyName('')
       setIsLoading(false)
       return
@@ -28,7 +34,10 @@ export function SessionProvider({ children }) {
       .then(res => {
         setActiveSessionIdState(res.data.user_input_id ?? null)
       })
-      .catch(() => setActiveSessionIdState(null))
+      .catch(() => {
+        setActiveSessionIdState(null)
+        setActiveSessionData(null)
+      })
       .finally(() => setIsLoading(false))
   }, [user])
 
@@ -37,10 +46,15 @@ export function SessionProvider({ children }) {
     if (activeSessionId) {
       api.get(`/sessions/${activeSessionId}`)
         .then(res => {
-          setOurCompanyName(res.data.our_company_name || '')
+          setActiveSessionData(res.data || null)
+          setOurCompanyName(res.data?.our_company_name || '')
         })
-        .catch(() => setOurCompanyName(''))
+        .catch(() => {
+          setActiveSessionData(null)
+          setOurCompanyName('')
+        })
     } else {
+      setActiveSessionData(null)
       setOurCompanyName('')
     }
   }, [activeSessionId])
@@ -49,8 +63,26 @@ export function SessionProvider({ children }) {
     setActiveSessionIdState(id)
   }, [])
 
+  const setActiveSession = useCallback((sessionOrId) => {
+    if (typeof sessionOrId === 'object' && sessionOrId !== null) {
+      setActiveSessionIdState(sessionOrId.id)
+      setActiveSessionData(sessionOrId)
+      setOurCompanyName(sessionOrId.our_company_name || '')
+    } else {
+      setActiveSessionIdState(sessionOrId)
+    }
+  }, [])
+
   return (
-    <SessionContext.Provider value={{ activeSessionId, setActiveSessionId, ourCompanyName, isLoading }}>
+    <SessionContext.Provider value={{
+      activeSessionId,
+      setActiveSessionId,
+      setActiveSession,
+      activeSessionData,
+      setActiveSessionData,
+      ourCompanyName,
+      isLoading,
+    }}>
       {children}
     </SessionContext.Provider>
   )

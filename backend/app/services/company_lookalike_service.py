@@ -357,6 +357,248 @@ class CompanyLookalikeService:
             "errors": errors,
         }
 
+    @classmethod
+    async def discover_similar_organizations(
+        cls,
+        client: httpx.AsyncClient,
+        headers: Dict[str, str],
+        seed_companies: List[str],
+        icp_config: Dict[str, Any],
+        target_count: int = 15,
+    ) -> Dict[str, Any]:
+        """
+        Stage 1: Discover similar organizations (lookalikes) for the provided seed companies.
+        1. Resolves seed reference companies to Apollo organization records.
+        2. Discovers direct peers and competitors using LLM Market Intelligence + Apollo Org Search.
+        3. Excludes the seed reference companies themselves.
+        4. Resolves and validates discovered peer companies against Apollo's organization database.
+        5. Returns structured list of verified lookalike organizations and their organization_ids.
+        """
+        resolution = await cls.resolve_reference_companies(client, headers, seed_companies)
+        seed_company_names = resolution.get("seed_company_names", [s.strip().lower() for s in seed_companies if s])
+        seed_domains = resolution.get("seed_domains", [])
+
+        clean_seeds = {clean_company_name(s) for s in seed_companies if s}
+        raw_seeds_lower = {s.strip().lower() for s in seed_companies if s}
+        domains_set = {d.strip().lower() for d in seed_domains if d}
+
+        candidate_peers: List[Dict[str, Any]] = []
+
+        # ── Track 1: LLM Market Intelligence Competitor Discovery ──
+        try:
+            from app.services.llm_service import LLMService
+            llm = LLMService()
+            system_prompt = (
+                "You are an expert B2B market researcher and competitor intelligence system. "
+                "Given reference/seed company names and target market criteria, identify 10 to 15 real, active "
+                "direct competitors and lookalike companies in the exact same industry and business domain. "
+                "Output ONLY a valid JSON array of objects with keys 'name' and 'domain' (e.g. [{\"name\": \"Dynatrace\", \"domain\": \"dynatrace.com\"}]). "
+                "Strictly exclude the seed companies themselves. Do NOT include markdown code blocks or explanations."
+            )
+            user_prompt = f"Seed Companies: {', '.join(seed_companies)}\n"
+            if icp_config.get("target_industries"):
+                user_prompt += f"Target Industry: {icp_config.get('target_industries')}\n"
+            if icp_config.get("target_company_size"):
+                user_prompt += f"Target Company Size: {icp_config.get('target_company_size')}\n"
+            if icp_config.get("target_location"):
+                user_prompt += f"Target Location: {icp_config.get('target_location')}\n"
+            if icp_config.get("target_keywords"):
+                user_prompt += f"Target Keywords: {icp_config.get('target_keywords')}\n"
+
+            llm_resp = await llm.complete(system=system_prompt, user=user_prompt, max_tokens=600)
+            clean_resp = re.sub(r"^```(?:json)?\s*", "", llm_resp.strip())
+            clean_resp = re.sub(r"\s*```$", "", clean_resp.strip())
+            parsed = json.loads(clean_resp)
+            if isinstance(parsed, list):
+                for p in parsed:
+                    if isinstance(p, dict) and p.get("name"):
+                        candidate_peers.append({
+                            "name": p["name"].strip(),
+                            "domain": (p.get("domain") or "").strip().lower(),
+                            "source": "market_intelligence",
+                        })
+        except Exception as llm_err:
+            logger.info("CompanyLookalikeService: LLM competitor discovery skipped or fallback", error=str(llm_err))
+
+        # ── Track 2: Apollo Organization Search ──
+        try:
+            org_search_payload: Dict[str, Any] = {"page": 1, "per_page": 20}
+            if icp_config.get("organization_locations"):
+                org_search_payload["organization_locations"] = icp_config["organization_locations"]
+            if icp_config.get("employee_ranges"):
+                org_search_payload["organization_num_employees_ranges"] = icp_config["employee_ranges"]
+            if icp_config.get("industry_tag_ids"):
+                org_search_payload["organization_industry_tag_ids"] = icp_config["industry_tag_ids"]
+            if icp_config.get("org_keyword_tags"):
+                org_search_payload["q_organization_keyword_tags"] = icp_config["org_keyword_tags"][:5]
+
+            org_resp = await client.post(
+                "https://api.apollo.io/api/v1/organizations/search",
+                headers=headers,
+                json=org_search_payload,
+            )
+            if org_resp.status_code == 200:
+                org_data = org_resp.json()
+                apollo_orgs = org_data.get("organizations") or []
+                for a_org in apollo_orgs:
+                    o_name = a_org.get("name")
+                    o_dom = a_org.get("primary_domain") or a_org.get("website_url") or ""
+                    if o_name:
+                        candidate_peers.append({
+                            "name": o_name.strip(),
+                            "domain": o_dom.strip().lower(),
+                            "source": "apollo_org_search",
+                            "apollo_org": a_org,
+                        })
+        except Exception as apollo_org_err:
+            logger.info("CompanyLookalikeService: Apollo org search skipped", error=str(apollo_org_err))
+
+        # ── Deduplicate and Exclude Seed Companies ──
+        seen_names: Set[str] = set()
+        seen_domains: Set[str] = set()
+        filtered_candidates: List[Dict[str, Any]] = []
+
+        for cand in candidate_peers:
+            c_name = cand["name"].strip()
+            c_clean = clean_company_name(c_name)
+            c_lower = c_name.lower()
+            c_dom = cand.get("domain", "").lower()
+            clean_dom = re.sub(r"^https?://(www\.)?", "", c_dom).split("/")[0]
+
+            # Rule: Strictly exclude seed companies
+            if c_lower in raw_seeds_lower or c_clean in clean_seeds:
+                continue
+            if clean_dom and (clean_dom in domains_set or any(s in clean_dom for s in raw_seeds_lower if len(s) > 3)):
+                continue
+
+            if c_clean in seen_names:
+                continue
+            seen_names.add(c_clean)
+            if clean_dom:
+                if clean_dom in seen_domains:
+                    continue
+                seen_domains.add(clean_dom)
+
+            filtered_candidates.append(cand)
+
+        # ── Resolve Each Candidate to Verified Apollo Org ID ──
+        discovered_organizations: List[Dict[str, Any]] = []
+        for cand in filtered_candidates:
+            if len(discovered_organizations) >= target_count:
+                break
+
+            # If candidate was already an Apollo org from Track 2
+            if cand.get("apollo_org") and cand["apollo_org"].get("id"):
+                a_org = cand["apollo_org"]
+                discovered_organizations.append({
+                    "organization_id": a_org["id"],
+                    "name": a_org.get("name") or cand["name"],
+                    "domain": a_org.get("primary_domain") or cand.get("domain") or "",
+                    "industry": a_org.get("industry") or "",
+                    "employee_count": a_org.get("estimated_num_employees"),
+                    "matched_seeds": list(seed_companies),
+                    "source": cand.get("source", "lookalike_expansion"),
+                })
+                continue
+
+            # Otherwise resolve by name
+            res = await cls.resolve_company_name(client, headers, cand["name"])
+            if res.get("status") == "resolved" and res.get("organization_id"):
+                org_name = res.get("name") or cand["name"]
+                # Exclude if resolved to a seed company
+                if org_name.lower() in raw_seeds_lower or clean_company_name(org_name) in clean_seeds:
+                    continue
+                discovered_organizations.append({
+                    "organization_id": res["organization_id"],
+                    "name": org_name,
+                    "domain": res.get("domain") or cand.get("domain") or "",
+                    "industry": res.get("industry") or "",
+                    "employee_count": res.get("employee_count"),
+                    "matched_seeds": list(seed_companies),
+                    "source": cand.get("source", "lookalike_expansion"),
+                })
+
+        org_ids = [org["organization_id"] for org in discovered_organizations if org.get("organization_id")]
+
+        logger.info(
+            "CompanyLookalikeService: Stage 1 discovery complete",
+            seeds=seed_companies,
+            discovered_count=len(discovered_organizations),
+            discovered_org_names=[o["name"] for o in discovered_organizations],
+        )
+
+        return {
+            "seed_companies": seed_companies,
+            "seed_resolution": resolution,
+            "discovered_organizations": discovered_organizations,
+            "organization_ids": org_ids,
+            "count": len(discovered_organizations),
+        }
+
+    @classmethod
+    def offline_discover_similar_organizations(
+        cls,
+        seed_companies: List[str],
+        icp_config: Dict[str, Any],
+        csv_candidates: Optional[List[Dict[str, Any]]] = None,
+        target_count: int = 15,
+    ) -> Dict[str, Any]:
+        """
+        Stage 1 Offline: Identifies similar organizations from local prospect store.
+        """
+        if csv_candidates is None:
+            from app.agents.a1_prospect import ProspectAgent
+            csv_candidates = ProspectAgent._load_csv_candidates()
+
+        clean_seeds = {clean_company_name(s) for s in seed_companies if s}
+        raw_seeds_lower = {s.strip().lower() for s in seed_companies if s}
+
+        target_industries = [
+            i.lower().strip() for i in (icp_config.get("industry_terms") or []) if i
+        ]
+
+        seen_companies: Set[str] = set()
+        discovered_orgs: List[Dict[str, Any]] = []
+
+        for row in csv_candidates:
+            comp = (row.get("company") or "").strip()
+            if not comp:
+                continue
+            clean_comp = clean_company_name(comp)
+            comp_lower = comp.lower()
+            comp_dom = (row.get("company_domain") or "").strip().lower()
+
+            if comp_lower in raw_seeds_lower or clean_comp in clean_seeds:
+                continue
+            if any(s in comp_dom for s in raw_seeds_lower if len(s) > 3):
+                continue
+            if clean_comp in seen_companies:
+                continue
+
+            ind = (row.get("industry") or "").lower()
+            if target_industries and not any(ti in ind or ind in ti for ti in target_industries):
+                continue
+
+            seen_companies.add(clean_comp)
+            discovered_orgs.append({
+                "organization_id": row.get("apollo_id") or f"org_{clean_comp}",
+                "name": comp,
+                "domain": comp_dom,
+                "industry": row.get("industry") or "",
+                "employee_count": row.get("employee_count"),
+                "matched_seeds": list(seed_companies),
+                "source": "offline_store",
+            })
+            if len(discovered_orgs) >= target_count:
+                break
+
+        return {
+            "seed_companies": seed_companies,
+            "discovered_organizations": discovered_orgs,
+            "organization_ids": [o["organization_id"] for o in discovered_orgs],
+            "count": len(discovered_orgs),
+        }
+
     @staticmethod
     def build_lookalike_search_body(
         base_body: Dict[str, Any],

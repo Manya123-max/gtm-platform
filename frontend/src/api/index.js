@@ -105,6 +105,8 @@ export const previewOutreachDraft = id => unwrap(api.get(`/drafts/${id}/preview`
 export const fetchOutreachAnalytics = () => unwrap(api.get('/dashboard/outreach-analytics'))
 export const submitInput = (payload) => unwrap(api.post('/submit-input', payload))
 export const fetchInputHistory = () => unwrap(api.get('/input-history'))
+export const fetchInputHistoryItem = (id) => unwrap(api.get(`/input-history/${id}`))
+export const fetchSessionDetails = (id) => unwrap(api.get(`/sessions/${id}`))
 export const deleteInputHistory = (id) => unwrap(api.delete(`/input-history/${id}`))
 export const deleteAllInputHistory = () => unwrap(api.delete('/input-history'))
 export const fetchActiveSession = () => unwrap(api.get('/active-session'))
@@ -165,8 +167,19 @@ export const waitForWorkflowCompletion = async (
 export default api
 
 export const fetchAgentSchedules = () => unwrap(api.get('/agents/schedule'))
-export const updateAgentSchedule = (agent, enabled, cron = null) =>
-  unwrap(api.post('/agents/schedule', { agent, enabled, cron }))
+export const updateAgentSchedule = (agent, enabled, cron = null, scheduledAt = null, timezone = 'Asia/Kolkata', scheduleType = 'once') => {
+  const body = typeof agent === 'object'
+    ? agent
+    : {
+        agent,
+        enabled,
+        cron,
+        scheduled_at: scheduledAt,
+        timezone,
+        schedule_type: scheduleType,
+      }
+  return unwrap(api.post('/agents/schedule', body))
+}
 
 export const fetchNotifications = (params = {}) => {
   const queryParams = typeof params === 'object' ? params : (params ? { user_input_id: params } : {})

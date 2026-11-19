@@ -126,6 +126,7 @@ class NormalizedICPConfig:
     org_keyword_tags: List[str] = field(default_factory=list)
     company_lookalike: List[str] = field(default_factory=list)
     lookalike_organization_ids: List[str] = field(default_factory=list)
+    organization_ids: List[str] = field(default_factory=list)
     signals: List[str] = field(default_factory=list)
     funding_stages: List[str] = field(default_factory=list)
     technology_keywords_required: bool = False
@@ -173,6 +174,7 @@ class NormalizedICPConfig:
             "org_keyword_tags": self.org_keyword_tags,
             "company_lookalike": self.company_lookalike,
             "lookalike_organization_ids": self.lookalike_organization_ids,
+            "organization_ids": self.organization_ids,
             "signals": self.signals,
             "funding_stages": self.funding_stages,
             "technology_keywords_required": self.technology_keywords_required,
@@ -495,6 +497,14 @@ def normalize_icp_input(raw_input: Dict[str, Any]) -> NormalizedICPConfig:
     else:
         lookalike_org_ids = []
 
+    raw_explicit_org_ids = raw_input.get("organization_ids") or []
+    if isinstance(raw_explicit_org_ids, str):
+        explicit_org_ids = [i.strip() for i in raw_explicit_org_ids.split(",") if i.strip()]
+    elif isinstance(raw_explicit_org_ids, list):
+        explicit_org_ids = [str(i).strip() for i in raw_explicit_org_ids if str(i).strip()]
+    else:
+        explicit_org_ids = []
+
     raw_signals = (
         raw_input.get("signals")
         or raw_input.get("target_signals")
@@ -537,6 +547,7 @@ def normalize_icp_input(raw_input: Dict[str, Any]) -> NormalizedICPConfig:
         org_keyword_tags=org_keyword_tags,
         company_lookalike=company_lookalike,
         lookalike_organization_ids=lookalike_org_ids,
+        organization_ids=explicit_org_ids,
         signals=signals,
         funding_stages=funding_stages,
         technology_keywords_required=tech_req,

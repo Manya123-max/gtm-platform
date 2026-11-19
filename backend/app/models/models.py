@@ -542,6 +542,9 @@ class AgentSchedule(Base):
     cron: Mapped[str] = mapped_column(String(100), nullable=False)
     task_name: Mapped[str] = mapped_column(String(200), nullable=False)
     last_run_at: Mapped[Optional[datetime]] = mapped_column(DateTime)
+    scheduled_at: Mapped[Optional[datetime]] = mapped_column(DateTime, nullable=True)
+    timezone: Mapped[Optional[str]] = mapped_column(String(50), default="Asia/Kolkata")
+    schedule_type: Mapped[Optional[str]] = mapped_column(String(20), default="once")
     updated_at: Mapped[datetime] = mapped_column(
         DateTime,
         default=datetime.utcnow,

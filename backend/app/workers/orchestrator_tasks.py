@@ -108,15 +108,23 @@ def run_agent_node(
                         raw_dict = dict(cfg_value)
                         if auth_user_id and not raw_dict.get("user_id"):
                             raw_dict["user_id"] = auth_user_id
+                        if payload_data.get("user_input_id") and not raw_dict.get("user_input_id"):
+                            raw_dict["user_input_id"] = payload_data.get("user_input_id")
                         norm_cfg = normalize_icp_input(raw_dict)
                         cfg = norm_cfg.to_dict()
                     else:
-                        stmt = select(UserInput)
-                        if auth_user_id:
-                            stmt = stmt.where(UserInput.user_id == auth_user_id)
-                        stmt = stmt.order_by(UserInput.id.desc()).limit(1)
-                        res = await db.execute(stmt)
-                        user_input = res.scalars().first()
+                        target_input_id = payload_data.get("user_input_id")
+                        user_input = None
+                        if target_input_id:
+                            user_input = await db.get(UserInput, target_input_id)
+
+                        if not user_input:
+                            stmt = select(UserInput)
+                            if auth_user_id:
+                                stmt = stmt.where(UserInput.user_id == auth_user_id)
+                            stmt = stmt.order_by(UserInput.id.desc()).limit(1)
+                            res = await db.execute(stmt)
+                            user_input = res.scalars().first()
 
                         if not user_input and auth_user_id:
                             # Fallback to most recent intake if user has none

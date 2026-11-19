@@ -533,3 +533,90 @@ async def test_prospect_agent_with_lookalikes_integration():
             for c in added_contacts:
                 assert c.user_id == "user-uuid-abc"
                 assert c.user_input_id == 99
+
+
+# ── TEST 13: Stage 1 Similar Organization Discovery & Exclusion ───────────────
+
+@pytest.mark.asyncio
+async def test_discover_similar_organizations_stage_1():
+    """
+    Stage 1 Verification:
+    - Resolves seed company (Datadog).
+    - Identifies similar peer organizations (Dynatrace, New Relic).
+    - Strictly excludes Datadog itself from discovered peers.
+    - Successfully returns verified organization_ids.
+    """
+    _ORGANIZATION_RESOLUTION_CACHE.clear()
+
+    async def mock_org_search(url, **kwargs):
+        req = httpx.Request("POST", str(url))
+        json_data = kwargs.get("json", {})
+        query = json_data.get("q_organization_name", "")
+
+        if "Datadog" in query:
+            return httpx.Response(200, request=req, json={
+                "organizations": [
+                    {
+                        "id": "org_datadog_seed",
+                        "name": "Datadog",
+                        "primary_domain": "datadog.com",
+                        "industry": "Software",
+                        "estimated_num_employees": 5000,
+                    }
+                ]
+            })
+        elif "Dynatrace" in query:
+            return httpx.Response(200, request=req, json={
+                "organizations": [
+                    {
+                        "id": "org_dynatrace_peer",
+                        "name": "Dynatrace",
+                        "primary_domain": "dynatrace.com",
+                        "industry": "Software",
+                        "estimated_num_employees": 4000,
+                    }
+                ]
+            })
+        elif "New Relic" in query:
+            return httpx.Response(200, request=req, json={
+                "organizations": [
+                    {
+                        "id": "org_newrelic_peer",
+                        "name": "New Relic",
+                        "primary_domain": "newrelic.com",
+                        "industry": "Software",
+                        "estimated_num_employees": 2200,
+                    }
+                ]
+            })
+        return httpx.Response(200, request=req, json={"organizations": []})
+
+    client = MagicMock()
+    client.post = AsyncMock(side_effect=mock_org_search)
+
+    # Mock LLM competitor intelligence
+    mock_llm_json = '[{"name": "Dynatrace", "domain": "dynatrace.com"}, {"name": "New Relic", "domain": "newrelic.com"}, {"name": "Datadog", "domain": "datadog.com"}]'
+    with patch("app.services.llm_service.LLMService.complete", AsyncMock(return_value=mock_llm_json)):
+        discovery = await CompanyLookalikeService.discover_similar_organizations(
+            client=client,
+            headers={"X-Api-Key": "test"},
+            seed_companies=["Datadog"],
+            icp_config={"target_industries": "DevOps, Monitoring"},
+            target_count=5,
+        )
+
+        discovered = discovery["discovered_organizations"]
+        discovered_names = [d["name"] for d in discovered]
+        discovered_ids = discovery["organization_ids"]
+
+        # Datadog (the seed company) MUST be strictly excluded
+        assert "Datadog" not in discovered_names
+        assert "org_datadog_seed" not in discovered_ids
+
+        # Discovered peers MUST be present
+        assert "Dynatrace" in discovered_names
+        assert "New Relic" in discovered_names
+        assert "org_dynatrace_peer" in discovered_ids
+        assert "org_newrelic_peer" in discovered_ids
+        assert discovery["count"] == 2
+

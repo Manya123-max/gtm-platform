@@ -21,7 +21,7 @@ from app.core.config import settings
 from app.core.database import AsyncSessionLocal
 from app.core.security import create_access_token
 from app.models.models import (
-    User, UserInput, Contact, ContactUserInputAssociation, Deal, DealStage
+    User, UserInput, Contact, ContactUserInputAssociation, Deal, DealStage, SignalEvent
 )
 from app.services.salesforce_service import SalesforceService
 from app.services import CalService
@@ -60,18 +60,22 @@ async def _create_user_input(user_id: str, company_name: str) -> UserInput:
 @pytest.fixture(autouse=True)
 async def cleanup_test_history_users():
     yield
-    from sqlalchemy import select, delete, or_
-    async with AsyncSessionLocal() as db:
-        users = (await db.execute(select(User).where(or_(User.email.ilike("%@company.com"), User.email.ilike("%@example.com"))))).scalars().all()
-        if users:
-            uids = [u.id for u in users]
-            c_sub = select(Contact.id).where(Contact.user_id.in_(uids))
-            await db.execute(delete(Deal).where(Deal.contact_id.in_(c_sub)))
-            await db.execute(delete(ContactUserInputAssociation).where(ContactUserInputAssociation.contact_id.in_(c_sub)))
-            await db.execute(delete(Contact).where(Contact.user_id.in_(uids)))
-            await db.execute(delete(UserInput).where(UserInput.user_id.in_(uids)))
-            await db.execute(delete(User).where(User.id.in_(uids)))
-            await db.commit()
+    try:
+        from sqlalchemy import select, delete, or_
+        async with AsyncSessionLocal() as db:
+            users = (await db.execute(select(User).where(or_(User.email.ilike("%@company.com"), User.email.ilike("%@example.com"))))).scalars().all()
+            if users:
+                uids = [u.id for u in users]
+                c_sub = select(Contact.id).where(Contact.user_id.in_(uids))
+                await db.execute(delete(Deal).where(Deal.contact_id.in_(c_sub)))
+                await db.execute(delete(SignalEvent).where(SignalEvent.contact_id.in_(c_sub)))
+                await db.execute(delete(ContactUserInputAssociation).where(ContactUserInputAssociation.contact_id.in_(c_sub)))
+                await db.execute(delete(Contact).where(Contact.user_id.in_(uids)))
+                await db.execute(delete(UserInput).where(UserInput.user_id.in_(uids)))
+                await db.execute(delete(User).where(User.id.in_(uids)))
+                await db.commit()
+    except Exception:
+        pass
 
 
 # ==============================================================================
@@ -368,3 +372,81 @@ def test_cal_com_resolution_hierarchy():
         assert url_a != url_b
         assert "rep_a" in url_a
         assert "rep_b" in url_b
+
+
+# ==============================================================================
+# 8. FETCH FULL HISTORY & SESSION DETAILS FOR FORM PRE-POPULATION
+# ==============================================================================
+
+@pytest.mark.asyncio
+async def test_get_single_input_history_and_session_details():
+    user_a = await _create_user(f"rep_form_a_{uuid.uuid4().hex[:6]}@company.com", "Form User A")
+    user_b = await _create_user(f"rep_form_b_{uuid.uuid4().hex[:6]}@company.com", "Form User B")
+
+    async with AsyncSessionLocal() as db:
+        item = UserInput(
+            user_id=user_a.id,
+            our_company_name="AlphaSoft",
+            our_services="Cloud Modernization, GenAI Strategy",
+            target_location="United States, Canada",
+            target_industries="SaaS, Enterprise Software",
+            target_company_size="50-200",
+            target_keywords="Snowflake, Databricks",
+            company_lookalike="Datadog, Dynatrace",
+            signals="Hiring Surge, High Growth",
+            funding_stages="Series A, Series B",
+            target_job_titles="VP of Engineering, Head of Data",
+        )
+        db.add(item)
+        await db.commit()
+        await db.refresh(item)
+        item_id = item.id
+
+    token_a = create_access_token(str(user_a.id))
+    token_b = create_access_token(str(user_b.id))
+
+    async with httpx.AsyncClient() as client:
+        # 1. Fetch via /input-history/{id} as User A
+        res1 = await client.get(
+            f"http://127.0.0.1:8000/api/v1/input-history/{item_id}",
+            headers={"Authorization": f"Bearer {token_a}"}
+        )
+        assert res1.status_code == 200
+        data1 = res1.json()
+        assert data1["id"] == item_id
+        assert data1["our_company_name"] == "AlphaSoft"
+        assert data1["our_services"] == "Cloud Modernization, GenAI Strategy"
+        assert data1["target_location"] == "United States, Canada"
+        assert data1["target_industries"] == "SaaS, Enterprise Software"
+        assert data1["target_company_size"] == "50-200"
+        assert data1["target_keywords"] == "Snowflake, Databricks"
+        assert data1["company_lookalike"] == "Datadog, Dynatrace"
+        assert data1["signals"] == "Hiring Surge, High Growth"
+        assert data1["funding_stages"] == "Series A, Series B"
+        assert data1["target_job_titles"] == "VP of Engineering, Head of Data"
+
+        # 2. Fetch via /sessions/{id} as User A
+        res2 = await client.get(
+            f"http://127.0.0.1:8000/api/v1/sessions/{item_id}",
+            headers={"Authorization": f"Bearer {token_a}"}
+        )
+        assert res2.status_code == 200
+        data2 = res2.json()
+        assert data2["id"] == item_id
+        assert data2["our_company_name"] == "AlphaSoft"
+        assert data2["company_lookalike"] == "Datadog, Dynatrace"
+        assert data2["signals"] == "Hiring Surge, High Growth"
+
+        # 3. User B cannot access User A's session or input-history
+        res_unauth1 = await client.get(
+            f"http://127.0.0.1:8000/api/v1/input-history/{item_id}",
+            headers={"Authorization": f"Bearer {token_b}"}
+        )
+        assert res_unauth1.status_code == 403
+
+        res_unauth2 = await client.get(
+            f"http://127.0.0.1:8000/api/v1/sessions/{item_id}",
+            headers={"Authorization": f"Bearer {token_b}"}
+        )
+        assert res_unauth2.status_code == 404
+

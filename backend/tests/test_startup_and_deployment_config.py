@@ -66,6 +66,7 @@ def test_production_readiness_validation():
         APP_SECRET_KEY="a-very-secure-random-32-byte-hex-string-for-prod",
         JWT_SECRET_KEY="a-very-secure-jwt-random-32-byte-hex-string",
         DATABASE_URL="postgresql+asyncpg://gtm_user:secret@dpg-abc123xyz.oregon-postgres.render.com/gtm",
+        REDIS_URL="redis://red-cu123456789.oregon-redis.render.com:6379/0",
         FRONTEND_URL="https://gtm-platform.netlify.app",
     )
     assert prod_valid.validate_production_readiness() == []

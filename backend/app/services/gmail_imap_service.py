@@ -15,7 +15,10 @@ logger = structlog.get_logger()
 
 def _get_redis():
     try:
-        r = redis.Redis.from_url(settings.REDIS_URL)
+        kwargs = {}
+        if settings.REDIS_URL.startswith("rediss://"):
+            kwargs["ssl_cert_reqs"] = None
+        r = redis.Redis.from_url(settings.REDIS_URL, **kwargs)
         return r
     except Exception:
         return None

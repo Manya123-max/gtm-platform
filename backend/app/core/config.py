@@ -143,15 +143,21 @@ class Settings(BaseSettings):
     @model_validator(mode="after")
     def sync_redis_and_celery(self):
         if self.REDIS_URL and "localhost" not in self.REDIS_URL and not self.REDIS_URL.startswith("redis://redis:"):
-            # If CELERY_BROKER_URL is not set or still default localhost, derive from REDIS_URL
-            if not self.CELERY_BROKER_URL or "localhost" in self.CELERY_BROKER_URL or self.CELERY_BROKER_URL.startswith("redis://redis:"):
+            # If CELERY_BROKER_URL is not set, still default localhost, or has docker 'redis' hostname, derive from REDIS_URL
+            if (not self.CELERY_BROKER_URL or 
+                "localhost" in self.CELERY_BROKER_URL or 
+                "redis://redis:" in self.CELERY_BROKER_URL or 
+                "@redis:" in self.CELERY_BROKER_URL):
                 base = self.REDIS_URL.rstrip("/")
                 parts = base.rsplit("/", 1)
                 if len(parts) == 2 and parts[1].isdigit():
                     base = parts[0]
                 self.CELERY_BROKER_URL = f"{base}/1"
-            # If CELERY_RESULT_BACKEND is not set or still default localhost, derive from REDIS_URL
-            if not self.CELERY_RESULT_BACKEND or "localhost" in self.CELERY_RESULT_BACKEND or self.CELERY_RESULT_BACKEND.startswith("redis://redis:"):
+            # If CELERY_RESULT_BACKEND is not set, still default localhost, or has docker 'redis' hostname, derive from REDIS_URL
+            if (not self.CELERY_RESULT_BACKEND or 
+                "localhost" in self.CELERY_RESULT_BACKEND or 
+                "redis://redis:" in self.CELERY_RESULT_BACKEND or 
+                "@redis:" in self.CELERY_RESULT_BACKEND):
                 base = self.REDIS_URL.rstrip("/")
                 parts = base.rsplit("/", 1)
                 if len(parts) == 2 and parts[1].isdigit():

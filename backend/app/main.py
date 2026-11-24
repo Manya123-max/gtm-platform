@@ -49,6 +49,12 @@ app = FastAPI(
 async def root():
     return {"message": "GTM Platform API Running"}
 
+@app.get("/health")
+@app.get("/api/health")
+@app.get("/api/v1/health")
+async def health():
+    return {"status": "healthy", "env": settings.APP_ENV}
+
 @app.get("/docs", include_in_schema=False)
 async def docs_redirect():
     return RedirectResponse(url="/api/docs")
@@ -248,11 +254,6 @@ async def slack_actions(request: Request, background_tasks: BackgroundTasks):
             background_tasks.add_task(_approve_crm_action, value, user)
 
     return JSONResponse({"text": "✓ Action received"})
- 
- 
-@app.get("/health")
-async def health():
-    return {"status": "healthy", "env": settings.APP_ENV}
  
  
 # ── Background task helpers ───────────────────────────────────────────────

@@ -7,7 +7,7 @@ Subscription tier notes (as of July 2026):
 """
 import os
 from pydantic_settings import BaseSettings, SettingsConfigDict
-from pydantic import field_validator, Field, AliasChoices
+from pydantic import field_validator, model_validator, Field, AliasChoices
 from functools import lru_cache
 from typing import List, Optional
 
@@ -147,6 +147,31 @@ class Settings(BaseSettings):
     REDIS_URL:              str = "redis://localhost:6379/0"
     CELERY_BROKER_URL:      str = "redis://localhost:6379/1"
     CELERY_RESULT_BACKEND:  str = "redis://localhost:6379/2"
+
+    @model_validator(mode="after")
+    def sync_redis_and_celery(self):
+        if self.REDIS_URL and "localhost" not in self.REDIS_URL and not self.REDIS_URL.startswith("redis://redis:"):
+            # If CELERY_BROKER_URL is not set, still default localhost, or has docker 'redis' hostname, derive from REDIS_URL
+            if (not self.CELERY_BROKER_URL or 
+                "localhost" in self.CELERY_BROKER_URL or 
+                "redis://redis:" in self.CELERY_BROKER_URL or 
+                "@redis:" in self.CELERY_BROKER_URL):
+                base = self.REDIS_URL.rstrip("/")
+                parts = base.rsplit("/", 1)
+                if len(parts) == 2 and parts[1].isdigit():
+                    base = parts[0]
+                self.CELERY_BROKER_URL = f"{base}/1"
+            # If CELERY_RESULT_BACKEND is not set, still default localhost, or has docker 'redis' hostname, derive from REDIS_URL
+            if (not self.CELERY_RESULT_BACKEND or 
+                "localhost" in self.CELERY_RESULT_BACKEND or 
+                "redis://redis:" in self.CELERY_RESULT_BACKEND or 
+                "@redis:" in self.CELERY_RESULT_BACKEND):
+                base = self.REDIS_URL.rstrip("/")
+                parts = base.rsplit("/", 1)
+                if len(parts) == 2 and parts[1].isdigit():
+                    base = parts[0]
+                self.CELERY_RESULT_BACKEND = f"{base}/2"
+        return self
 
     # ── LLM providers — fallback chain: Groq → Gemini → Mistral → DeepSeek → Claude ──
     ANTHROPIC_API_KEY: str = ""

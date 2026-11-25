@@ -5,15 +5,15 @@ Safely establishes Alembic migration baseline on existing databases
 without data loss, and upgrades to head revision (h4c9d0e1f2g3).
 
 Critical Safety:
-- Verifies complete schema parity against baseline g3b8c9d0e1f2 before stamping.
-- Aborts immediately if the schema does not match the expected baseline.
+- Supports clean provisioning on fresh/empty databases without transaction poisoning.
+- Verifies complete schema parity against baseline g3b8c9d0e1f2 before stamping existing databases.
 - Never re-stamps if the database is already at or past the baseline.
 - Executes forward upgrade to head and verifies optional input columns.
 """
 import os
 import sys
 from pathlib import Path
-from typing import Set, Dict
+from typing import Set, Dict, Optional
 
 # Add backend directory to sys.path
 backend_dir = Path(__file__).resolve().parent.parent
@@ -23,6 +23,8 @@ from sqlalchemy import create_engine, text, inspect
 from alembic.config import Config
 from alembic import command
 from app.core.config import settings
+from app.core.database import Base
+import app.models.models  # Register all models on Base.metadata
 
 # Explicit contract of tables and columns required for baseline g3b8c9d0e1f2
 REQUIRED_BASELINE_TABLES: Set[str] = {
@@ -81,38 +83,44 @@ REQUIRED_HEAD_COLUMNS: Set[str] = {
 }
 
 
-def ensure_schema_columns(conn) -> None:
+def ensure_schema_columns(conn, existing_tables: Optional[Set[str]] = None) -> None:
     """
     Safely and idempotently reconciles missing columns across tables
     to guarantee schema parity before baseline inspection.
+    Each statement commits individually and rolls back on exception
+    to avoid poisoning PostgreSQL transactions.
     """
     statements = [
-        "ALTER TABLE users ADD COLUMN IF NOT EXISTS role VARCHAR(50) DEFAULT 'SALES_REPRESENTATIVE'",
-        "ALTER TABLE users ALTER COLUMN role SET DEFAULT 'SALES_REPRESENTATIVE'",
-        "ALTER TABLE users ADD COLUMN IF NOT EXISTS cal_com_username VARCHAR(100)",
-        "ALTER TABLE users ADD COLUMN IF NOT EXISTS cal_com_event_slug VARCHAR(100)",
-        "ALTER TABLE users ADD COLUMN IF NOT EXISTS cal_com_booking_url VARCHAR(255)",
-        "ALTER TABLE users ADD COLUMN IF NOT EXISTS slack_user_id VARCHAR(50)",
-        "ALTER TABLE user_inputs ADD COLUMN IF NOT EXISTS user_id UUID REFERENCES users(id)",
-        "ALTER TABLE user_inputs ADD COLUMN IF NOT EXISTS company_lookalike TEXT",
-        "ALTER TABLE user_inputs ADD COLUMN IF NOT EXISTS signals TEXT",
-        "ALTER TABLE user_inputs ADD COLUMN IF NOT EXISTS funding_stages TEXT",
-        "ALTER TABLE contacts ADD COLUMN IF NOT EXISTS user_id UUID REFERENCES users(id)",
-        "ALTER TABLE contacts ADD COLUMN IF NOT EXISTS prospect_location VARCHAR(200)",
-        "ALTER TABLE contacts ADD COLUMN IF NOT EXISTS work_mode VARCHAR(50) DEFAULT 'Not specified'",
-        "ALTER TABLE contacts ADD COLUMN IF NOT EXISTS location_source VARCHAR(100)",
-        "ALTER TABLE contacts ADD COLUMN IF NOT EXISTS selection_summary TEXT",
-        "ALTER TABLE contacts ADD COLUMN IF NOT EXISTS tier VARCHAR(20)",
-        "ALTER TABLE contacts ADD COLUMN IF NOT EXISTS priority_rank INTEGER",
-        "ALTER TABLE contacts ADD COLUMN IF NOT EXISTS salesforce_contact_id VARCHAR(100)",
+        ("users", "ALTER TABLE users ADD COLUMN IF NOT EXISTS role VARCHAR(50) DEFAULT 'SALES_REPRESENTATIVE'"),
+        ("users", "ALTER TABLE users ALTER COLUMN role SET DEFAULT 'SALES_REPRESENTATIVE'"),
+        ("users", "ALTER TABLE users ADD COLUMN IF NOT EXISTS cal_com_username VARCHAR(100)"),
+        ("users", "ALTER TABLE users ADD COLUMN IF NOT EXISTS cal_com_event_slug VARCHAR(100)"),
+        ("users", "ALTER TABLE users ADD COLUMN IF NOT EXISTS cal_com_booking_url VARCHAR(255)"),
+        ("users", "ALTER TABLE users ADD COLUMN IF NOT EXISTS slack_user_id VARCHAR(50)"),
+        ("user_inputs", "ALTER TABLE user_inputs ADD COLUMN IF NOT EXISTS user_id UUID REFERENCES users(id)"),
+        ("user_inputs", "ALTER TABLE user_inputs ADD COLUMN IF NOT EXISTS company_lookalike TEXT"),
+        ("user_inputs", "ALTER TABLE user_inputs ADD COLUMN IF NOT EXISTS signals TEXT"),
+        ("user_inputs", "ALTER TABLE user_inputs ADD COLUMN IF NOT EXISTS funding_stages TEXT"),
+        ("contacts", "ALTER TABLE contacts ADD COLUMN IF NOT EXISTS user_id UUID REFERENCES users(id)"),
+        ("contacts", "ALTER TABLE contacts ADD COLUMN IF NOT EXISTS prospect_location VARCHAR(200)"),
+        ("contacts", "ALTER TABLE contacts ADD COLUMN IF NOT EXISTS work_mode VARCHAR(50) DEFAULT 'Not specified'"),
+        ("contacts", "ALTER TABLE contacts ADD COLUMN IF NOT EXISTS location_source VARCHAR(100)"),
+        ("contacts", "ALTER TABLE contacts ADD COLUMN IF NOT EXISTS selection_summary TEXT"),
+        ("contacts", "ALTER TABLE contacts ADD COLUMN IF NOT EXISTS tier VARCHAR(20)"),
+        ("contacts", "ALTER TABLE contacts ADD COLUMN IF NOT EXISTS priority_rank INTEGER"),
+        ("contacts", "ALTER TABLE contacts ADD COLUMN IF NOT EXISTS salesforce_contact_id VARCHAR(100)"),
     ]
-    for stmt in statements:
+    for tbl, stmt in statements:
+        if existing_tables is not None and tbl not in existing_tables:
+            continue
         try:
             conn.execute(text(stmt))
             conn.commit()
         except Exception:
-            # Table might not exist yet if fresh DB
-            pass
+            try:
+                conn.rollback()
+            except Exception:
+                pass
 
 
 def get_sync_db_url() -> str:
@@ -160,7 +168,6 @@ def reconcile_and_migrate():
     alembic_cfg.set_main_option("sqlalchemy.url", db_url)
 
     with engine.connect() as conn:
-        ensure_schema_columns(conn)
         insp = inspect(conn)
         tables = set(insp.get_table_names())
         print(f"[MIGRATION] Detected {len(tables)} tables in database.")
@@ -173,9 +180,41 @@ def reconcile_and_migrate():
         else:
             print("[MIGRATION] Table 'alembic_version' does NOT exist.")
 
+        # Fresh Database Check: provision all model tables first
+        if "user_inputs" not in tables:
+            print("[MIGRATION] Fresh database detected. Creating initial schema from models...")
+            for ext in ["vector", "pg_trgm"]:
+                try:
+                    conn.execute(text(f"CREATE EXTENSION IF NOT EXISTS {ext}"))
+                    conn.commit()
+                except Exception as exc:
+                    try:
+                        conn.rollback()
+                    except Exception:
+                        pass
+                    print(f"[MIGRATION] Note: extension '{ext}' not available or skipped: {exc}")
+
+            Base.metadata.create_all(bind=conn)
+            conn.commit()
+            print("[MIGRATION] All model tables created successfully.")
+
+            # Refresh table list after creation
+            insp = inspect(conn)
+            tables = set(insp.get_table_names())
+            print(f"[MIGRATION] Database now contains {len(tables)} tables.")
+
+            # Stamp Alembic directly to head revision 'h4c9d0e1f2g3'
+            print("[MIGRATION] Stamping fresh database to head revision 'h4c9d0e1f2g3'...")
+            command.stamp(alembic_cfg, "head")
+            print("[MIGRATION] Head revision stamped successfully.")
+
+            ensure_schema_columns(conn, tables)
+            current_revs = ["h4c9d0e1f2g3"]
+
         # Case 1: Already at head revision
         if "h4c9d0e1f2g3" in current_revs:
-            print("[MIGRATION] Database is already at head revision 'h4c9d0e1f2g3'. No stamping or migration needed.")
+            print("[MIGRATION] Database is at head revision 'h4c9d0e1f2g3'.")
+            ensure_schema_columns(conn, tables)
             actual_cols = {c["name"] for c in insp.get_columns("user_inputs")}
             missing = REQUIRED_HEAD_COLUMNS - actual_cols
             if missing:
@@ -186,18 +225,17 @@ def reconcile_and_migrate():
         # Case 2: Already stamped at baseline g3b8c9d0e1f2 (or intermediate)
         if "g3b8c9d0e1f2" in current_revs:
             print("[MIGRATION] Database is currently at baseline 'g3b8c9d0e1f2'. Will upgrade to head without re-stamping.")
+            ensure_schema_columns(conn, tables)
 
-        # Case 3: No revision in alembic_version
+        # Case 3: Pre-existing database without alembic_version
         elif not current_revs:
-            if "user_inputs" in tables:
-                print("[MIGRATION] Pre-existing schema detected without alembic_version.")
-                print("[MIGRATION] Verifying full schema parity against baseline 'g3b8c9d0e1f2'...")
-                verify_schema_matches_baseline_g3b8c9d0e1f2(insp, tables)
-                print("[MIGRATION] Stamping baseline revision 'g3b8c9d0e1f2'...")
-                command.stamp(alembic_cfg, "g3b8c9d0e1f2")
-                print("[MIGRATION] Baseline 'g3b8c9d0e1f2' stamped successfully.")
-            else:
-                print("[MIGRATION] Fresh database detected. Normal migration path from base will apply.")
+            print("[MIGRATION] Pre-existing schema detected without alembic_version.")
+            ensure_schema_columns(conn, tables)
+            print("[MIGRATION] Verifying full schema parity against baseline 'g3b8c9d0e1f2'...")
+            verify_schema_matches_baseline_g3b8c9d0e1f2(insp, tables)
+            print("[MIGRATION] Stamping baseline revision 'g3b8c9d0e1f2'...")
+            command.stamp(alembic_cfg, "g3b8c9d0e1f2")
+            print("[MIGRATION] Baseline 'g3b8c9d0e1f2' stamped successfully.")
 
     # Execute Alembic upgrade to head (runs h4c9d0e1f2g3)
     print("[MIGRATION] Executing: alembic upgrade head...")

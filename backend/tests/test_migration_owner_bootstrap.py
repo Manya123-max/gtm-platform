@@ -226,6 +226,10 @@ async def test_bootstrap_existing_migration_owner_user():
     finally:
         async with AsyncSessionLocal() as session:
             await session.execute(delete(Contact).where(Contact.id == contact_id))
+            await session.execute(text("UPDATE contacts SET user_id = NULL WHERE user_id = :admin_id"), {"admin_id": admin_id})
+            await session.execute(text("UPDATE user_inputs SET user_id = NULL WHERE user_id = :admin_id"), {"admin_id": admin_id})
+            await session.execute(text("UPDATE workflow_runs SET user_id = NULL WHERE user_id = :admin_id"), {"admin_id": admin_id})
+            await session.execute(text("UPDATE revenue_forecasts SET user_id = NULL WHERE user_id = :admin_id"), {"admin_id": admin_id})
             await session.execute(delete(User).where(User.id == admin_id))
             await session.commit()
 
@@ -286,6 +290,10 @@ async def test_bootstrap_repeated_execution_idempotency():
     finally:
         async with AsyncSessionLocal() as session:
             await session.execute(delete(Contact).where(Contact.id == contact_id))
+            await session.execute(text("UPDATE contacts SET user_id = NULL WHERE user_id IN (SELECT id FROM users WHERE email = :email)"), {"email": owner_email})
+            await session.execute(text("UPDATE user_inputs SET user_id = NULL WHERE user_id IN (SELECT id FROM users WHERE email = :email)"), {"email": owner_email})
+            await session.execute(text("UPDATE workflow_runs SET user_id = NULL WHERE user_id IN (SELECT id FROM users WHERE email = :email)"), {"email": owner_email})
+            await session.execute(text("UPDATE revenue_forecasts SET user_id = NULL WHERE user_id IN (SELECT id FROM users WHERE email = :email)"), {"email": owner_email})
             await session.execute(delete(User).where(User.email == owner_email))
             await session.commit()
 
@@ -363,6 +371,10 @@ async def test_bootstrap_with_configured_migration_owner_password():
     finally:
         settings.GTM_MIGRATION_OWNER_PASSWORD = orig_pw_setting
         async with AsyncSessionLocal() as session:
+            await session.execute(text("UPDATE contacts SET user_id = NULL WHERE user_id IN (SELECT id FROM users WHERE email = :email)"), {"email": owner_email})
+            await session.execute(text("UPDATE user_inputs SET user_id = NULL WHERE user_id IN (SELECT id FROM users WHERE email = :email)"), {"email": owner_email})
+            await session.execute(text("UPDATE workflow_runs SET user_id = NULL WHERE user_id IN (SELECT id FROM users WHERE email = :email)"), {"email": owner_email})
+            await session.execute(text("UPDATE revenue_forecasts SET user_id = NULL WHERE user_id IN (SELECT id FROM users WHERE email = :email)"), {"email": owner_email})
             await session.execute(delete(User).where(User.email == owner_email))
             await session.commit()
 

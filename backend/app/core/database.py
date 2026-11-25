@@ -1,3 +1,4 @@
+import asyncio
 from typing import Optional
 from sqlalchemy.ext.asyncio import AsyncSession, create_async_engine, async_sessionmaker
 from sqlalchemy.orm import DeclarativeBase
@@ -18,11 +19,16 @@ DATABASE_URL = settings.DATABASE_URL
 
 logger = structlog.get_logger()
 
+connect_args = {}
+if "asyncpg" in DATABASE_URL:
+    connect_args["timeout"] = 5
+
 engine = create_async_engine(
     DATABASE_URL,
     poolclass=NullPool,
+    connect_args=connect_args,
     echo=False,
-    future=True
+    future=True,
 )
 
 AsyncSessionLocal = async_sessionmaker(
@@ -46,24 +52,60 @@ async def get_db() -> AsyncSession:
             await session.close()
 
 
-async def init_db():
-    async with engine.begin() as conn:
-        # Enable pgvector and pg_trgm extensions if supported
-        try:
-            await conn.execute(text("CREATE EXTENSION IF NOT EXISTS vector"))
-        except Exception as exc:
-            logger.warning("Could not enable pgvector extension", error=str(exc))
-        try:
-            await conn.execute(text("CREATE EXTENSION IF NOT EXISTS pg_trgm"))
-        except Exception as exc:
-            logger.warning("Could not enable pg_trgm extension", error=str(exc))
-        # Create all tables
-        print("Registered Tables:")
-        print(Base.metadata.tables.keys())
+db_status = {
+    "connected": False,
+    "error": None,
+}
 
-        await conn.run_sync(Base.metadata.create_all)
-        await _bootstrap_multi_user_schema(conn)
-    logger.info("Database initialised")
+
+def get_database_status() -> dict:
+    return db_status
+
+
+async def init_db():
+    import os
+    db_url = settings.DATABASE_URL or ""
+    if "dpg-" in db_url and ".render.com" not in db_url and not os.environ.get("RENDER"):
+        err_msg = (
+            "DATABASE_CONFIG_ERROR: You are running outside Render with an internal Render hostname ('dpg-...'). "
+            "Internal hostnames only resolve inside Render's private network. "
+            "To connect from localhost, use Render's External Database URL (e.g. host ending in '.oregon-postgres.render.com?sslmode=require') or a local/cloud database."
+        )
+        logger.error(err_msg)
+        db_status["connected"] = False
+        db_status["error"] = err_msg
+
+    try:
+        async with asyncio.timeout(15.0):
+            async with engine.begin() as conn:
+                # Enable pgvector and pg_trgm extensions if supported
+                try:
+                    await conn.execute(text("CREATE EXTENSION IF NOT EXISTS vector"))
+                except Exception as exc:
+                    logger.warning("Could not enable pgvector extension", error=str(exc))
+                try:
+                    await conn.execute(text("CREATE EXTENSION IF NOT EXISTS pg_trgm"))
+                except Exception as exc:
+                    logger.warning("Could not enable pg_trgm extension", error=str(exc))
+                # Create all tables
+                print("Registered Tables:")
+                print(Base.metadata.tables.keys())
+
+                await conn.run_sync(Base.metadata.create_all)
+                await _bootstrap_multi_user_schema(conn)
+        db_status["connected"] = True
+        db_status["error"] = None
+        logger.info("Database initialised successfully")
+    except Exception as exc:
+        db_status["connected"] = False
+        db_status["error"] = str(exc)
+        logger.error(
+            "CRITICAL: Database connection failed during startup. "
+            "Ensure PostgreSQL is running and DATABASE_URL is correct.",
+            error=str(exc),
+        )
+        if settings.APP_ENV == "test":
+            raise
 
 
 async def _bootstrap_multi_user_schema(conn, migration_owner_email: Optional[str] = None) -> None:
@@ -85,6 +127,7 @@ async def _bootstrap_multi_user_schema(conn, migration_owner_email: Optional[str
         "ALTER TABLE user_inputs ADD COLUMN IF NOT EXISTS company_lookalike TEXT",
         "ALTER TABLE user_inputs ADD COLUMN IF NOT EXISTS signals TEXT",
         "ALTER TABLE user_inputs ADD COLUMN IF NOT EXISTS funding_stages TEXT",
+        "ALTER TABLE user_inputs ADD COLUMN IF NOT EXISTS our_company_name TEXT DEFAULT ''",
         "ALTER TABLE contacts ADD COLUMN IF NOT EXISTS user_id UUID REFERENCES users(id)",
         "ALTER TABLE contacts ADD COLUMN IF NOT EXISTS prospect_location VARCHAR(200)",
         "ALTER TABLE contacts ADD COLUMN IF NOT EXISTS work_mode VARCHAR(50) DEFAULT 'Not specified'",
@@ -134,21 +177,22 @@ async def _bootstrap_multi_user_schema(conn, migration_owner_email: Optional[str
         owner_email = (settings.GTM_MIGRATION_OWNER_EMAIL or "").strip().lower()
 
     if not owner_email:
-        logger.warning(
-            "GTM_MIGRATION_OWNER_EMAIL not set — legacy (anonymous) rows keep "
-            "user_id NULL and will be invisible to authenticated users."
-        )
+        logger.warning("GTM_MIGRATION_OWNER_EMAIL not set; unowned legacy rows remain unassigned")
         return
 
     # Resolve or create the migration owner account
     owner_id_row = await conn.execute(
-        text("SELECT id FROM users WHERE email = :email"), {"email": owner_email}
+        text("SELECT id, role, password_hash FROM users WHERE email = :email"), {"email": owner_email}
     )
     owner_row = owner_id_row.first()
+
     if owner_row is None:
         from app.core.security import hash_password
-        import secrets as _secrets
-        raw_password = (settings.GTM_MIGRATION_OWNER_PASSWORD or "").strip() or _secrets.token_urlsafe(24)
+        import secrets
+        raw_password = (settings.GTM_MIGRATION_OWNER_PASSWORD or "").strip() or secrets.token_urlsafe(16)
+        name = "Migration Owner"
+        role = "SALES_REPRESENTATIVE"
+
         await conn.execute(
             text(
                 "INSERT INTO users (id, name, email, password_hash, is_active, role, created_at, updated_at) "
@@ -156,30 +200,25 @@ async def _bootstrap_multi_user_schema(conn, migration_owner_email: Optional[str
                 "ON CONFLICT (email) DO NOTHING"
             ),
             {
-                "name": "Migration Owner",
+                "name": name,
                 "email": owner_email,
                 "password_hash": hash_password(raw_password),
-                "role": "SALES_REPRESENTATIVE",
+                "role": role,
             },
         )
         owner_id_row = await conn.execute(
             text("SELECT id FROM users WHERE email = :email"), {"email": owner_email}
         )
         owner_id = owner_id_row.scalar_one()
-        if not settings.GTM_MIGRATION_OWNER_PASSWORD:
-            logger.warning(
-                "Created migration owner account. Temporary password (rotate immediately): "
-                f"{raw_password}"
-            )
-        else:
-            logger.info("Created migration owner account with configured GTM_MIGRATION_OWNER_PASSWORD")
+        logger.info(f"Initialized migration owner account: {owner_email} ({role})")
     else:
         owner_id = owner_row[0]
+        from app.core.security import hash_password
         if settings.GTM_MIGRATION_OWNER_PASSWORD and settings.GTM_MIGRATION_OWNER_PASSWORD.strip():
-            from app.core.security import hash_password
+            new_hash = hash_password(settings.GTM_MIGRATION_OWNER_PASSWORD.strip())
             await conn.execute(
                 text("UPDATE users SET password_hash = :hash, is_active = true, updated_at = now() WHERE id = :id"),
-                {"hash": hash_password(settings.GTM_MIGRATION_OWNER_PASSWORD.strip()), "id": owner_id},
+                {"hash": new_hash, "id": owner_id},
             )
             logger.info("Synchronized migration owner password from GTM_MIGRATION_OWNER_PASSWORD")
 

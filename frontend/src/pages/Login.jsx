@@ -72,7 +72,6 @@ export default function Login({ initialMode = 'login' }) {
   const [authErrorMessage, setAuthErrorMessage] = useState('')
   const [busy, setBusy] = useState(false)
   const [successNotice, setSuccessNotice] = useState('')
-  const [generatedResetToken, setGeneratedResetToken] = useState(null)
 
   // Sync mode with route changes or query params
   useEffect(() => {
@@ -148,10 +147,7 @@ export default function Login({ initialMode = 'login' }) {
         navigate('/', { replace: true })
       } else if (mode === 'forgot') {
         const res = await forgotPassword(email)
-        setSuccessNotice("We've sent a secure reset link to your email.")
-        if (res?.reset_token) {
-          setGeneratedResetToken(res.reset_token)
-        }
+        setSuccessNotice(res?.message || "If an account exists with this email address, a password reset link has been sent. Please check your inbox.")
       } else if (mode === 'reset') {
         if (password !== confirmPassword) {
           setHasAuthFailure(true)
@@ -179,9 +175,8 @@ export default function Login({ initialMode = 'login' }) {
     } catch (err) {
       setHasAuthFailure(true)
       const errDetail = authError(err)
-      // If 401 or invalid credentials, show standard Figma message
-      if (err?.response?.status === 401 || errDetail.toLowerCase().includes('password') || errDetail.toLowerCase().includes('username') || errDetail.toLowerCase().includes('email')) {
-        setAuthErrorMessage('Incorrect Username or Password.')
+      if (err?.response?.status === 401) {
+        setAuthErrorMessage(errDetail || 'Incorrect Username or Password.')
       } else {
         setAuthErrorMessage(errDetail)
       }
@@ -488,15 +483,6 @@ export default function Login({ initialMode = 'login' }) {
                 <Check size={16} className="text-emerald-600 shrink-0 mt-0.5" />
                 <div className="space-y-1">
                   <div>{successNotice}</div>
-                  {generatedResetToken && mode === 'forgot' && (
-                    <button
-                      type="button"
-                      onClick={() => goToReset(generatedResetToken)}
-                      className="text-[#5B4EFF] underline font-semibold hover:text-[#4C3FF0] block pt-1"
-                    >
-                      Click here to reset your password now →
-                    </button>
-                  )}
                 </div>
               </div>
             )}

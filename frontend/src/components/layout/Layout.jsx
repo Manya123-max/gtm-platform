@@ -375,17 +375,21 @@ export default function Layout() {
                 title={user?.email || 'Authenticated User'}
               >
                 <div className="w-7 h-7 rounded-full bg-gradient-to-tr from-[#5B4EFF] to-[#A78BFA] flex items-center justify-center text-white text-xs font-bold shrink-0 shadow-2xs overflow-hidden">
-                  <img
-                    src={user?.avatar_url || '/avatar-shree.jpg'}
-                    alt="User Avatar"
-                    className="w-full h-full object-cover"
-                    onError={(e) => {
-                      e.currentTarget.style.display = 'none'
-                    }}
-                  />
+                  {user?.avatar_url ? (
+                    <img
+                      src={user.avatar_url}
+                      alt="User Avatar"
+                      className="w-full h-full object-cover"
+                      onError={(e) => {
+                        e.currentTarget.style.display = 'none'
+                      }}
+                    />
+                  ) : (
+                    <span>{(user?.name || user?.email || 'U')[0].toUpperCase()}</span>
+                  )}
                 </div>
                 <span className="text-xs font-bold text-gray-800 tracking-tight">
-                  {user?.name || 'P P Shree Lakshmi'}
+                  {user?.name || user?.email || 'User'}
                 </span>
               </div>
 

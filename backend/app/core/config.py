@@ -77,7 +77,7 @@ class Settings(BaseSettings):
     def validate_production_readiness(self) -> List[str]:
         """Validate production configuration and return a list of blocker messages."""
         errors: List[str] = []
-        is_prod = self.APP_ENV.lower() in {"prod", "production"} or not self.DEBUG
+        is_prod = self.APP_ENV.lower() in {"prod", "production"}
         if is_prod:
             if not self.APP_SECRET_KEY or self.APP_SECRET_KEY == "change-me":
                 errors.append("APP_SECRET_KEY must be set to a secure secret in production (cannot be 'change-me')")
@@ -113,6 +113,14 @@ class Settings(BaseSettings):
     @classmethod
     def assemble_db_connection(cls, v: Optional[str]) -> str:
         if isinstance(v, str):
+            import os, re
+            v = v.strip()
+            # Clean accidental duplicate env key prefixes (e.g. DATABASE_URL=postgresql...)
+            if v.startswith("DATABASE_URL="):
+                v = v.replace("DATABASE_URL=", "", 1).strip()
+            # If running on host (outside docker container) with docker service name 'db', map to host port
+            if "@db:5432" in v and not os.path.exists("/.dockerenv") and not os.environ.get("RENDER"):
+                v = v.replace("@db:5432", "@localhost:5433")
             if v.startswith("postgres://"):
                 v = v.replace("postgres://", "postgresql+asyncpg://", 1)
             elif v.startswith("postgresql://") and not v.startswith("postgresql+asyncpg://"):

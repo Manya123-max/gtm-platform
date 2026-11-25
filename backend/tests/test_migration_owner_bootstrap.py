@@ -156,6 +156,7 @@ async def test_bootstrap_missing_migration_owner_user():
         # Teardown test rows safely respecting foreign keys
         async with AsyncSessionLocal() as session:
             await session.execute(delete(Contact).where(Contact.id.in_([c_other_id, c_legacy_1_id, c_legacy_2_id])))
+            await session.execute(text("UPDATE contacts SET user_id = NULL WHERE user_id IN (SELECT id FROM users WHERE email IN (:o, :u))"), {"o": owner_email, "u": other_user_email})
             await session.execute(delete(UserInput).where(or_(UserInput.id.in_([u_other_input_id, u_legacy_input_id]), UserInput.user_id == other_user.id, UserInput.user_id == owner_id)))
             await session.execute(delete(WorkflowRun).where(WorkflowRun.id == wf_id))
             await session.execute(delete(RevenueForecast).where(RevenueForecast.id == rf_id))

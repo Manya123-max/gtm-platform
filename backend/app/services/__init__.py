@@ -526,6 +526,7 @@ class ResendService:
     async def send_email(
         self, to: str, subject: str, html: str,
         reply_to: Optional[str] = None,
+        is_transactional: bool = False,
     ) -> Optional[str]:
         """
         Send a single transactional email and return the Resend message id
@@ -536,10 +537,15 @@ class ResendService:
             logger.info("Resend not configured — email not sent", to=to)
             return None
 
-        target_email = getattr(settings, "TEST_EMAIL_OVERRIDE", None) or to
+        target_email = to if is_transactional else (getattr(settings, "TEST_EMAIL_OVERRIDE", None) or to)
+        sender = settings.RESEND_FROM_EMAIL or "onboarding@resend.dev"
+        # If configured with a public webmail domain (e.g. @gmail.com) without custom domain verification,
+        # Resend will reject with 403 Forbidden. Fall back to onboarding@resend.dev for delivery.
+        if "@gmail.com" in sender.lower() or "@yahoo.com" in sender.lower() or "@hotmail.com" in sender.lower():
+            sender = "onboarding@resend.dev"
 
         body = {
-            "from": settings.RESEND_FROM_EMAIL,
+            "from": sender,
             "to": [target_email],
             "subject": subject,
             "html": html,
@@ -547,7 +553,8 @@ class ResendService:
         if reply_to:
             body["reply_to"] = reply_to
         try:
-            async with httpx.AsyncClient(timeout=15) as client:
+            timeout_sec = 8 if is_transactional else 15
+            async with httpx.AsyncClient(timeout=timeout_sec) as client:
                 resp = await client.post(
                     "https://api.resend.com/emails",
                     headers={"Authorization": f"Bearer {settings.RESEND_API_KEY}",
@@ -567,7 +574,12 @@ class SMTPService:
     """Standard SMTP / Gmail email sender."""
 
     async def send_email(
-        self, to: str, subject: str, html: str, reply_to: Optional[str] = None
+        self,
+        to: str,
+        subject: str,
+        html: str,
+        reply_to: Optional[str] = None,
+        is_transactional: bool = False,
     ) -> Optional[str]:
         user = getattr(settings, "SMTP_USER", "")
         password = getattr(settings, "SMTP_PASSWORD", "")
@@ -576,33 +588,40 @@ class SMTPService:
             return None
 
         import os
+        import asyncio
         import smtplib
         import email.utils
         import re
         from email.mime.text import MIMEText
         from email.mime.multipart import MIMEMultipart
 
-        # Safety gate: Never dispatch real emails in test environments or when sending is disabled
+        # Safety gate:
+        # In automated test runs (pytest), never dispatch real external emails.
+        # For sales outreach (A3), check DRY_RUN_OUTREACH and ENABLE_EMAIL_SENDING.
+        # For transactional emails (password reset, account verification), dispatch directly.
         is_test_env = bool(
             os.environ.get("PYTEST_CURRENT_TEST")
-            or getattr(settings, "AGENT3_TEST_MODE", False)
-            or getattr(settings, "DRY_RUN_OUTREACH", False)
-            or not getattr(settings, "ENABLE_EMAIL_SENDING", False)
+            or (not is_transactional and (
+                getattr(settings, "AGENT3_TEST_MODE", False)
+                or getattr(settings, "DRY_RUN_OUTREACH", False)
+                or not getattr(settings, "ENABLE_EMAIL_SENDING", False)
+            ))
         )
         if is_test_env:
             logger.info(
                 "SMTPService: Live email sending suppressed (Safe/Test mode active)",
                 to=to,
                 subject=subject,
+                is_transactional=is_transactional,
                 enable_email_sending=getattr(settings, "ENABLE_EMAIL_SENDING", False),
             )
             return "mock_smtp_msg_ok"
 
-        target_email = getattr(settings, "TEST_EMAIL_OVERRIDE", None) or to
+        target_email = to if is_transactional else (getattr(settings, "TEST_EMAIL_OVERRIDE", None) or to)
         host = getattr(settings, "SMTP_HOST", "smtp.gmail.com")
         port = int(getattr(settings, "SMTP_PORT", 587))
         raw_from = getattr(settings, "SMTP_FROM_EMAIL", None) or user
-        from_header = f"ForceCloud Labs GTM <{raw_from}>" if "<" not in raw_from else raw_from
+        from_header = f"G2M Platform <{raw_from}>" if "<" not in raw_from else raw_from
 
         msg = MIMEMultipart("alternative")
         msg["Subject"] = subject
@@ -618,29 +637,34 @@ class SMTPService:
         msg.attach(MIMEText(plain_text, "plain", "utf-8"))
         msg.attach(MIMEText(html, "html", "utf-8"))
 
-        try:
-            recipients = [target_email]
-            if user.lower() not in [r.lower() for r in recipients]:
-                recipients.append(user)
+        recipients = [target_email]
+        if not is_transactional and user.lower() not in [r.lower() for r in recipients]:
+            recipients.append(user)
 
-            with smtplib.SMTP(host, port) as server:
+        def _sync_smtp_send():
+            timeout_sec = 7 if is_transactional else 20
+            with smtplib.SMTP(host, port, timeout=timeout_sec) as server:
                 server.starttls()
                 server.login(user, password)
                 server.sendmail(raw_from, recipients, msg.as_string())
-            
-            # Append message to Gmail [Gmail]/Sent Mail folder so it appears in Gmail UI Sent Mails
-            try:
-                import imaplib
-                import time
-                mail = imaplib.IMAP4_SSL("imap.gmail.com", 993)
-                mail.login(user, password)
-                mail.append('"[Gmail]/Sent Mail"', "\\Seen", imaplib.Time2Internaldate(time.time()), msg.as_bytes())
-                mail.logout()
-                logger.info("Appended sent email to Gmail Sent Mail folder", to=target_email)
-            except Exception as imap_ex:
-                logger.warning("Could not append email to Gmail Sent Mail folder", error=str(imap_ex))
 
-            logger.info("Email sent via SMTP", to=target_email)
+            # Only append outreach emails to Gmail [Gmail]/Sent Mail folder.
+            # Skip for transactional emails to prevent unnecessary IMAP roundtrips / latency.
+            if not is_transactional:
+                try:
+                    import imaplib
+                    import time
+                    mail = imaplib.IMAP4_SSL("imap.gmail.com", 993, timeout=10)
+                    mail.login(user, password)
+                    mail.append('"[Gmail]/Sent Mail"', "\\Seen", imaplib.Time2Internaldate(time.time()), msg.as_bytes())
+                    mail.logout()
+                    logger.info("Appended sent email to Gmail Sent Mail folder", to=target_email)
+                except Exception as imap_ex:
+                    logger.warning("Could not append email to Gmail Sent Mail folder", error=str(imap_ex))
+
+        try:
+            await asyncio.to_thread(_sync_smtp_send)
+            logger.info("Email sent via SMTP", to=target_email, subject=subject, is_transactional=is_transactional)
             return "smtp_msg_ok"
         except Exception as e:
             logger.error("SMTP send_email failed", to=target_email, error=str(e))

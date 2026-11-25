@@ -90,17 +90,20 @@ def create_refresh_token(user_id: str) -> str:
     )
 
 
-def create_reset_token(user_id: str) -> str:
+def create_reset_token(user_id: str, password_hash: Optional[str] = None) -> str:
     expire = datetime.now(timezone.utc) + timedelta(minutes=30)
+    payload = {"sub": str(user_id), "type": "reset", "exp": expire}
+    if password_hash:
+        payload["pwh"] = hashlib.sha256(password_hash.encode("utf-8")).hexdigest()[:16]
     return jwt.encode(
-        {"sub": str(user_id), "type": "reset", "exp": expire},
+        payload,
         _secret_key(),
         algorithm=settings.JWT_ALGORITHM,
     )
 
 
-def decode_token(token: str, expected_type: str = "access") -> str:
-    """Returns the user id encoded in the token, or raises 401."""
+def decode_token_payload(token: str, expected_type: str = "access") -> dict:
+    """Returns the decoded JWT payload or raises 401."""
     credentials_exception = HTTPException(
         status_code=status.HTTP_401_UNAUTHORIZED,
         detail="Could not validate credentials",
@@ -112,9 +115,15 @@ def decode_token(token: str, expected_type: str = "access") -> str:
         token_type: Optional[str] = payload.get("type")
         if user_id is None or token_type != expected_type:
             raise credentials_exception
-        return user_id
+        return payload
     except JWTError:
         raise credentials_exception
+
+
+def decode_token(token: str, expected_type: str = "access") -> str:
+    """Returns the user id encoded in the token, or raises 401."""
+    payload = decode_token_payload(token, expected_type=expected_type)
+    return str(payload["sub"])
 
 
 # ── FastAPI dependency ──────────────────────────────────────────────────────
@@ -134,9 +143,17 @@ async def get_current_user(
         from app.models.models import User
 
         user_id = decode_token(credentials.credentials, expected_type="access")
-        user = await db.get(User, user_id)
+        try:
+            user = await db.get(User, user_id)
+        except Exception:
+            raise HTTPException(
+                status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                detail="Database is temporarily unavailable. Please try again shortly.",
+            )
+
         if user is not None and user.is_active:
             return user
+
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail="Could not validate credentials",

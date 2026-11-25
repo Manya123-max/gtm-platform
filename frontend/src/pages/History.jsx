@@ -14,6 +14,7 @@ import {
   X,
   History as HistoryIcon,
   Edit2,
+  Users,
 } from 'lucide-react'
 import { fetchInputHistory, deleteInputHistory, deleteAllInputHistory } from '../api'
 import { useSession } from '../context/SessionContext'
@@ -46,6 +47,8 @@ export default function History() {
     data: history = [],
     isLoading,
     isError,
+    error,
+    refetch,
   } = useQuery({
     queryKey: ['input-history', user?.id],
     queryFn: fetchInputHistory,
@@ -141,6 +144,11 @@ export default function History() {
     const start = (currentPage - 1) * pageSize
     return filteredAndSortedHistory.slice(start, start + pageSize)
   }, [filteredAndSortedHistory, currentPage, pageSize])
+
+  const handleViewResults = (item) => {
+    setActiveSession(item)
+    navigate('/contacts')
+  }
 
   const handleEditAndResearch = (item) => {
     setActiveSession(item)
@@ -274,8 +282,15 @@ export default function History() {
 
       {/* Error State */}
       {isError && (
-        <div className="p-4 rounded-xl bg-red-50 border border-red-200 text-red-600 text-xs">
-          Failed to load history. Please try refreshing.
+        <div className="p-4 rounded-xl bg-red-50 border border-red-200 text-red-600 text-xs flex items-center justify-between">
+          <span>{error?.message || 'Failed to load history. Please try refreshing.'}</span>
+          <button
+            type="button"
+            onClick={() => refetch()}
+            className="px-3 py-1 bg-white border border-red-200 text-red-700 rounded-lg hover:bg-red-100 transition-colors cursor-pointer font-medium ml-3 shrink-0"
+          >
+            Retry
+          </button>
         </div>
       )}
 
@@ -300,9 +315,9 @@ export default function History() {
             return (
               <div
                 key={item.id}
-                onClick={() => handleEditAndResearch(item)}
+                onClick={() => handleViewResults(item)}
                 className="bg-white rounded-2xl border border-gray-200/90 hover:border-indigo-300 hover:shadow-sm shadow-2xs p-5 transition-all cursor-pointer group"
-                title="Click anywhere to load this search criteria into the Input form"
+                title="Click to view search results, or use the buttons to View Results / Edit Search"
               >
                 {/* Card Top Row: Company Icon + Name + Size pill + Badges/Actions */}
                 <div className="flex items-center justify-between mb-4">
@@ -321,14 +336,30 @@ export default function History() {
                   </div>
 
                   <div className="flex items-center gap-2">
-                    {/* Active badge & Edit/Load Search button */}
+                    {/* Active badge */}
                     {active && (
                       <span className="bg-[#ECFDF5] text-[#059669] border border-[#A7F3D0] text-[11px] font-semibold px-2.5 py-0.5 rounded-full inline-flex items-center">
                         Active
                       </span>
                     )}
 
+                    {/* View Results Button */}
                     <button
+                      type="button"
+                      onClick={(e) => {
+                        e.stopPropagation()
+                        handleViewResults(item)
+                      }}
+                      className="text-[#059669] bg-[#ECFDF5] hover:bg-emerald-100 border border-[#A7F3D0] text-[11px] font-medium px-3 py-0.5 rounded-full transition-colors cursor-pointer inline-flex items-center gap-1.5"
+                      title="View prospects and results from this search"
+                    >
+                      <Users size={11} />
+                      <span>View Results</span>
+                    </button>
+
+                    {/* Edit Search Button */}
+                    <button
+                      type="button"
                       onClick={(e) => {
                         e.stopPropagation()
                         handleEditAndResearch(item)
@@ -341,7 +372,7 @@ export default function History() {
                       title="Load this search into the input form to edit and re-search"
                     >
                       <Edit2 size={11} />
-                      <span>{active ? 'Edit & Re-search' : 'View & Edit Search'}</span>
+                      <span>{active ? 'Edit & Re-search' : 'Edit Search'}</span>
                     </button>
 
                     {/* ID Pill Badge */}

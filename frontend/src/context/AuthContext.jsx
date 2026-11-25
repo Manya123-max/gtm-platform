@@ -25,11 +25,48 @@ function clearTokens() {
   localStorage.removeItem(REFRESH_KEY)
 }
 
-function authError(error) {
-  const detail = error?.response?.data?.detail
+export function authError(error) {
+  if (error?.code === 'ECONNABORTED' || error?.message?.includes('timeout')) {
+    return 'Request timed out. Please check your connection and try again.'
+  }
+  if (error?.code === 'ERR_NETWORK' || error?.message === 'Network Error' || !error?.response) {
+    return 'Cannot connect to backend server. The service may be offline or starting up (Render free tier wakes in ~40s).'
+  }
+
+  const status = error?.response?.status
+  const data = error?.response?.data
+  const detail = data?.detail
+
+  if (status === 401) {
+    if (typeof detail === 'string') return detail
+    return 'Incorrect Username or Password.'
+  }
+
+  if (status === 422) {
+    if (Array.isArray(detail)) {
+      return detail.map(i => i?.msg || String(i)).join(', ')
+    }
+    if (typeof detail === 'string') return detail
+    return 'Validation error. Please verify your inputs.'
+  }
+
+  if (status === 502 || status === 504) {
+    return 'Backend server is waking up or temporarily unavailable. Please wait 30 seconds and try again.'
+  }
+
+  if (status === 503) {
+    if (typeof detail === 'string') return detail
+    return 'Service temporarily unavailable. Please try again shortly.'
+  }
+
+  if (status >= 500) {
+    return 'An internal server error occurred. Please try again later.'
+  }
+
   if (typeof detail === 'string') return detail
   if (Array.isArray(detail)) return detail.map(i => i?.msg || String(i)).join(', ')
-  return 'Something went wrong. Please try again.'
+
+  return data?.message || 'Something went wrong. Please check your connection and try again.'
 }
 
 const AuthContext = createContext(null)

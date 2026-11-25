@@ -25,7 +25,7 @@ logger = structlog.get_logger()
 async def lifespan(app: FastAPI):
     """Startup and shutdown."""
     prod_errors = settings.validate_production_readiness()
-    if prod_errors and (settings.APP_ENV.lower() in {"prod", "production"} or not settings.DEBUG):
+    if prod_errors and settings.APP_ENV.lower() in {"prod", "production"}:
         for err in prod_errors:
             logger.error("Production configuration error", error=err)
         raise RuntimeError(f"Production configuration validation failed: {'; '.join(prod_errors)}")
@@ -66,6 +66,19 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+from sqlalchemy.exc import SQLAlchemyError
+
+@app.exception_handler(SQLAlchemyError)
+async def sqlalchemy_exception_handler(request: Request, exc: SQLAlchemyError):
+    logger.error("Database query error", path=request.url.path, error=str(exc))
+    return JSONResponse(
+        status_code=503,
+        content={
+            "detail": "Database is temporarily unavailable or unreachable. Please verify database connection or wait a moment for database wake-up.",
+            "error_type": type(exc).__name__,
+        },
+    )
  
 # ── API Routes ────────────────────────────────────────────────────────────
 from app.api.v1.auth import auth_router
@@ -251,8 +264,17 @@ async def slack_actions(request: Request, background_tasks: BackgroundTasks):
  
  
 @app.get("/health")
+@app.get("/api/v1/health")
 async def health():
-    return {"status": "healthy", "env": settings.APP_ENV}
+    from app.core.database import get_database_status
+    stat = get_database_status()
+    is_connected = stat.get("connected", False)
+    return {
+        "status": "healthy" if is_connected else "degraded",
+        "database": "connected" if is_connected else "disconnected",
+        "database_error": stat.get("error"),
+        "env": settings.APP_ENV,
+    }
  
  
 # ── Background task helpers ───────────────────────────────────────────────

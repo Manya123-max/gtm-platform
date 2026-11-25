@@ -300,12 +300,21 @@ async def get_active_session(current_user=Depends(get_current_user), db: AsyncSe
     """Returns the most recent user_input id — the current active session."""
     from app.models.models import UserInput
     from sqlalchemy import or_
-    stmt = select(UserInput.id).order_by(UserInput.id.desc())
-    if current_user is not None:
-        stmt = stmt.where(UserInput.user_id == current_user.id)
-    result = await db.execute(stmt.limit(1))
-    row = result.scalar_one_or_none()
-    return {"user_input_id": row}
+    import asyncio
+    try:
+        stmt = select(UserInput.id).order_by(UserInput.id.desc())
+        if current_user is not None:
+            user_id_val = str(current_user.id)
+            is_admin = getattr(current_user, "role", "").upper() == "ADMIN"
+            if is_admin:
+                stmt = stmt.where(or_(UserInput.user_id == user_id_val, UserInput.user_id.is_(None)))
+            else:
+                stmt = stmt.where(UserInput.user_id == user_id_val)
+        result = await asyncio.wait_for(db.execute(stmt.limit(1)), timeout=3.0)
+        row = result.scalar_one_or_none()
+        return {"user_input_id": row}
+    except Exception:
+        return {"user_input_id": None}
 
 
 @router.get("/sessions/{session_id}")
@@ -1728,26 +1737,41 @@ async def get_input_history(current_user=Depends(get_current_user), db: AsyncSes
     """Return all past intake form submissions (newest first)."""
     from app.models.models import UserInput
     from sqlalchemy import select, or_
-    stmt = select(UserInput)
-    if current_user is not None:
-        stmt = stmt.where(UserInput.user_id == current_user.id)
-    stmt = stmt.order_by(UserInput.id.desc()).limit(50)
-    result = await db.execute(stmt)
-    rows = result.scalars().all()
+    import asyncio
+
+    try:
+        stmt = select(UserInput)
+        if current_user is not None:
+            user_id_val = str(current_user.id)
+            is_admin = getattr(current_user, "role", "").upper() == "ADMIN"
+            if is_admin:
+                stmt = stmt.where(or_(UserInput.user_id == user_id_val, UserInput.user_id.is_(None)))
+            else:
+                stmt = stmt.where(UserInput.user_id == user_id_val)
+        stmt = stmt.order_by(UserInput.id.desc()).limit(50)
+        result = await asyncio.wait_for(db.execute(stmt), timeout=5.0)
+        rows = result.scalars().all()
+    except Exception as exc:
+        logger.error("Could not load input history from database", error=str(exc))
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="Database is temporarily unavailable. Please try again shortly.",
+        )
+
     return [
         {
             "id":                  r.id,
-            "our_company_name":    r.our_company_name,
-            "our_services":        r.our_services,
-            "target_location":     r.target_location,
+            "our_company_name":    getattr(r, "our_company_name", "") or "",
+            "our_services":        r.our_services or "",
+            "target_location":     r.target_location or "",
             "target_industries":   r.target_industries or "",
-            "target_company_size": r.target_company_size,
+            "target_company_size": r.target_company_size or "",
             "target_keywords":     r.target_keywords or "",
             "company_lookalike":   getattr(r, "company_lookalike", None) or "",
             "signals":             getattr(r, "signals", None) or "",
             "funding_stages":      getattr(r, "funding_stages", None) or "",
-            "target_job_titles":   r.target_job_titles,
-            "created_at":          r.created_at.isoformat() if getattr(r, "created_at", None) else None,
+            "target_job_titles":   r.target_job_titles or "",
+            "created_at":          r.created_at.isoformat() if hasattr(getattr(r, "created_at", None), "isoformat") else str(r.created_at) if getattr(r, "created_at", None) else None,
         }
         for r in rows
     ]
@@ -1807,7 +1831,8 @@ async def delete_input_history(
         raise HTTPException(status_code=404, detail=f"Search history #{input_id} not found")
 
     # Strict multi-user authorization check
-    if record.user_id is not None and record.user_id != current_user.id:
+    is_admin = getattr(current_user, "role", "").upper() == "ADMIN"
+    if record.user_id != current_user.id and not (is_admin and record.user_id is None):
         raise HTTPException(status_code=403, detail="You are not authorized to delete another user's search history")
 
     # Delete contact association rows for this user input
@@ -1841,12 +1866,15 @@ async def delete_all_input_history(
     if current_user is None:
         raise HTTPException(status_code=401, detail="Authentication required")
 
-    # Find all user_input IDs owned by this user or global/unassigned
-    result = await db.execute(
-        select(UserInput.id).where(
+    # Find all user_input IDs owned by this user (or global/unassigned for admins)
+    is_admin = getattr(current_user, "role", "").upper() == "ADMIN"
+    if is_admin:
+        stmt = select(UserInput.id).where(
             or_(UserInput.user_id == current_user.id, UserInput.user_id.is_(None))
         )
-    )
+    else:
+        stmt = select(UserInput.id).where(UserInput.user_id == current_user.id)
+    result = await db.execute(stmt)
     input_ids = result.scalars().all()
 
     if not input_ids:

@@ -365,11 +365,12 @@ class CompanyLookalikeService:
         seed_companies: List[str],
         icp_config: Dict[str, Any],
         target_count: int = 15,
+        use_llm: Optional[bool] = None,
     ) -> Dict[str, Any]:
         """
         Stage 1: Discover similar organizations (lookalikes) for the provided seed companies.
         1. Resolves seed reference companies to Apollo organization records.
-        2. Discovers direct peers and competitors using LLM Market Intelligence + Apollo Org Search.
+        2. Discovers direct peers and competitors (pure API search by default, optional LLM when enabled).
         3. Excludes the seed reference companies themselves.
         4. Resolves and validates discovered peer companies against Apollo's organization database.
         5. Returns structured list of verified lookalike organizations and their organization_ids.
@@ -384,41 +385,44 @@ class CompanyLookalikeService:
 
         candidate_peers: List[Dict[str, Any]] = []
 
-        # ── Track 1: LLM Market Intelligence Competitor Discovery ──
-        try:
-            from app.services.llm_service import LLMService
-            llm = LLMService()
-            system_prompt = (
-                "You are an expert B2B market researcher and competitor intelligence system. "
-                "Given reference/seed company names and target market criteria, identify 10 to 15 real, active "
-                "direct competitors and lookalike companies in the exact same industry and business domain. "
-                "Output ONLY a valid JSON array of objects with keys 'name' and 'domain' (e.g. [{\"name\": \"Dynatrace\", \"domain\": \"dynatrace.com\"}]). "
-                "Strictly exclude the seed companies themselves. Do NOT include markdown code blocks or explanations."
-            )
-            user_prompt = f"Seed Companies: {', '.join(seed_companies)}\n"
-            if icp_config.get("target_industries"):
-                user_prompt += f"Target Industry: {icp_config.get('target_industries')}\n"
-            if icp_config.get("target_company_size"):
-                user_prompt += f"Target Company Size: {icp_config.get('target_company_size')}\n"
-            if icp_config.get("target_location"):
-                user_prompt += f"Target Location: {icp_config.get('target_location')}\n"
-            if icp_config.get("target_keywords"):
-                user_prompt += f"Target Keywords: {icp_config.get('target_keywords')}\n"
+        # ── Track 1: LLM Market Intelligence Competitor Discovery (Optional) ──
+        # In production pipeline (a1_prospect), use_llm=False is passed for pure API-driven search.
+        should_use_llm = use_llm if use_llm is not None else icp_config.get("use_llm_lookalike", True)
+        if should_use_llm:
+            try:
+                from app.services.llm_service import LLMService
+                llm = LLMService()
+                system_prompt = (
+                    "You are an expert B2B market researcher and competitor intelligence system. "
+                    "Given reference/seed company names and target market criteria, identify 10 to 15 real, active "
+                    "direct competitors and lookalike companies in the exact same industry and business domain. "
+                    "Output ONLY a valid JSON array of objects with keys 'name' and 'domain' (e.g. [{\"name\": \"Dynatrace\", \"domain\": \"dynatrace.com\"}]). "
+                    "Strictly exclude the seed companies themselves. Do NOT include markdown code blocks or explanations."
+                )
+                user_prompt = f"Seed Companies: {', '.join(seed_companies)}\n"
+                if icp_config.get("target_industries"):
+                    user_prompt += f"Target Industry: {icp_config.get('target_industries')}\n"
+                if icp_config.get("target_company_size"):
+                    user_prompt += f"Target Company Size: {icp_config.get('target_company_size')}\n"
+                if icp_config.get("target_location"):
+                    user_prompt += f"Target Location: {icp_config.get('target_location')}\n"
+                if icp_config.get("target_keywords"):
+                    user_prompt += f"Target Keywords: {icp_config.get('target_keywords')}\n"
 
-            llm_resp = await llm.complete(system=system_prompt, user=user_prompt, max_tokens=600)
-            clean_resp = re.sub(r"^```(?:json)?\s*", "", llm_resp.strip())
-            clean_resp = re.sub(r"\s*```$", "", clean_resp.strip())
-            parsed = json.loads(clean_resp)
-            if isinstance(parsed, list):
-                for p in parsed:
-                    if isinstance(p, dict) and p.get("name"):
-                        candidate_peers.append({
-                            "name": p["name"].strip(),
-                            "domain": (p.get("domain") or "").strip().lower(),
-                            "source": "market_intelligence",
-                        })
-        except Exception as llm_err:
-            logger.info("CompanyLookalikeService: LLM competitor discovery skipped or fallback", error=str(llm_err))
+                llm_resp = await llm.complete(system=system_prompt, user=user_prompt, max_tokens=600)
+                clean_resp = re.sub(r"^```(?:json)?\s*", "", llm_resp.strip())
+                clean_resp = re.sub(r"\s*```$", "", clean_resp.strip())
+                parsed = json.loads(clean_resp)
+                if isinstance(parsed, list):
+                    for p in parsed:
+                        if isinstance(p, dict) and p.get("name"):
+                            candidate_peers.append({
+                                "name": p["name"].strip(),
+                                "domain": (p.get("domain") or "").strip().lower(),
+                                "source": "market_intelligence",
+                            })
+            except Exception as llm_err:
+                logger.info("CompanyLookalikeService: LLM competitor discovery skipped or fallback", error=str(llm_err))
 
         # ── Track 2: Apollo Organization Search ──
         try:

@@ -461,6 +461,7 @@ class ProspectAgent:
                     seed_companies=seed_companies,
                     icp_config=icp_config,
                     target_count=15,
+                    use_llm=False,  # Enforce pure API-driven lookalike search, no LLM guessing
                 )
                 discovered_orgs = discovery.get("discovered_organizations", [])
                 discovered_org_ids = discovery.get("organization_ids", [])
@@ -480,10 +481,11 @@ class ProspectAgent:
 
                 # ── STAGE 2: Search Prospects Inside Discovered Similar Organizations ──
                 body = self._build_search_body(icp_config, page=1, per_page=100)
-                if discovered_org_ids:
-                    body["organization_ids"] = discovered_org_ids[:15]
                 if resolved_org_ids:
+                    # Native Apollo lookalike algorithm anchored to seed companies
                     body["lookalike_organization_ids"] = resolved_org_ids[:5]
+                elif discovered_org_ids:
+                    body["organization_ids"] = discovered_org_ids[:15]
 
                 search_resp = await client.post(
                     "https://api.apollo.io/api/v1/mixed_people/api_search",
@@ -494,6 +496,7 @@ class ProspectAgent:
                 search_data = search_resp.json()
 
                 people = search_data.get("people") or search_data.get("contacts") or []
+                actual_discovered_orgs = []
                 if not people:
                     return [], {
                         "provider": "apollo",
@@ -502,6 +505,24 @@ class ProspectAgent:
                         "discovered_organizations": [o["name"] for o in discovered_orgs],
                         **resolution,
                     }
+
+                # Extract verified lookalike organizations directly from discovered people
+                seen_org_ids = set()
+                for p in people:
+                    org = p.get("organization") or {}
+                    o_name = org.get("name")
+                    o_id = org.get("id")
+                    if o_name and o_name.lower() not in seed_company_names and o_id not in seen_org_ids:
+                        seen_org_ids.add(o_id)
+                        actual_discovered_orgs.append({
+                            "organization_id": o_id,
+                            "name": o_name,
+                            "domain": org.get("primary_domain") or org.get("website_url") or "",
+                            "industry": org.get("industry") or "",
+                            "employee_count": org.get("estimated_num_employees"),
+                            "matched_seeds": list(seed_companies),
+                            "source": "apollo_lookalike_discovery",
+                        })
 
                 # 3. Pre-score stubs
                 stub_scored: List[Tuple[float, Dict]] = []
@@ -523,7 +544,7 @@ class ProspectAgent:
                         "provider": "apollo",
                         "method": "lookalike_people_search",
                         "reason": "all_lookalike_candidates_already_in_db",
-                        "discovered_organizations": [o["name"] for o in discovered_orgs],
+                        "discovered_organizations": [o["name"] for o in (actual_discovered_orgs or discovered_orgs)],
                         **resolution,
                     }
 
@@ -579,7 +600,7 @@ class ProspectAgent:
                     "method": "lookalike_people_search",
                     "count": len(contacts),
                     "reason": "lookalike_contacts_found" if contacts else "lookalike_bulk_match_no_emails",
-                    "discovered_organizations": [o["name"] for o in discovered_orgs],
+                    "discovered_organizations": [o["name"] for o in (actual_discovered_orgs or discovered_orgs)],
                     **resolution,
                 }
 

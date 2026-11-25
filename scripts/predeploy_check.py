@@ -8,6 +8,7 @@ import os
 import re
 import sys
 import subprocess
+import shutil
 import py_compile
 from pathlib import Path
 
@@ -108,10 +109,17 @@ def check_docker_and_render_config():
         return
 
     df_content = dockerfile.read_text(encoding="utf-8")
+    run_server_py = BACKEND_DIR / "run_server.py"
     if "uvicorn app.main:app" in df_content and "PORT" in df_content:
         record_pass("backend Dockerfile entrypoint", "Uvicorn configured with dynamic Render $PORT support")
+    elif "run_server.py" in df_content and run_server_py.exists():
+        rs_content = run_server_py.read_text(encoding="utf-8")
+        if "app.main:app" in rs_content and "PORT" in rs_content:
+            record_pass("backend Dockerfile entrypoint", "run_server.py supervisor configured with dynamic Render $PORT and Uvicorn support")
+        else:
+            record_fail("backend Dockerfile entrypoint", "run_server.py missing dynamic $PORT binding or app.main:app target")
     else:
-        record_fail("backend Dockerfile entrypoint", "Missing dynamic $PORT binding in Dockerfile CMD")
+        record_fail("backend Dockerfile entrypoint", "Missing dynamic $PORT binding in Dockerfile CMD or run_server.py supervisor")
 
     # Check render.yaml
     render_yaml = REPO_ROOT / "render.yaml"
@@ -156,6 +164,8 @@ def check_docker_compose_syntax():
         res = subprocess.run(["docker", "compose", "config", "-q"], cwd=str(REPO_ROOT), capture_output=True, text=True, timeout=15)
         if res.returncode == 0:
             record_pass("docker-compose config", "docker-compose.yml syntax is valid")
+        elif "permission denied" in res.stderr.lower() or "access is denied" in res.stderr.lower() or "unknown shorthand flag" in res.stderr.lower():
+            record_warn("docker-compose config", f"Docker daemon/CLI not accessible or compose v2 flag unsupported: {res.stderr.strip()[:100]}")
         else:
             record_fail("docker-compose config", res.stderr.strip() or "Syntax error in docker-compose.yml")
     except Exception as e:
@@ -169,8 +179,10 @@ def check_backend_tests():
     try:
         # Check if docker gtm_backend container is running
         ps = subprocess.run(["docker", "ps", "--filter", "name=gtm_backend", "--format", "{{.Names}}"], capture_output=True, text=True, timeout=5)
-        if "gtm_backend" in ps.stdout:
-            test_cmd = ["docker", "exec", "gtm_backend", "python", "-m", "pytest", "tests/test_startup_and_deployment_config.py", "tests/test_tiering_and_prospect_prioritization.py", "tests/test_migration_owner_bootstrap.py", "-q"]
+        if ps.returncode == 0 and "gtm_backend" in ps.stdout:
+            pt_in_docker = subprocess.run(["docker", "exec", "gtm_backend", "python", "-m", "pytest", "--version"], capture_output=True, text=True, timeout=5)
+            if pt_in_docker.returncode == 0:
+                test_cmd = ["docker", "exec", "gtm_backend", "python", "-m", "pytest", "tests/test_startup_and_deployment_config.py", "tests/test_tiering_and_prospect_prioritization.py", "tests/test_migration_owner_bootstrap.py", "-q"]
     except Exception:
         pass
 
@@ -214,24 +226,28 @@ def check_frontend_build():
     # Ensure dependencies are installed via npm ci before building
     node_modules_dir = FRONTEND_DIR / "node_modules"
     is_windows = sys.platform.startswith("win")
-    npm_cmd = "npm.cmd" if is_windows else "npm"
+    npm_path = shutil.which("npm") or shutil.which("npm.cmd")
+    npm_cmd = npm_path or ("npm.cmd" if is_windows else "npm")
 
-    if not node_modules_dir.exists():
-        print("  Installing frontend dependencies with npm ci...")
-        ci_res = subprocess.run([npm_cmd, "ci"], cwd=str(FRONTEND_DIR), capture_output=True, text=True, timeout=120)
-        if ci_res.returncode != 0:
-            record_fail("frontend npm ci", ci_res.stderr.strip() or ci_res.stdout.strip()[:300])
-            return
+    if not npm_path:
+        record_warn("frontend build", "Node.js/npm not installed in host PATH; build step skipped locally (runs in Docker/CI)")
+    else:
+        if not node_modules_dir.exists():
+            print("  Installing frontend dependencies with npm ci...")
+            ci_res = subprocess.run([npm_cmd, "ci"], cwd=str(FRONTEND_DIR), capture_output=True, text=True, timeout=120, shell=is_windows)
+            if ci_res.returncode != 0:
+                record_fail("frontend npm ci", ci_res.stderr.strip() or ci_res.stdout.strip()[:300])
+                return
 
-    # Run npm run build
-    try:
-        res = subprocess.run([npm_cmd, "run", "build"], cwd=str(FRONTEND_DIR), capture_output=True, text=True, timeout=120)
-        if res.returncode == 0:
-            record_pass("frontend build", "Vite production build completed successfully with 0 errors")
-        else:
-            record_fail("frontend build", res.stderr.strip() or res.stdout.strip()[:300])
-    except Exception as e:
-        record_fail("frontend build", f"Failed to execute npm run build: {e}")
+        # Run npm run build
+        try:
+            res = subprocess.run([npm_cmd, "run", "build"], cwd=str(FRONTEND_DIR), capture_output=True, text=True, timeout=120, shell=is_windows)
+            if res.returncode == 0:
+                record_pass("frontend build", "Vite production build completed successfully with 0 errors")
+            else:
+                record_fail("frontend build", res.stderr.strip() or res.stdout.strip()[:300])
+        except Exception as e:
+            record_fail("frontend build", f"Failed to execute npm run build: {e}")
 
     # Check dist output for leaked credentials
     dist_dir = FRONTEND_DIR / "dist"
